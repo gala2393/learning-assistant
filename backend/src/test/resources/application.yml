@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:learning_assistant_test;MODE=MySQL;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+
+app:
+  ocr:
+    enabled: ${TEST_OCR_ENABLED:false}
+    command-template: ${TEST_OCR_COMMAND_TEMPLATE:}
+    timeout: 5s
+  document-preview:
+    converter:
+      enabled: false

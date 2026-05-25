@@ -1,0 +1,15 @@
+backend/.env.local
+backend/.env
+backend/*.log
+backend/target/
+backend/.m2/
+backend/data/
+backend/tools/
+
+frontend/.env.local
+frontend/*.log
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+upload-package/
