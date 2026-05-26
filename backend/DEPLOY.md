@@ -24,7 +24,7 @@ MYSQL_PASSWORD=<MYSQL_PASSWORD>
 
 APP_AUTH_SECRET=<long-random-secret>
 APP_STORAGE_DIR=/data/learning-assistant-files
-APP_CORS_ALLOWED_ORIGINS=https://<your-vercel-domain>,https://<your-project>.vercel.app
+APP_CORS_ALLOWED_ORIGINS=https://<your-vercel-domain>,https://<your-project>.vercel.app,https://*.vercel.app
 
 EMAIL_CODE_ENABLED=true
 EMAIL_CODE_DEFAULT_PROVIDER=qq

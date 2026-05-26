@@ -30,7 +30,7 @@ MYSQL_PASSWORD=<MYSQL_PASSWORD>
 
 APP_AUTH_SECRET=<long-random-secret>
 APP_STORAGE_DIR=/data/learning-assistant-files
-APP_CORS_ALLOWED_ORIGINS=https://<your-vercel-domain>
+APP_CORS_ALLOWED_ORIGINS=https://<your-vercel-domain>,https://*.vercel.app
 
 EMAIL_CODE_ENABLED=true
 EMAIL_CODE_DEFAULT_PROVIDER=qq
@@ -88,5 +88,5 @@ After both deployments finish:
 
 - No real `.env`, `.env.local`, SMTP authorization code, or LLM key is committed.
 - `APP_AUTH_SECRET` is long and random.
-- `APP_CORS_ALLOWED_ORIGINS` contains the final Vercel domain.
+- `APP_CORS_ALLOWED_ORIGINS` contains the final Vercel domain, or `https://*.vercel.app` if you use Vercel preview deployments.
 - SMTP passwords are authorization codes, not mailbox login passwords.
