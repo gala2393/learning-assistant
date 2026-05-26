@@ -13,3 +13,5 @@ frontend/dist/
 frontend/tsconfig.tsbuildinfo
 
 upload-package/
+
+.vercel
