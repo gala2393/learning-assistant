@@ -7,6 +7,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { chatStream, suggestQuestions } from '@/api/rag'
 import { ChatThread, type ChatMessage } from './ChatThread'
 import { Send, Bot, ArrowRight, MousePointer, Sparkles, Trash2 } from 'lucide-react'
+import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
 import { truncate } from '@/lib/utils'
 import type { Material, MaterialChunk, RagSource } from '@/types'
 
@@ -49,6 +50,7 @@ export function ReaderAsk({
   const [messages, setMessages] = useState<ReaderMessage[]>([])
   const [sourcesByMessageId, setSourcesByMessageId] = useState<Record<string, RagSource[]>>({})
   const [errorByMessageId, setErrorByMessageId] = useState<Record<string, string>>({})
+  const canAsk = question.trim().length > 0 && !loading && !!material
 
   const contextLabel = useMemo(
     () => buildContextLabel(selectedText, currentPageNo),
@@ -289,9 +291,9 @@ export function ReaderAsk({
         <div className="flex items-center gap-2">
           <Button
             size="sm"
-            className="h-9 flex-1 rounded-xl bg-[#1f8fd6] text-white shadow-[0_10px_18px_rgba(31,143,214,0.22)] transition-all hover:-translate-y-0.5 hover:bg-[#197fbe] hover:shadow-[0_14px_24px_rgba(31,143,214,0.28)]"
+            className={`h-9 flex-1 rounded-xl ${actionButtonBase} ${canAsk ? actionButtonReady : actionButtonIdle}`}
             onClick={handleSubmit}
-            disabled={!question.trim() || loading || !material}
+            disabled={!canAsk}
           >
             {loading ? '思考中...' : (
               <>

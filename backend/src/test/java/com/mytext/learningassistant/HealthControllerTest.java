@@ -22,5 +22,13 @@ class HealthControllerTest {
             .andExpect(jsonPath("$.status").value("ok"))
             .andExpect(jsonPath("$.service").value("learning-assistant"));
     }
-}
 
+    @Test
+    void returnsRootStatus() throws Exception {
+        mockMvc.perform(get("/"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("ok"))
+            .andExpect(jsonPath("$.service").value("learning-assistant"))
+            .andExpect(jsonPath("$.message").value("backend is running"));
+    }
+}

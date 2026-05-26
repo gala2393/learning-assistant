@@ -24,6 +24,9 @@ public class RagQuestionEntity {
     @Column(name = "user_id", nullable = false)
     private Long userId;
 
+    @Column(name = "conversation_id")
+    private Long conversationId;
+
     @Column(name = "question_text", columnDefinition = "TEXT", nullable = false)
     private String questionText;
 
@@ -80,6 +83,14 @@ public class RagQuestionEntity {
 
     public void setUserId(Long userId) {
         this.userId = userId;
+    }
+
+    public Long getConversationId() {
+        return conversationId;
+    }
+
+    public void setConversationId(Long conversationId) {
+        this.conversationId = conversationId;
     }
 
     public String getQuestionText() {

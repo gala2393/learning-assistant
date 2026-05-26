@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { SESSION_KEY } from '@/constants'
-import type { Session, LoginPayload, PasswordPayload, ProfilePayload, RegisterPayload } from '@/types'
+import type { EmailLoginPayload, Session, LoginPayload, PasswordPayload, ProfilePayload, RegisterPayload } from '@/types'
 import {
+  emailLogin as emailLoginApi,
   login as loginApi,
   register as registerApi,
   getMe,
@@ -16,6 +17,7 @@ interface AuthContextValue {
   isAdmin: boolean
   isLoading: boolean
   login: (payload: LoginPayload) => Promise<void>
+  emailLogin: (payload: EmailLoginPayload) => Promise<void>
   register: (payload: RegisterPayload) => Promise<void>
   updateProfile: (payload: ProfilePayload) => Promise<void>
   updatePassword: (payload: PasswordPayload) => Promise<void>
@@ -88,12 +90,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSession(normalized)
   }, [])
 
+  const emailLogin = useCallback(async (payload: EmailLoginPayload) => {
+    const data = await emailLoginApi(payload)
+    const normalized = normalizeSession(data as AuthUserPayload, {
+      username: payload.email,
+      nickname: payload.email,
+    })
+    saveSession(normalized)
+    setSession(normalized)
+  }, [])
+
   const register = useCallback(async (payload: RegisterPayload) => {
     const data = await registerApi(payload)
     const loginData = await loginApi({ username: payload.username, password: payload.password })
     const normalized = normalizeSession(loginData as AuthUserPayload, {
       username: data.username || payload.username,
-      nickname: data.nickname || payload.nickname,
+      nickname: data.nickname || payload.username,
     })
     saveSession(normalized)
     setSession(normalized)
@@ -130,6 +142,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isAdmin: session?.role === 'ADMIN',
         isLoading,
         login,
+        emailLogin,
         register,
         updateProfile,
         updatePassword,

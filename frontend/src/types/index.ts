@@ -29,10 +29,23 @@ export interface LoginPayload {
   password: string
 }
 
+export interface EmailLoginPayload {
+  email: string
+  code: string
+}
+
 export interface RegisterPayload {
+  email: string
   username: string
-  nickname: string
   password: string
+  confirmPassword: string
+  code: string
+}
+
+export interface ResetPasswordPayload {
+  email: string
+  code: string
+  newPassword: string
   confirmPassword: string
 }
 
@@ -89,6 +102,7 @@ export interface ChatPayload {
   mode: 'GENERAL' | 'MATERIAL'
   materialId?: string
   answerStyle?: 'STUDY' | 'HOMEWORK'
+  conversationId?: string | number | null
 }
 
 export interface StreamChatPayload {
@@ -101,6 +115,7 @@ export interface StreamChatPayload {
   selectedText?: string
   answerStyle?: 'STUDY' | 'HOMEWORK'
   history?: { role: string; content: string }[]
+  conversationId?: string | number | null
 }
 
 export interface RagSource {
@@ -114,6 +129,7 @@ export interface RagSource {
 
 export interface HistoryItem {
   id: string
+  conversationId?: string | null
   title?: string | null
   question: string
   answer: string
@@ -121,15 +137,26 @@ export interface HistoryItem {
   favoriteId: string | null
   favorite?: boolean
   pinned?: boolean
+  messages?: Array<{
+    id: string
+    role: 'user' | 'assistant'
+    text: string
+  }>
   sources?: RagSource[]
 }
 
 export interface FavoriteItem {
   id: string
   questionId: string
+  conversationId?: string | null
   question: string
   answer: string
   createdAt: string
+  messages?: Array<{
+    id: string
+    role: 'user' | 'assistant'
+    text: string
+  }>
 }
 
 export interface SummaryResult {

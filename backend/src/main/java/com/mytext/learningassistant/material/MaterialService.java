@@ -80,6 +80,10 @@ public class MaterialService {
     private static final String PREVIEW_SUFFIX = ".preview.pdf";
     private static final String PAGE_IMAGE_RE = "^page-(\\d+)(?:-\\d+)?\\.png$";
     private static final int DEFAULT_RENDER_DPI = 144;
+    private static final long DEFAULT_INLINE_PDF_OCR_MAX_BYTES = 100L * 1024L * 1024L;
+    private static final int DEFAULT_INLINE_PDF_OCR_MAX_PAGES = 200;
+    private static final long DEFAULT_PDF_COMPRESSION_MIN_BYTES = 64L * 1024L * 1024L;
+    private static final int DEFAULT_PDF_COMPRESSION_TARGET_DPI = 144;
 
     private final LearningMaterialRepository learningMaterialRepository;
     private final MaterialChunkRepository materialChunkRepository;
@@ -99,6 +103,14 @@ public class MaterialService {
     private final String converterCommand;
     private final Duration converterTimeout;
     private final int renderDpi;
+    private final long inlinePdfOcrMaxBytes;
+    private final int inlinePdfOcrMaxPages;
+    private final boolean pdfCompressionEnabled;
+    private final String pdfCompressionCommand;
+    private final String pdfCompressionCommandTemplate;
+    private final Duration pdfCompressionTimeout;
+    private final long pdfCompressionMinBytes;
+    private final int pdfCompressionTargetDpi;
     private final ExecutorService uploadExecutor = Executors.newFixedThreadPool(2);
     private final Semaphore renderSemaphore = new Semaphore(2);
 
@@ -119,7 +131,15 @@ public class MaterialService {
         @Value("${app.document-preview.converter.enabled:true}") boolean converterEnabled,
         @Value("${app.document-preview.converter.command:soffice}") String converterCommand,
         @Value("${app.document-preview.converter.timeout:60s}") Duration converterTimeout,
-        @Value("${app.document-preview.render-dpi:144}") int renderDpi
+        @Value("${app.document-preview.render-dpi:144}") int renderDpi,
+        @Value("${app.ocr.inline-pdf-max-bytes:104857600}") long inlinePdfOcrMaxBytes,
+        @Value("${app.ocr.inline-pdf-max-pages:200}") int inlinePdfOcrMaxPages,
+        @Value("${app.pdf.compression.enabled:true}") boolean pdfCompressionEnabled,
+        @Value("${app.pdf.compression.command:gs}") String pdfCompressionCommand,
+        @Value("${app.pdf.compression.command-template:}") String pdfCompressionCommandTemplate,
+        @Value("${app.pdf.compression.timeout:180s}") Duration pdfCompressionTimeout,
+        @Value("${app.pdf.compression.min-bytes:67108864}") long pdfCompressionMinBytes,
+        @Value("${app.pdf.compression.target-dpi:144}") int pdfCompressionTargetDpi
     ) {
         this.learningMaterialRepository = learningMaterialRepository;
         this.materialChunkRepository = materialChunkRepository;
@@ -138,6 +158,14 @@ public class MaterialService {
         this.converterCommand = converterCommand == null || converterCommand.isBlank() ? "soffice" : converterCommand.trim();
         this.converterTimeout = converterTimeout == null ? Duration.ofSeconds(60) : converterTimeout;
         this.renderDpi = renderDpi <= 0 ? DEFAULT_RENDER_DPI : renderDpi;
+        this.inlinePdfOcrMaxBytes = inlinePdfOcrMaxBytes <= 0 ? DEFAULT_INLINE_PDF_OCR_MAX_BYTES : inlinePdfOcrMaxBytes;
+        this.inlinePdfOcrMaxPages = inlinePdfOcrMaxPages <= 0 ? DEFAULT_INLINE_PDF_OCR_MAX_PAGES : inlinePdfOcrMaxPages;
+        this.pdfCompressionEnabled = pdfCompressionEnabled;
+        this.pdfCompressionCommand = pdfCompressionCommand == null || pdfCompressionCommand.isBlank() ? "gs" : pdfCompressionCommand.trim();
+        this.pdfCompressionCommandTemplate = normalizeOptionalText(pdfCompressionCommandTemplate);
+        this.pdfCompressionTimeout = pdfCompressionTimeout == null ? Duration.ofSeconds(180) : pdfCompressionTimeout;
+        this.pdfCompressionMinBytes = pdfCompressionMinBytes <= 0 ? DEFAULT_PDF_COMPRESSION_MIN_BYTES : pdfCompressionMinBytes;
+        this.pdfCompressionTargetDpi = pdfCompressionTargetDpi <= 0 ? DEFAULT_PDF_COMPRESSION_TARGET_DPI : pdfCompressionTargetDpi;
         this.httpClient = HttpClient.newBuilder()
             .connectTimeout(WEB_REQUEST_TIMEOUT)
             .followRedirects(HttpClient.Redirect.NORMAL)
@@ -568,6 +596,7 @@ public class MaterialService {
             materialUploadSessionRepository.save(session);
             cleanupPartDir(session);
         } catch (Exception exception) {
+            log.error("Upload session processing failed: sessionId={}, materialId={}", sessionId, session.getMaterialId(), exception);
             MaterialUploadSessionEntity failedSession = materialUploadSessionRepository.findById(sessionId).orElse(null);
             if (failedSession != null) {
                 failedSession.setStatus(MaterialUploadSessionStatus.FAILED);
@@ -580,6 +609,10 @@ public class MaterialService {
                             learningMaterialRepository.save(material);
                         });
                 }
+                deleteStoredAssets(failedSession.getStoragePath());
+                deletePreviewFile(failedSession.getStoragePath());
+                deleteStoredFile(failedSession.getStoragePath());
+                cleanupPartDir(failedSession);
             }
         }
     }
@@ -593,6 +626,7 @@ public class MaterialService {
                     throw new BusinessException(400, "Missing upload chunk");
                 }
                 Files.copy(partPath, output);
+                Files.deleteIfExists(partPath);
             }
         }
     }
@@ -941,16 +975,22 @@ public class MaterialService {
                 case TXT, MD, HTML, WEB -> ParsedMaterial.single(readTextFile(storedFile));
                 case DOCX, WORD -> parseWord(storedFile);
                 case PPTX, PPT -> parsePowerPoint(storedFile);
-                case PDF -> parsePdf(storedFile);
+                case PDF -> parsePdf(storedFile, preparePdfProcessingFile(storedFile));
             };
         } catch (Exception exception) {
+            log.warn("Material parsing failed for {} ({})", storedFile, sourceType, exception);
             throw new BusinessException(400, "material parsing failed");
         }
     }
 
     private void applyPreviewMetadata(LearningMaterialEntity material, Path sourcePath, MaterialSourceType sourceType) {
         if (sourceType == MaterialSourceType.PDF) {
-            updatePdfPreviewMetadata(material, sourcePath, MaterialPreviewStatus.READY, null);
+            Path previewSource = preferredPdfPreviewPath(sourcePath);
+            updatePdfPreviewMetadata(material, previewSource, MaterialPreviewStatus.READY, null);
+            if (material.getPreviewStatus() == MaterialPreviewStatus.FAILED && !previewSource.equals(sourcePath)) {
+                deletePdfPreviewCopy(sourcePath);
+                updatePdfPreviewMetadata(material, sourcePath, MaterialPreviewStatus.READY, null);
+            }
             return;
         }
         if (sourceType == MaterialSourceType.DOCX || sourceType == MaterialSourceType.WORD) {
@@ -1075,9 +1115,10 @@ public class MaterialService {
             .toString();
     }
 
-    private ParsedMaterial parsePdf(Path file) throws IOException {
+    private ParsedMaterial parsePdf(Path sourceFile, Path pdfFile) throws IOException {
         List<ParsedBlock> blocks = new ArrayList<>();
-        try (var document = Loader.loadPDF(file.toFile())) {
+        try (var document = Loader.loadPDF(pdfFile.toFile())) {
+            boolean inlinePdfOcrEnabled = shouldInlinePdfOcr(pdfFile, document.getNumberOfPages());
             PDFTextStripper stripper = new PDFTextStripper();
             stripper.setSortByPosition(true);
             for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex++) {
@@ -1090,7 +1131,7 @@ public class MaterialService {
                     ? "第 " + pageNo + " 页暂无可抽取文本，已保留原页预览用于阅读和问答依据。"
                     : extractedText;
                 if (extractedText.isBlank()) {
-                    blockText = scannedPdfPageText(file, document, pageIndex, pageNo);
+                    blockText = scannedPdfPageText(sourceFile, document, pageIndex, pageNo, inlinePdfOcrEnabled);
                 }
                 blocks.add(new ParsedBlock(blockText, pageNo, "Page " + pageNo));
             }
@@ -1098,10 +1139,113 @@ public class MaterialService {
         return new ParsedMaterial(blocks);
     }
 
-    private String scannedPdfPageText(Path file, org.apache.pdfbox.pdmodel.PDDocument document, int pageIndex, int pageNo) {
+    private Path preparePdfProcessingFile(Path sourcePath) {
+        Path previewPath = previewPdfPath(sourcePath);
+        if (!shouldCompressPdf(sourcePath)) {
+            deletePdfPreviewCopy(sourcePath);
+            return sourcePath;
+        }
+        Path compressedPath = compressPdf(sourcePath, previewPath);
+        if (compressedPath != null) {
+            return compressedPath;
+        }
+        deletePdfPreviewCopy(sourcePath);
+        return sourcePath;
+    }
+
+    private boolean shouldCompressPdf(Path sourcePath) {
+        if (!pdfCompressionEnabled) {
+            return false;
+        }
+        try {
+            return Files.size(sourcePath) >= pdfCompressionMinBytes;
+        } catch (IOException exception) {
+            return false;
+        }
+    }
+
+    private Path compressPdf(Path sourcePath, Path targetPath) {
+        try {
+            Files.deleteIfExists(targetPath);
+            Files.createDirectories(targetPath.getParent());
+            List<String> command = buildPdfCompressionCommand(sourcePath, targetPath);
+            if (command.isEmpty()) {
+                return null;
+            }
+            Process process = new ProcessBuilder(command)
+                .redirectErrorStream(true)
+                .start();
+            boolean finished = process.waitFor(pdfCompressionTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                log.warn("PDF compression timed out for {}", sourcePath);
+                return null;
+            }
+            if (process.exitValue() != 0) {
+                log.warn("PDF compression failed for {}: {}", sourcePath, readProcessOutput(process));
+                return null;
+            }
+            if (!Files.exists(targetPath) || !Files.isRegularFile(targetPath)) {
+                return null;
+            }
+            long sourceBytes = Files.size(sourcePath);
+            long targetBytes = Files.size(targetPath);
+            if (targetBytes <= 0 || targetBytes >= sourceBytes) {
+                log.info("PDF compression skipped for {} because output was not smaller ({} -> {})", sourcePath, sourceBytes, targetBytes);
+                return null;
+            }
+            log.info("Compressed PDF preview for {} ({} -> {})", sourcePath, sourceBytes, targetBytes);
+            return targetPath;
+        } catch (Exception exception) {
+            log.warn("PDF compression failed for {}", sourcePath, exception);
+            return null;
+        }
+    }
+
+    private List<String> buildPdfCompressionCommand(Path sourcePath, Path targetPath) {
+        if (pdfCompressionCommandTemplate != null && !pdfCompressionCommandTemplate.isBlank()) {
+            return tokenizeCommandTemplate(pdfCompressionCommandTemplate)
+                .stream()
+                .map(part -> part
+                    .replace("{input}", sourcePath.toString())
+                    .replace("{output}", targetPath.toString())
+                    .replace("{dpi}", String.valueOf(pdfCompressionTargetDpi)))
+                .filter(part -> !part.isBlank())
+                .toList();
+        }
+        return List.of(
+            pdfCompressionCommand,
+            "-sDEVICE=pdfwrite",
+            "-dCompatibilityLevel=1.6",
+            "-dNOPAUSE",
+            "-dQUIET",
+            "-dBATCH",
+            "-dDetectDuplicateImages=true",
+            "-dCompressFonts=true",
+            "-dDownsampleColorImages=true",
+            "-dColorImageDownsampleType=/Bicubic",
+            "-dColorImageResolution=" + pdfCompressionTargetDpi,
+            "-dDownsampleGrayImages=true",
+            "-dGrayImageDownsampleType=/Bicubic",
+            "-dGrayImageResolution=" + pdfCompressionTargetDpi,
+            "-dDownsampleMonoImages=true",
+            "-dMonoImageDownsampleType=/Subsample",
+            "-dMonoImageResolution=" + pdfCompressionTargetDpi,
+            "-sOutputFile=" + targetPath,
+            sourcePath.toString()
+        );
+    }
+
+    private String scannedPdfPageText(
+        Path file,
+        org.apache.pdfbox.pdmodel.PDDocument document,
+        int pageIndex,
+        int pageNo,
+        boolean inlinePdfOcrEnabled
+    ) {
         String imageName = pageImageName(pageNo);
         String marker = imageMarker(imageName);
-        if (!ocrEnabled) {
+        if (!inlinePdfOcrEnabled) {
             return marker + "\n\u7b2c " + pageNo + " \u9875\u6682\u65e0\u53ef\u62bd\u53d6\u6587\u672c\uff1b\u539f\u9875\u56fe\u7247\u5c06\u5728\u9884\u89c8\u6216\u591a\u6a21\u6001\u95ee\u7b54\u65f6\u6309\u9700\u751f\u6210\u3002";
         }
         Path imagePath = renderPdfPageAsset(file, document, pageIndex, imageName);
@@ -1110,6 +1254,20 @@ public class MaterialService {
             return marker + "\n[image ocr: " + imageName + "]\n" + ocrText;
         }
         return marker + "\n\u7b2c " + pageNo + " \u9875\u6682\u65e0\u53ef\u62bd\u53d6\u6587\u672c\uff1b\u5df2\u4fdd\u7559\u539f\u9875\u56fe\u7247\uff0c\u53ef\u7528\u4e8e\u9884\u89c8\u548c\u591a\u6a21\u6001\u95ee\u7b54\u3002";
+    }
+
+    private boolean shouldInlinePdfOcr(Path file, int pageCount) {
+        if (!ocrEnabled) {
+            return false;
+        }
+        if (pageCount > inlinePdfOcrMaxPages) {
+            return false;
+        }
+        try {
+            return Files.size(file) <= inlinePdfOcrMaxBytes;
+        } catch (IOException exception) {
+            return false;
+        }
     }
 
     private List<String> extractPdfImages(PDResources resources, Path sourceFile, String scope, ImageCounter counter) throws IOException {
@@ -1480,12 +1638,20 @@ public class MaterialService {
         }
         Path sourcePath = resolveStoredPath(material.getStoragePath());
         if (material.getSourceType() == MaterialSourceType.PDF) {
-            return sourcePath;
+            return preferredPdfPreviewPath(sourcePath);
         }
         if (material.getSourceType() == MaterialSourceType.DOCX || material.getSourceType() == MaterialSourceType.WORD) {
             return previewPdfPath(sourcePath);
         }
         return null;
+    }
+
+    private Path preferredPdfPreviewPath(Path sourcePath) {
+        Path previewPath = previewPdfPath(sourcePath);
+        if (Files.exists(previewPath) && Files.isRegularFile(previewPath)) {
+            return previewPath;
+        }
+        return sourcePath;
     }
 
     private String pageImageName(int pageNo) {
@@ -1832,6 +1998,14 @@ public class MaterialService {
         }
         try {
             Files.deleteIfExists(previewPdfPath(resolveStoredPath(storagePath)));
+        } catch (IOException ignored) {
+            // ignore
+        }
+    }
+
+    private void deletePdfPreviewCopy(Path sourcePath) {
+        try {
+            Files.deleteIfExists(previewPdfPath(sourcePath));
         } catch (IOException ignored) {
             // ignore
         }

@@ -34,6 +34,23 @@ public class AuthController {
         return ApiResponse.ok(authService.login(request));
     }
 
+    @PostMapping("/email-code")
+    public ApiResponse<Void> sendEmailCode(@Valid @RequestBody EmailCodeRequest request, HttpServletRequest httpRequest) {
+        authService.sendEmailCode(request, clientIp(httpRequest));
+        return ApiResponse.ok(null);
+    }
+
+    @PostMapping("/email-login")
+    public ApiResponse<LoginResponse> emailLogin(@Valid @RequestBody EmailLoginRequest request) {
+        return ApiResponse.ok(authService.emailLogin(request));
+    }
+
+    @PostMapping("/reset-password")
+    public ApiResponse<Void> resetPassword(@Valid @RequestBody ResetPasswordRequest request) {
+        authService.resetPassword(request);
+        return ApiResponse.ok(null);
+    }
+
     @GetMapping("/check-username")
     public ApiResponse<UsernameAvailabilityResponse> checkUsername(@RequestParam("username") String username) {
         return ApiResponse.ok(authService.checkUsername(username));
@@ -64,5 +81,17 @@ public class AuthController {
     @PostMapping("/logout")
     public ApiResponse<Void> logout(HttpServletRequest request) {
         return ApiResponse.ok(null);
+    }
+
+    private String clientIp(HttpServletRequest request) {
+        String forwardedFor = request.getHeader("X-Forwarded-For");
+        if (forwardedFor != null && !forwardedFor.isBlank()) {
+            return forwardedFor.split(",", 2)[0].trim();
+        }
+        String realIp = request.getHeader("X-Real-IP");
+        if (realIp != null && !realIp.isBlank()) {
+            return realIp.trim();
+        }
+        return request.getRemoteAddr();
     }
 }

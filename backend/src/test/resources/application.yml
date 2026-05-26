@@ -9,6 +9,13 @@ spring:
       ddl-auto: create-drop
 
 app:
+  email-code:
+    enabled: false
+    ttl-seconds: 300
+    email-cooldown-seconds: 0
+    ip-hourly-limit: 100
+    default-provider: qq
+    log-code-when-mail-disabled: true
   ocr:
     enabled: ${TEST_OCR_ENABLED:false}
     command-template: ${TEST_OCR_COMMAND_TEMPLATE:}

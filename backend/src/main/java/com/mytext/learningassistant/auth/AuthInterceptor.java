@@ -30,6 +30,9 @@ public class AuthInterceptor implements HandlerInterceptor {
         "/api/llm/status",
         "/api/auth/register",
         "/api/auth/login",
+        "/api/auth/email-code",
+        "/api/auth/email-login",
+        "/api/auth/reset-password",
         "/api/auth/check-username"
     );
 

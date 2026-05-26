@@ -32,6 +32,7 @@ class LlmControllerTest {
             .andExpect(jsonPath("$.data.enabled").value(true))
             .andExpect(jsonPath("$.data.configured").value(true))
             .andExpect(jsonPath("$.data.apiKey").doesNotExist())
-            .andExpect(jsonPath("$.data.model").value("deepseek/deepseek-chat-v3-0324:free"));
+            .andExpect(jsonPath("$.data.model").doesNotExist())
+            .andExpect(jsonPath("$.data.baseUrl").doesNotExist());
     }
 }

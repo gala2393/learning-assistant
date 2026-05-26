@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
@@ -29,7 +29,7 @@ function ThinkingDots() {
       {[0, 1, 2].map((i) => (
         <motion.span
           key={i}
-          className="inline-block h-2 w-2 rounded-full bg-muted-foreground/50"
+          className="inline-block h-2 w-2 rounded-full bg-cyan-400/70 shadow-[0_0_8px_rgba(34,211,238,0.45)]"
           animate={{ opacity: [0.3, 1, 0.3] }}
           transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
         />
@@ -38,23 +38,49 @@ function ThinkingDots() {
   )
 }
 
-function AssistantAvatar() {
+function AssistantAvatarFallback() {
   return (
     <div
-      className="relative mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#fff4cf] shadow-[0_8px_18px_rgba(180,120,32,0.18)] ring-1 ring-amber-200/80 dark:bg-[#3a2b16] dark:ring-amber-300/20"
+      className="relative mt-1 flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[radial-gradient(circle_at_36%_24%,#ffffff_0%,#eff9ff_35%,#eaf3ff_72%,#fdf0fb_100%)] shadow-[0_12px_28px_rgba(56,189,248,0.22),0_0_24px_rgba(244,114,182,0.18)] ring-1 ring-cyan-200/80 dark:bg-[radial-gradient(circle_at_36%_24%,#243244_0%,#172033_68%,#2b1f35_100%)] dark:ring-cyan-300/25"
       title="AI 助手"
       aria-label="AI 助手头像"
     >
-      <div className="relative h-7 w-7 rounded-[9px] border border-amber-400/70 bg-[#ffe7a6] shadow-inner dark:border-amber-300/40 dark:bg-[#f6c667]">
-        <div className="absolute -left-1 top-1 h-5 w-3 rounded-l-[8px] border border-amber-400/70 bg-[#fff9e8] dark:border-amber-300/40 dark:bg-[#ffe5a1]" />
-        <div className="absolute -right-1 top-1 h-5 w-3 rounded-r-[8px] border border-amber-400/70 bg-[#fff9e8] dark:border-amber-300/40 dark:bg-[#ffe5a1]" />
-        <div className="absolute left-[8px] top-[7px] h-1.5 w-1.5 rounded-full bg-[#334155]" />
-        <div className="absolute right-[8px] top-[7px] h-1.5 w-1.5 rounded-full bg-[#334155]" />
-        <div className="absolute left-1/2 top-[15px] h-1.5 w-3 -translate-x-1/2 rounded-b-full border-b-2 border-[#334155]" />
-        <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-amber-400/50" />
-        <div className="absolute right-1.5 top-0 h-2.5 w-1 rounded-b-full bg-cyan-500" />
+      <div className="absolute inset-0 rounded-full bg-[conic-gradient(from_210deg,rgba(56,189,248,0.28),rgba(244,114,182,0.28),rgba(255,255,255,0.45),rgba(56,189,248,0.28))] blur-[1px]" />
+      <div className="relative h-9 w-9 overflow-hidden rounded-full border border-white/80 bg-[#fff7fb] shadow-inner dark:border-white/15 dark:bg-slate-900">
+        <div className="absolute -left-1 top-0 h-8 w-5 rounded-br-[18px] rounded-tr-[18px] bg-gradient-to-b from-[#6fdcff] via-[#a5d8ff] to-[#f7c5ee]" />
+        <div className="absolute -right-1 top-0 h-8 w-5 rounded-bl-[18px] rounded-tl-[18px] bg-gradient-to-b from-[#ffe9fb] via-[#f7a9dc] to-[#7dd3fc]" />
+        <div className="absolute left-1/2 top-0 h-5 w-5 -translate-x-1/2 rounded-b-[18px] bg-gradient-to-b from-white via-[#cde9ff] to-[#ffc8ea]" />
+        <div className="absolute left-1/2 top-[11px] h-[19px] w-[25px] -translate-x-1/2 rounded-[45%] bg-[#ffe8de]" />
+        <div className="absolute left-[10px] top-[18px] h-[5px] w-[5px] rounded-full bg-[#2563eb] shadow-[0_0_0_2px_rgba(125,211,252,0.42),0_0_8px_rgba(56,189,248,0.65)]" />
+        <div className="absolute right-[10px] top-[18px] h-[5px] w-[5px] rounded-full bg-[#2563eb] shadow-[0_0_0_2px_rgba(244,114,182,0.32),0_0_8px_rgba(244,114,182,0.6)]" />
+        <div className="absolute left-1/2 top-[25px] h-1.5 w-3 -translate-x-1/2 rounded-b-full border-b-2 border-[#64748b]" />
+        <div className="absolute left-[2px] top-[15px] h-3.5 w-1.5 rounded-full bg-cyan-300 shadow-[0_0_9px_rgba(34,211,238,0.75)]" />
+        <div className="absolute right-[2px] top-[15px] h-3.5 w-1.5 rounded-full bg-pink-300 shadow-[0_0_9px_rgba(244,114,182,0.75)]" />
       </div>
-      <div className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-cyan-500 ring-2 ring-[#fff4cf] dark:ring-[#3a2b16]" />
+      <div className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-cyan-400 ring-2 ring-white shadow-[0_0_10px_rgba(34,211,238,0.8)] dark:ring-slate-900" />
+    </div>
+  )
+}
+
+function AssistantAvatar() {
+  const [imageFailed, setImageFailed] = useState(false)
+  if (imageFailed) {
+    return <AssistantAvatarFallback />
+  }
+  return (
+    <div
+      className="relative mt-1 h-12 w-12 shrink-0 overflow-hidden rounded-full bg-gradient-to-br from-cyan-50 via-white to-pink-50 p-[2px] shadow-[0_12px_28px_rgba(56,189,248,0.2),0_0_24px_rgba(244,114,182,0.18)] ring-1 ring-cyan-200/80 dark:from-cyan-300/10 dark:via-slate-900 dark:to-pink-300/10 dark:ring-cyan-300/25"
+      title="AI 助手"
+      aria-label="AI 助手头像"
+    >
+      <img
+        src="/ai-avatar.png"
+        alt="AI 助手头像"
+        className="h-full w-full rounded-full object-cover object-[50%_30%]"
+        draggable={false}
+        onError={() => setImageFailed(true)}
+      />
+      <div className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-white/70 dark:ring-white/10" />
     </div>
   )
 }
@@ -91,7 +117,7 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
             {msg.role === 'assistant' && <AssistantAvatar />}
             <div className={cn('max-w-[75%] min-w-0', msg.role === 'assistant' && 'space-y-2')}>
               {msg.role === 'assistant' && (
-                <div className="inline-flex items-center rounded-full border border-amber-200 bg-[#fff8df] px-2 py-0.5 text-[11px] font-semibold text-amber-800 shadow-sm dark:border-amber-300/20 dark:bg-amber-300/10 dark:text-amber-200">
+                <div className="inline-flex items-center rounded-full border border-cyan-200/70 bg-gradient-to-r from-[#eefaff] to-[#fff0fb] px-2.5 py-0.5 text-[11px] font-semibold text-[#2f6f8f] shadow-sm dark:border-cyan-300/20 dark:from-cyan-300/10 dark:to-pink-300/10 dark:text-cyan-100">
                   AI 助手
                 </div>
               )}
@@ -112,7 +138,7 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
               ) : (
                 <div className="space-y-2">
                   {msg.thinking ? (
-                    <div className="rounded-2xl border border-amber-100/70 bg-white/90 px-4 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-slate-700/60 dark:bg-slate-800/80">
+                    <div className="rounded-2xl border border-cyan-100/80 bg-gradient-to-r from-white to-[#f8fdff] px-4 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-cyan-300/20 dark:from-slate-900 dark:to-slate-800">
                       <ThinkingDots />
                     </div>
                   ) : msg.error ? (
@@ -129,14 +155,14 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
                           {splitAssistantParagraphs(msg.text).map((block, index) => (
                             <div
                               key={`${msg.id}-${index}`}
-                              className="rounded-2xl border border-amber-100/70 bg-white/90 px-4 py-3 text-sm leading-relaxed text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-slate-700/60 dark:bg-slate-800/80 dark:text-slate-100"
+                              className="rounded-2xl border border-cyan-100/80 bg-gradient-to-r from-white to-[#fbfdff] px-4 py-3 text-sm leading-relaxed text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_8px_24px_rgba(56,189,248,0.06)] dark:border-cyan-300/20 dark:from-slate-900 dark:to-slate-800 dark:text-slate-100"
                             >
                               {block}
                             </div>
                           ))}
                         </div>
                       ) : (
-                        <div className="rounded-2xl border border-amber-100/70 bg-white/90 px-4 py-3 text-sm leading-relaxed text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-slate-700/60 dark:bg-slate-800/80 dark:text-slate-100">
+                        <div className="rounded-2xl border border-cyan-100/80 bg-gradient-to-r from-white to-[#fbfdff] px-4 py-3 text-sm leading-relaxed text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_8px_24px_rgba(56,189,248,0.06)] dark:border-cyan-300/20 dark:from-slate-900 dark:to-slate-800 dark:text-slate-100">
                           {sanitizeAiText(msg.text)}
                         </div>
                       )}

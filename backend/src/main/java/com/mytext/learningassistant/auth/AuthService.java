@@ -19,11 +19,18 @@ public class AuthService {
     private final UserRepository userRepository;
     private final PasswordHasher passwordHasher;
     private final TokenService tokenService;
+    private final EmailCodeService emailCodeService;
 
-    public AuthService(UserRepository userRepository, PasswordHasher passwordHasher, TokenService tokenService) {
+    public AuthService(
+        UserRepository userRepository,
+        PasswordHasher passwordHasher,
+        TokenService tokenService,
+        EmailCodeService emailCodeService
+    ) {
         this.userRepository = userRepository;
         this.passwordHasher = passwordHasher;
         this.tokenService = tokenService;
+        this.emailCodeService = emailCodeService;
     }
 
     @Transactional
@@ -35,12 +42,44 @@ public class AuthService {
 
         UserEntity user = new UserEntity();
         user.setUsername(username);
+        user.setEmail(normalizeEmail(request.email()));
         user.setPasswordHash(passwordHasher.hash(request.password()));
         user.setNickname(request.nickname().trim());
         user.setRole(UserRole.USER);
         user.setStatus(UserStatus.ACTIVE);
 
         return toResponse(userRepository.save(user));
+    }
+
+    public void sendEmailCode(EmailCodeRequest request, String ipAddress) {
+        emailCodeService.sendCode(request.email(), request.provider(), ipAddress);
+    }
+
+    @Transactional(readOnly = true)
+    public LoginResponse emailLogin(EmailLoginRequest request) {
+        if (!emailCodeService.verify(request.email(), request.code())) {
+            throw new BusinessException(400, "验证码错误或已过期");
+        }
+        UserEntity user = userRepository.findByEmail(normalizeEmail(request.email()))
+            .orElseThrow(() -> new BusinessException(400, "邮箱未注册"));
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new BusinessException(400, "账号已禁用");
+        }
+        return new LoginResponse(tokenService.createToken(user), toResponse(user));
+    }
+
+    @Transactional
+    public void resetPassword(ResetPasswordRequest request) {
+        if (!emailCodeService.verify(request.email(), request.code())) {
+            throw new BusinessException(400, "验证码错误或已过期");
+        }
+        if (!request.newPassword().equals(request.confirmPassword())) {
+            throw new BusinessException(400, "两次输入的密码不一致");
+        }
+        UserEntity user = userRepository.findByEmail(normalizeEmail(request.email()))
+            .orElseThrow(() -> new BusinessException(400, "邮箱未注册"));
+        user.setPasswordHash(passwordHasher.hash(request.newPassword()));
+        userRepository.save(user);
     }
 
     @Transactional(readOnly = true)
@@ -124,6 +163,11 @@ public class AuthService {
             throw new BusinessException(400, "头像图片过大，请选择更小的图片");
         }
         return normalized;
+    }
+
+    private String normalizeEmail(String email) {
+        String normalized = email == null ? "" : email.trim().toLowerCase(java.util.Locale.ROOT);
+        return normalized.isBlank() ? null : normalized;
     }
 
     private AuthUserResponse toResponse(UserEntity user) {

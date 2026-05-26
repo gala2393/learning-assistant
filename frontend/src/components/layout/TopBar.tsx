@@ -18,7 +18,7 @@ export function TopBar() {
       <header className="flex h-14 shrink-0 items-center justify-between px-6">
         {isChat ? (
           <div className="flex flex-1 justify-center">
-            <div className="rounded-full bg-[#eef5ff] px-4 py-1.5 text-xs font-medium text-[#2f80ff] dark:bg-sky-400/10 dark:text-sky-300">
+            <div className="rounded-full bg-[#eef0f2] px-4 py-1.5 text-xs font-medium text-[#4b5563] dark:bg-white/10 dark:text-slate-200">
               资料智能问答
             </div>
           </div>

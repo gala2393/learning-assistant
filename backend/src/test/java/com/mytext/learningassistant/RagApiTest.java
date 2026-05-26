@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.hamcrest.Matchers.hasSize;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -110,7 +111,8 @@ class RagApiTest {
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
-            .andExpect(jsonPath("$.data[0].questionId").value(questionId.intValue()));
+            .andExpect(jsonPath("$.data[0].questionId").value(questionId.intValue()))
+            .andExpect(jsonPath("$.data[0].messages", hasSize(2)));
     }
 
     @Test
@@ -159,6 +161,52 @@ class RagApiTest {
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data").isEmpty());
+    }
+
+    @Test
+    void multipleQuestionsInSameConversationShowAsOneHistoryConversation() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-conversation-user"));
+
+        var firstResult = mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "Hello",
+                      "mode": "GENERAL"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.conversationId").isNumber())
+            .andReturn();
+
+        Long conversationId = extractLong(firstResult.getResponse().getContentAsString(), "conversationId");
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "Who are you?",
+                      "mode": "GENERAL",
+                      "conversationId": %d
+                    }
+                    """.formatted(conversationId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.conversationId").value(conversationId.intValue()));
+
+        mockMvc.perform(get("/api/rag/history")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data", hasSize(1)))
+            .andExpect(jsonPath("$.data[0].conversationId").value(conversationId.intValue()))
+            .andExpect(jsonPath("$.data[0].question").value("Who are you?"));
+
+        mockMvc.perform(get("/api/rag/history/" + conversationId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.conversationId").value(conversationId.intValue()))
+            .andExpect(jsonPath("$.data.messages", hasSize(4)));
     }
 
     @Test
@@ -428,6 +476,52 @@ class RagApiTest {
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("当前资料未检索到足够页码"))))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Normal AI answer")))
             .andExpect(jsonPath("$.data.sources").isEmpty());
+    }
+
+    @Test
+    void nonStreamingChatIncludesHistoryInLlmQuestion() throws Exception {
+        when(thirdPartyLlmClient.answer(
+            org.mockito.ArgumentMatchers.argThat(question ->
+                question != null
+                    && question.contains("\u5bf9\u8bdd\u5386\u53f2")
+                    && question.contains("\u6211\u53eb\u5c0f\u660e")
+                    && question.contains("\u6211\u53eb\u4ec0\u4e48")
+            ),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        )).thenReturn(Optional.of(new LlmCompletion("\u4f60\u53eb\u5c0f\u660e\u3002", "mock-model")));
+        String token = registerAndLogin(uniqueName("rag-general-history-user"));
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "\u6211\u53eb\u4ec0\u4e48\uff1f",
+                      "mode": "GENERAL",
+                      "history": [
+                        { "role": "user", "content": "\u6211\u53eb\u5c0f\u660e" },
+                        { "role": "assistant", "content": "\u597d\u7684\uff0c\u6211\u8bb0\u4f4f\u4e86\u3002" }
+                      ]
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("\u5c0f\u660e")))
+            .andExpect(jsonPath("$.data.sources").isEmpty());
+
+        verify(thirdPartyLlmClient).answer(
+            org.mockito.ArgumentMatchers.argThat(question ->
+                question != null
+                    && question.contains("\u5bf9\u8bdd\u5386\u53f2")
+                    && question.contains("\u6211\u53eb\u5c0f\u660e")
+                    && question.contains("\u6211\u53eb\u4ec0\u4e48")
+            ),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        );
     }
 
     @Test

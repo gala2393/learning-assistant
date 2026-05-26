@@ -25,8 +25,6 @@ public class LlmController {
         return ApiResponse.ok(new LlmStatusResponse(
             properties.enabled(),
             configured,
-            properties.baseUrl(),
-            properties.model(),
             message
         ));
     }

@@ -1,20 +1,30 @@
-# Frontend Deployment
+# Frontend Deployment on Vercel
 
-Build on the server or locally:
+Use Vercel for the React/Vite frontend.
 
-```bash
-npm ci
-npm run build
-```
+## Vercel project settings
 
-Deploy `dist/` with Nginx or another static server. If Nginx proxies `/api` to the backend, keep:
+- Root Directory: `frontend`
+- Install Command: `npm install` or `npm ci`
+- Build Command: `npm run build`
+- Output Directory: `dist`
 
-```env
-VITE_API_BASE=/api
-```
+## Environment variables
 
-If frontend and backend use different domains, set `VITE_API_BASE` before build:
+Set this in Vercel:
 
 ```env
-VITE_API_BASE=https://api.example.com/api
+VITE_API_BASE=https://<your-railway-backend-domain>/api
+```
+
+The app reads `VITE_API_BASE` at build time. After changing it, redeploy the Vercel project.
+
+## Routing
+
+`vercel.json` keeps browser refreshes working for React Router by rewriting non-API paths to `index.html`.
+
+API calls are made directly to `VITE_API_BASE`; the Railway backend must allow your Vercel domain in:
+
+```env
+APP_CORS_ALLOWED_ORIGINS=https://<your-vercel-domain>
 ```

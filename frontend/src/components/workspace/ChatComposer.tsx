@@ -2,6 +2,7 @@ import { useRef, useEffect } from 'react'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
 import { Send, Lock } from 'lucide-react'
 
 interface ChatComposerProps {
@@ -33,7 +34,7 @@ export function ChatComposer({
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px'
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 180) + 'px'
     }
   }, [value])
 
@@ -57,9 +58,9 @@ export function ChatComposer({
         </div>
 
         {/* Input area */}
-        <div className={centered ? 'flex min-h-[126px] items-end gap-2 rounded-[22px] border border-[#d7d9df] bg-white p-3 shadow-[0_10px_28px_rgba(15,23,42,0.08)] dark:border-slate-700 dark:bg-slate-900' : 'flex items-end gap-2'}>
+        <div className={centered ? 'flex min-h-[156px] items-end gap-3 rounded-[24px] border border-[#d7d9df] bg-white p-4 shadow-[0_10px_28px_rgba(15,23,42,0.08)] dark:border-slate-700 dark:bg-slate-900' : 'flex items-end gap-2'}>
           {disabled ? (
-            <div className="flex-1 flex items-center justify-center gap-2 rounded-md border border-dashed bg-muted/50 py-3 text-sm text-muted-foreground dark:border-slate-700 dark:bg-slate-900/60">
+            <div className="flex flex-1 items-center justify-center gap-2 rounded-md border border-dashed bg-muted/50 py-4 text-sm text-muted-foreground dark:border-slate-700 dark:bg-slate-900/60">
               <Lock className="h-4 w-4" />
               <span>{disabledHint || '暂不可用'}</span>
             </div>
@@ -71,24 +72,16 @@ export function ChatComposer({
               onKeyDown={handleKeyDown}
               placeholder={mode === 'GENERAL' ? '描述你的问题，我会帮你整理思路' : '基于当前资料提问...'}
               className={centered
-                ? 'min-h-[88px] max-h-[150px] resize-none border-0 bg-transparent px-1 text-base shadow-none focus-visible:ring-0 focus-visible:ring-offset-0'
-                : 'min-h-[40px] max-h-[120px] resize-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100'}
+                ? 'min-h-[112px] max-h-[180px] resize-none border-0 bg-transparent px-1 text-base shadow-none focus-visible:ring-0 focus-visible:ring-offset-0'
+                : 'min-h-[72px] max-h-[180px] resize-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100'}
               rows={1}
             />
           )}
           <Button
             size="icon"
             className={centered
-              ? `h-9 w-9 shrink-0 rounded-full text-white transition-all duration-200 ${
-                  canSend
-                    ? 'bg-[#111318] shadow-[0_10px_24px_rgba(17,19,24,0.28)] hover:bg-black'
-                    : 'bg-[#d1d3d8] hover:bg-[#bfc3ca]'
-                }`
-              : `h-10 w-10 shrink-0 transition-all duration-200 ${
-                  canSend
-                    ? 'bg-[#111318] shadow-[0_8px_18px_rgba(17,19,24,0.22)] hover:bg-black dark:bg-white dark:text-[#111318] dark:hover:bg-slate-100'
-                    : ''
-                }`}
+              ? `h-11 w-11 shrink-0 rounded-full ${actionButtonBase} ${canSend ? actionButtonReady : actionButtonIdle}`
+              : `h-12 w-12 shrink-0 rounded-xl ${actionButtonBase} ${canSend ? actionButtonReady : actionButtonIdle}`}
             onClick={onSubmit}
             disabled={!canSend}
           >

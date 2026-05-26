@@ -1,0 +1,9 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="64" height="64" rx="18" fill="#EEF3F7"/>
+  <filter id="shadow" x="4" y="4" width="56" height="56" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+    <feDropShadow dx="6" dy="6" stdDeviation="5" flood-color="#ACB8C4" flood-opacity="0.72"/>
+    <feDropShadow dx="-6" dy="-6" stdDeviation="5" flood-color="#FFFFFF" flood-opacity="0.95"/>
+  </filter>
+  <rect x="12" y="12" width="40" height="40" rx="13" fill="#E7EDF3" filter="url(#shadow)"/>
+  <text x="32" y="37" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="14" font-weight="900" fill="#222833">智学</text>
+</svg>

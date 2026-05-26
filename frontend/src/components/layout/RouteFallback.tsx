@@ -7,7 +7,7 @@ export function RouteFallback() {
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#eef3f7]">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#4f73e8] border-t-transparent" />
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#4b5563] border-t-transparent" />
       </div>
     )
   }

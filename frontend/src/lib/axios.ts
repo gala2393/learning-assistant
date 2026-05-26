@@ -38,7 +38,11 @@ api.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem(SESSION_KEY)
-      window.location.href = '/login'
+      const path = window.location.pathname
+      const isPublicAuthPage = path === '/login' || path === '/register' || path === '/forgot-password'
+      if (!isPublicAuthPage) {
+        window.location.href = '/login'
+      }
     }
     if (!error.response) {
       const offlineError = new Error('后端未启动或无法访问，请先启动 8080 后端服务') as Error & { code?: number; data?: unknown }

@@ -1,6 +1,7 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import App from '@/App'
 import { AuthLayout } from '@/components/auth/AuthLayout'
+import { ForgotPasswordForm } from '@/components/auth/ForgotPasswordForm'
 import { LoginForm } from '@/components/auth/LoginForm'
 import { RegisterForm } from '@/components/auth/RegisterForm'
 import { AppShell } from '@/components/layout/AppShell'
@@ -28,6 +29,7 @@ export const router = createBrowserRouter([
         children: [
           { path: 'login', element: <LoginForm /> },
           { path: 'register', element: <RegisterForm /> },
+          { path: 'forgot-password', element: <ForgotPasswordForm /> },
         ],
       },
       {

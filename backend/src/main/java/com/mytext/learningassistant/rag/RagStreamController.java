@@ -76,6 +76,7 @@ public class RagStreamController {
                 sendEvent(emitter, "sources", Map.of("sources", result.sources()));
                 sendEvent(emitter, "done", Map.of(
                     "questionId", result.questionId(),
+                    "conversationId", result.conversationId(),
                     "answer", result.answer()
                 ));
 

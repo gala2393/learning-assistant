@@ -119,7 +119,8 @@ public class RagService {
             collectImagesFromMaterialChunks(userId, request.materialId(), selectedChunks, images);
         }
 
-        LlmCompletion rawCompletion = answerWithThirdParty(request.question(), excerpts, images, generalChat, request.answerStyle())
+        String questionWithContext = buildQuestionWithHistory(request.question(), request.history(), generalChat);
+        LlmCompletion rawCompletion = answerWithThirdParty(questionWithContext, excerpts, images, generalChat, request.answerStyle())
             .orElseGet(() -> new LlmCompletion(
                 generalChat
                     ? buildGeneralFallbackAnswer(request.question())
@@ -135,17 +136,20 @@ public class RagService {
 
         RagQuestionEntity question = new RagQuestionEntity();
         question.setUserId(userId);
+        question.setConversationId(resolveConversationId(userId, request.conversationId()));
         question.setQuestionText(request.question());
         question.setTitle(buildConversationTitle(request.question()));
         question.setAnswerText(completion.content());
         question.setModelName(completion.modelName());
         question.setQuestionStatus(QuestionStatus.SUCCESS);
         RagQuestionEntity savedQuestion = ragQuestionRepository.save(question);
+        savedQuestion = ensureConversationId(savedQuestion);
 
         List<RagQuestionSourceEntity> sourceEntities = saveSources(savedQuestion.getId(), selectedChunks);
 
         return new RagChatResponse(
             savedQuestion.getId(),
+            savedQuestion.getConversationId(),
             savedQuestion.getQuestionText(),
             savedQuestion.getAnswerText(),
             sourceEntities.stream().map(this::toSourceResponse).toList(),
@@ -195,7 +199,7 @@ public class RagService {
             collectImagesFromMaterialChunks(userId, request.materialId(), selectedChunks, images);
         }
 
-        String questionWithContext = buildQuestionWithHistory(request.question(), request.history());
+        String questionWithContext = buildQuestionWithHistory(request.question(), request.history(), generalChat);
 
         String answer = isHomeworkStyle(request.answerStyle())
             ? thirdPartyLlmClient.answerStream(questionWithContext, excerpts, images, onChunk, generalChat, request.answerStyle())
@@ -210,13 +214,13 @@ public class RagService {
             ? decorateGeneralAnswer(answer)
             : decorateAnswer(request, answer, selectedChunks);
 
-        Long questionId = saveStreamResult(userId, request.question(), decoratedAnswer, selectedChunks);
+        RagQuestionEntity savedQuestion = saveStreamResult(userId, request, decoratedAnswer, selectedChunks);
 
         List<RagSourceResponse> sources = selectedChunks.stream()
             .map(this::toSourceResponse)
             .toList();
 
-        return new RagStreamResult(questionId, decoratedAnswer, sources);
+        return new RagStreamResult(savedQuestion.getId(), savedQuestion.getConversationId(), decoratedAnswer, sources);
     }
 
     private List<ScoredChunk> selectContextChunks(long userId, ChatRequest request, boolean generalChat) {
@@ -641,20 +645,25 @@ public class RagService {
         return excerpts;
     }
 
-    private Long saveStreamResult(long userId, String questionText, String answer, List<ScoredChunk> chunks) {
+    private RagQuestionEntity saveStreamResult(long userId, ChatRequest request, String answer, List<ScoredChunk> chunks) {
         try {
             RagQuestionEntity question = new RagQuestionEntity();
             question.setUserId(userId);
-            question.setQuestionText(questionText);
-            question.setTitle(buildConversationTitle(questionText));
+            question.setConversationId(resolveConversationId(userId, request.conversationId()));
+            question.setQuestionText(request.question());
+            question.setTitle(buildConversationTitle(request.question()));
             question.setAnswerText(answer);
             question.setModelName("stream");
             question.setQuestionStatus(QuestionStatus.SUCCESS);
             RagQuestionEntity saved = ragQuestionRepository.save(question);
+            saved = ensureConversationId(saved);
             saveSources(saved.getId(), chunks);
-            return saved.getId();
+            return saved;
         } catch (Exception ignored) {
-            return 0L;
+            RagQuestionEntity fallback = new RagQuestionEntity();
+            fallback.setId(0L);
+            fallback.setConversationId(0L);
+            return fallback;
         }
     }
 
@@ -673,13 +682,14 @@ public class RagService {
             .toList();
     }
 
-    private String buildQuestionWithHistory(String question, List<ChatMessage> history) {
+    private String buildQuestionWithHistory(String question, List<ChatMessage> history, boolean generalChat) {
         if (history == null || history.isEmpty()) {
             return question;
         }
         StringBuilder sb = new StringBuilder();
         sb.append("对话历史：\n");
-        int start = Math.max(0, history.size() - 10);
+        int maxHistoryItems = generalChat ? 6 : 10;
+        int start = Math.max(0, history.size() - maxHistoryItems);
         for (int i = start; i < history.size(); i++) {
             ChatMessage msg = history.get(i);
             sb.append(msg.role()).append("：").append(msg.content()).append("\n");
@@ -709,7 +719,7 @@ public class RagService {
 
     @Transactional(readOnly = true)
     public List<RagHistoryItemResponse> history(long userId) {
-        return ragQuestionRepository.findByUserIdOrderByPinnedDescCreatedAtDesc(userId).stream()
+        return latestQuestionsByConversation(userId).stream()
             .map(question -> toHistoryItem(userId, question))
             .toList();
     }
@@ -718,10 +728,12 @@ public class RagService {
     public RagHistoryDetailResponse historyDetail(long userId, long questionId) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(questionId, userId)
             .orElseThrow(() -> new BusinessException(404, "Question not found"));
-        List<RagSourceResponse> sources = ragQuestionSourceRepository.findByQuestionIdOrderByRankScoreDesc(questionId).stream()
+        List<RagQuestionEntity> conversationQuestions = questionsInConversation(userId, question);
+        RagQuestionEntity latestQuestion = conversationQuestions.get(conversationQuestions.size() - 1);
+        List<RagSourceResponse> sources = ragQuestionSourceRepository.findByQuestionIdOrderByRankScoreDesc(latestQuestion.getId()).stream()
             .map(this::toSourceResponse)
             .toList();
-        return toHistoryDetail(userId, question, sources);
+        return toHistoryDetail(userId, latestQuestion, sources, conversationQuestions);
     }
 
     @Transactional
@@ -744,9 +756,12 @@ public class RagService {
     public void deleteHistory(long userId, long questionId) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(questionId, userId)
             .orElseThrow(() -> new BusinessException(404, "Question not found"));
-        userFavoriteRepository.deleteByUserIdAndQuestionId(userId, questionId);
-        ragQuestionSourceRepository.deleteByQuestionId(questionId);
-        ragQuestionRepository.delete(question);
+        for (RagQuestionEntity conversationQuestion : questionsInConversation(userId, question)) {
+            Long id = conversationQuestion.getId();
+            userFavoriteRepository.deleteByUserIdAndQuestionId(userId, id);
+            ragQuestionSourceRepository.deleteByQuestionId(id);
+            ragQuestionRepository.delete(conversationQuestion);
+        }
     }
 
     @Transactional
@@ -855,9 +870,11 @@ public class RagService {
         return new FavoriteItemResponse(
             saved.getId(),
             question.getId(),
+            effectiveConversationId(question),
             question.getQuestionText(),
             question.getAnswerText(),
-            saved.getCreatedAt() == null ? null : saved.getCreatedAt().format(DATETIME_FORMATTER)
+            saved.getCreatedAt() == null ? null : saved.getCreatedAt().format(DATETIME_FORMATTER),
+            toConversationMessages(questionsInConversation(userId, question))
         );
     }
 
@@ -880,9 +897,11 @@ public class RagService {
                 return new FavoriteItemResponse(
                     favorite.getId(),
                     question.getId(),
+                    effectiveConversationId(question),
                     question.getQuestionText(),
                     question.getAnswerText(),
-                    favorite.getCreatedAt() == null ? null : favorite.getCreatedAt().format(DATETIME_FORMATTER)
+                    favorite.getCreatedAt() == null ? null : favorite.getCreatedAt().format(DATETIME_FORMATTER),
+                    toConversationMessages(questionsInConversation(userId, question))
                 );
             })
             .filter(item -> item != null)
@@ -894,6 +913,7 @@ public class RagService {
             .orElse(null);
         return new RagHistoryItemResponse(
             question.getId(),
+            effectiveConversationId(question),
             question.getTitle(),
             question.getQuestionText(),
             question.getAnswerText(),
@@ -907,21 +927,73 @@ public class RagService {
     private RagHistoryDetailResponse toHistoryDetail(
         long userId,
         RagQuestionEntity question,
-        List<RagSourceResponse> sources
+        List<RagSourceResponse> sources,
+        List<RagQuestionEntity> conversationQuestions
     ) {
         UserFavoriteEntity favorite = userFavoriteRepository.findByUserIdAndQuestionId(userId, question.getId())
             .orElse(null);
         return new RagHistoryDetailResponse(
             question.getId(),
+            effectiveConversationId(question),
             question.getTitle(),
             question.getQuestionText(),
             question.getAnswerText(),
             question.getCreatedAt() == null ? null : question.getCreatedAt().format(DATETIME_FORMATTER),
+            toConversationMessages(conversationQuestions),
             sources,
             favorite == null ? null : favorite.getId(),
             favorite != null,
             question.isPinned()
         );
+    }
+
+    private List<RagQuestionEntity> latestQuestionsByConversation(long userId) {
+        Map<Long, RagQuestionEntity> latestByConversation = new LinkedHashMap<>();
+        for (RagQuestionEntity question : ragQuestionRepository.findByUserIdOrderByPinnedDescCreatedAtDesc(userId)) {
+            Long conversationId = effectiveConversationId(question);
+            latestByConversation.putIfAbsent(conversationId, question);
+        }
+        return latestByConversation.values().stream().toList();
+    }
+
+    private List<RagHistoryMessageResponse> toConversationMessages(List<RagQuestionEntity> questions) {
+        List<RagHistoryMessageResponse> messages = new ArrayList<>();
+        for (RagQuestionEntity question : questions) {
+            messages.add(new RagHistoryMessageResponse(question.getId(), "user", question.getQuestionText()));
+            messages.add(new RagHistoryMessageResponse(question.getId(), "assistant", question.getAnswerText()));
+        }
+        return messages;
+    }
+
+    private List<RagQuestionEntity> questionsInConversation(long userId, RagQuestionEntity question) {
+        Long conversationId = effectiveConversationId(question);
+        List<RagQuestionEntity> conversationQuestions = ragQuestionRepository
+            .findByUserIdAndConversationIdOrderByCreatedAtAsc(userId, conversationId);
+        if (conversationQuestions.isEmpty()) {
+            return List.of(question);
+        }
+        return conversationQuestions;
+    }
+
+    private Long resolveConversationId(long userId, Long requestedConversationId) {
+        if (requestedConversationId == null || requestedConversationId <= 0) {
+            return null;
+        }
+        return ragQuestionRepository.findByIdAndUserId(requestedConversationId, userId)
+            .map(this::effectiveConversationId)
+            .orElse(null);
+    }
+
+    private RagQuestionEntity ensureConversationId(RagQuestionEntity question) {
+        if (question.getConversationId() == null) {
+            question.setConversationId(question.getId());
+            return ragQuestionRepository.save(question);
+        }
+        return question;
+    }
+
+    private Long effectiveConversationId(RagQuestionEntity question) {
+        return question.getConversationId() == null ? question.getId() : question.getConversationId();
     }
 
     private String buildConversationTitle(String questionText) {

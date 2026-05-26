@@ -16,6 +16,7 @@ public record ChatRequest(
     List<Long> currentPageChunkIds,
     String selectedText,
     String answerStyle,
-    List<ChatMessage> history
+    List<ChatMessage> history,
+    Long conversationId
 ) {
 }

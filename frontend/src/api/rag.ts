@@ -3,6 +3,8 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
 import type { ChatPayload, HistoryItem, StreamChatPayload, SummaryResult, RagSource } from '@/types'
 
+const CHAT_HISTORY_CONVERSATION_KEY = 'learning-assistant.chat.history-conversations'
+
 export async function chat(payload: ChatPayload): Promise<HistoryItem> {
   const { data } = await api.post('/rag/chat', payload)
   return data
@@ -11,7 +13,7 @@ export async function chat(payload: ChatPayload): Promise<HistoryItem> {
 export interface StreamCallbacks {
   onSources?: (sources: RagSource[]) => void
   onChunk?: (delta: string) => void
-  onDone?: (result: { questionId: number; answer: string }) => void
+  onDone?: (result: { questionId: number | string; conversationId?: number | string; answer: string }) => void
   onError?: (message: string) => void
 }
 
@@ -44,41 +46,54 @@ export function chatStream(
         callbacks.onError?.('无法读取响应流')
         return
       }
+
       const decoder = new TextDecoder()
       let buffer = ''
+      let currentEvent = ''
+      let receivedTerminalEvent = false
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-        buffer += decoder.decode(value, { stream: true })
 
+        buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
 
-        let currentEvent = ''
         for (const line of lines) {
           if (line.startsWith('event:')) {
             currentEvent = line.slice(6).trim()
-          } else if (line.startsWith('data:')) {
-            const jsonStr = line.slice(5).trim()
-            if (!jsonStr) continue
-            try {
-              const data = JSON.parse(jsonStr)
-              if (currentEvent === 'sources') {
-                callbacks.onSources?.(data.sources || [])
-              } else if (currentEvent === 'chunk') {
-                callbacks.onChunk?.(data.delta || '')
-              } else if (currentEvent === 'done') {
-                callbacks.onDone?.(data)
-              } else if (currentEvent === 'error') {
-                callbacks.onError?.(data.message || '未知错误')
-              }
-            } catch {
-              // skip malformed JSON
+            continue
+          }
+
+          if (!line.startsWith('data:')) continue
+
+          const jsonStr = line.slice(5).trim()
+          if (!jsonStr) continue
+
+          try {
+            const data = JSON.parse(jsonStr)
+            if (currentEvent === 'sources') {
+              callbacks.onSources?.(data.sources || [])
+            } else if (currentEvent === 'chunk') {
+              callbacks.onChunk?.(data.delta || '')
+            } else if (currentEvent === 'done') {
+              receivedTerminalEvent = true
+              callbacks.onDone?.(data)
+            } else if (currentEvent === 'error') {
+              receivedTerminalEvent = true
+              callbacks.onError?.(data.message || '未知错误')
             }
+          } catch {
+            // Skip malformed SSE data instead of breaking the whole stream.
+          } finally {
             currentEvent = ''
           }
         }
+      }
+
+      if (!receivedTerminalEvent) {
+        callbacks.onError?.('回答已中断，请重试')
       }
     })
     .catch((err) => {
@@ -92,7 +107,7 @@ export function chatStream(
 
 export async function listHistory(): Promise<HistoryItem[]> {
   const { data } = await api.get('/rag/history')
-  return data
+  return groupHistoryByConversation(data || [])
 }
 
 export async function getHistory(id: string): Promise<HistoryItem> {
@@ -149,6 +164,35 @@ export function useHistory() {
     queryKey: ['history'],
     queryFn: listHistory,
   })
+}
+
+function groupHistoryByConversation(items: HistoryItem[]): HistoryItem[] {
+  const grouped = new Map<string, HistoryItem>()
+  const localConversationMap = readLocalConversationMap()
+
+  for (const item of items) {
+    const itemId = String(item.id)
+    const key = String(item.conversationId || localConversationMap[itemId] || itemId)
+    const current = grouped.get(key)
+    if (!current || new Date(item.createdAt).getTime() > new Date(current.createdAt).getTime()) {
+      grouped.set(key, { ...item, conversationId: key })
+    }
+  }
+
+  return Array.from(grouped.values()).sort((left, right) => {
+    if (left.pinned !== right.pinned) return left.pinned ? -1 : 1
+    return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+  })
+}
+
+function readLocalConversationMap(): Record<string, string> {
+  if (typeof window === 'undefined') return {}
+  try {
+    return JSON.parse(localStorage.getItem(CHAT_HISTORY_CONVERSATION_KEY) || '{}')
+  } catch {
+    localStorage.removeItem(CHAT_HISTORY_CONVERSATION_KEY)
+    return {}
+  }
 }
 
 export function useHistoryDetail(id: string | null) {

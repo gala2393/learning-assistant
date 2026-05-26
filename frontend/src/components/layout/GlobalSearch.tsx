@@ -84,7 +84,7 @@ export function GlobalSearch({ open, onClose }: GlobalSearchProps) {
                       <div className="flex items-center gap-2">
                         <p className="truncate text-sm font-medium">{item.question}</p>
                         {item.sources?.length ? (
-                          <span className="shrink-0 rounded bg-[#eef5ff] px-1.5 py-0.5 text-[10px] text-[#2f80ff]">
+                          <span className="shrink-0 rounded bg-[#eef0f2] px-1.5 py-0.5 text-[10px] text-[#4b5563]">
                             资料问答
                           </span>
                         ) : null}

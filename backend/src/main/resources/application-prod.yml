@@ -7,9 +7,40 @@ spring:
         format_sql: false
 
 server:
-  port: ${SERVER_PORT:8080}
+  port: ${PORT:${SERVER_PORT:8080}}
 
 app:
+  storage-dir: ${APP_STORAGE_DIR:/data/learning-assistant-files}
+  cors:
+    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5174,http://127.0.0.1:5174}
+  auth:
+    secret: ${APP_AUTH_SECRET}
+    token-ttl-seconds: ${APP_AUTH_TOKEN_TTL_SECONDS:604800}
+  email-code:
+    enabled: ${EMAIL_CODE_ENABLED:false}
+    ttl-seconds: ${EMAIL_CODE_TTL_SECONDS:300}
+    email-cooldown-seconds: ${EMAIL_CODE_EMAIL_COOLDOWN_SECONDS:60}
+    ip-hourly-limit: ${EMAIL_CODE_IP_HOURLY_LIMIT:10}
+    subject: ${EMAIL_CODE_SUBJECT:Learning Assistant Login Code}
+    from: ${EMAIL_CODE_FROM:${SMTP_USERNAME:}}
+    default-provider: ${EMAIL_CODE_DEFAULT_PROVIDER:qq}
+    log-code-when-mail-disabled: ${EMAIL_CODE_LOG_WHEN_DISABLED:true}
+    qq:
+      host: ${EMAIL_CODE_QQ_HOST:${SMTP_HOST:smtp.qq.com}}
+      port: ${EMAIL_CODE_QQ_PORT:${SMTP_PORT:465}}
+      username: ${EMAIL_CODE_QQ_USERNAME:${SMTP_USERNAME:}}
+      password: ${EMAIL_CODE_QQ_PASSWORD:${SMTP_PASSWORD:}}
+      from: ${EMAIL_CODE_QQ_FROM:${EMAIL_CODE_FROM:${SMTP_USERNAME:}}}
+      auth: ${EMAIL_CODE_QQ_AUTH:${SMTP_AUTH:true}}
+      ssl-enable: ${EMAIL_CODE_QQ_SSL_ENABLE:${SMTP_SSL_ENABLE:true}}
+    netease:
+      host: ${EMAIL_CODE_NETEASE_HOST:smtp.163.com}
+      port: ${EMAIL_CODE_NETEASE_PORT:465}
+      username: ${EMAIL_CODE_NETEASE_USERNAME:}
+      password: ${EMAIL_CODE_NETEASE_PASSWORD:}
+      from: ${EMAIL_CODE_NETEASE_FROM:${EMAIL_CODE_NETEASE_USERNAME:}}
+      auth: ${EMAIL_CODE_NETEASE_AUTH:true}
+      ssl-enable: ${EMAIL_CODE_NETEASE_SSL_ENABLE:true}
   llm:
     enabled: ${LLM_ENABLED:true}
     base-url: ${LLM_BASE_URL:}
@@ -24,3 +55,23 @@ app:
     timeout: ${EMBEDDING_TIMEOUT:30s}
     top-k: ${EMBEDDING_TOP_K:5}
     score-threshold: ${EMBEDDING_SCORE_THRESHOLD:0.55}
+  ocr:
+    enabled: ${OCR_ENABLED:false}
+    lang: ${OCR_LANG:eng+chi_sim}
+    command: ${OCR_COMMAND:tesseract}
+    command-template: ${OCR_COMMAND_TEMPLATE:}
+    timeout: ${OCR_TIMEOUT:20s}
+  document-preview:
+    render-dpi: ${DOCUMENT_PREVIEW_RENDER_DPI:144}
+    converter:
+      enabled: ${DOCUMENT_PREVIEW_CONVERTER_ENABLED:true}
+      command: ${DOCUMENT_PREVIEW_CONVERTER_COMMAND:soffice}
+      timeout: ${DOCUMENT_PREVIEW_CONVERTER_TIMEOUT:60s}
+  pdf:
+    compression:
+      enabled: ${PDF_COMPRESSION_ENABLED:true}
+      command: ${PDF_COMPRESSION_COMMAND:gs}
+      command-template: ${PDF_COMPRESSION_COMMAND_TEMPLATE:}
+      timeout: ${PDF_COMPRESSION_TIMEOUT:180s}
+      min-bytes: ${PDF_COMPRESSION_MIN_BYTES:67108864}
+      target-dpi: ${PDF_COMPRESSION_TARGET_DPI:144}

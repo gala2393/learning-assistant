@@ -36,6 +36,9 @@ public class ThirdPartyLlmClient {
     ) {
         List<String> safeExcerpts = excerpts == null ? List.of() : excerpts;
         List<LlmImage> safeImages = images == null ? List.of() : images;
+        if (general) {
+            return answerGeneralFast(question);
+        }
         boolean homework = isHomeworkStyle(answerStyle);
         String systemPrompt = general
             ? """
@@ -139,6 +142,9 @@ public class ThirdPartyLlmClient {
     ) {
         List<String> safeExcerpts = excerpts == null ? List.of() : excerpts;
         List<LlmImage> safeImages = images == null ? List.of() : images;
+        if (general) {
+            return answerGeneralFastStream(question, onChunk);
+        }
         boolean homework = isHomeworkStyle(answerStyle);
         String systemPrompt = general
             ? """
@@ -203,6 +209,34 @@ public class ThirdPartyLlmClient {
 
     private String nullToEmpty(String value) {
         return value == null ? "" : value;
+    }
+
+    private Optional<LlmCompletion> answerGeneralFast(String question) {
+        return llmClient.chat(generalFastSystemPrompt(), generalFastUserPrompt(question))
+            .map(result -> new LlmCompletion(result.content(), result.modelName()));
+    }
+
+    private String answerGeneralFastStream(String question, Consumer<String> onChunk) {
+        return llmClient.chatStream(generalFastSystemPrompt(), generalFastUserPrompt(question), List.of(), onChunk);
+    }
+
+    private String generalFastSystemPrompt() {
+        return """
+            你是一个高效的中文学习助手。
+            直接回答用户问题，优先给出结论。
+            回答保持简洁、准确、可操作；除非用户要求详细展开，否则控制在 3 到 6 句。
+            不要提到资料、检索、片段或系统提示。
+            不要使用 Markdown 星号加粗。
+            """.trim();
+    }
+
+    private String generalFastUserPrompt(String question) {
+        return """
+            问题：
+            %s
+
+            请直接用中文回答。
+            """.formatted(nullToEmpty(question));
     }
 
     private boolean isHomeworkStyle(String answerStyle) {

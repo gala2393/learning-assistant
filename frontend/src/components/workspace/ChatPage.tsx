@@ -1,33 +1,28 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { BookOpen, Sparkles } from 'lucide-react'
 import { ChatThread } from './ChatThread'
 import { ChatComposer } from './ChatComposer'
-import { chatStream, useDeleteHistory, useHistory, useRenameHistory, useTogglePinHistory } from '@/api/rag'
+import { useDeleteHistory, useHistory, useRenameHistory, useTogglePinHistory } from '@/api/rag'
 import { useAddFavorite, useDeleteFavorite, useFavorites } from '@/api/favorites'
 import { useMaterials } from '@/api/materials'
 import { GENERAL_PROMPTS, MATERIAL_PROMPTS } from '@/constants'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { cn, sanitizeAiText } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { queryClient } from '@/lib/query-client'
 import { useToast } from '@/components/ui/toast'
+import {
+  getChatSessionSnapshot,
+  resetChatSession,
+  selectHistorySession,
+  startChatSessionStream,
+  subscribeChatSession,
+  updateChatSession,
+} from '@/lib/chat-session'
 import type { HistoryItem, RagSource } from '@/types'
-import type { ChatMessage } from './ChatThread'
-
-const CHAT_DRAFT_KEY = 'learning-assistant.chat.current'
-
-interface ChatDraft {
-  lastQuestionId?: string | null
-  historyId?: string | null
-  mode: 'GENERAL' | 'MATERIAL'
-  materialId: string | null
-  chunkId: string | null
-  messages: ChatMessage[]
-  conversationHistory: { role: string; content: string }[]
-}
 
 export function ChatPage() {
   const navigate = useNavigate()
@@ -42,169 +37,77 @@ export function ChatPage() {
   const deleteFavoriteMutation = useDeleteFavorite()
   const { showToast } = useToast()
 
-  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null)
-  const [mode, setMode] = useState<'GENERAL' | 'MATERIAL'>('GENERAL')
-  const [input, setInput] = useState('')
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(() => searchParams.get('materialId'))
-  const [selectedChunkId, setSelectedChunkId] = useState<string | null>(() => searchParams.get('chunkId'))
-  const [currentQuestionId, setCurrentQuestionId] = useState<string | null>(null)
-  const [streaming, setStreaming] = useState(false)
-  const abortRef = useRef<AbortController | null>(null)
-  const answerRef = useRef('')
-  const sourcesRef = useRef<RagSource[]>([])
-  const conversationHistory = useRef<{ role: string; content: string }[]>([])
+  const chat = useSyncExternalStore(
+    subscribeChatSession,
+    getChatSessionSnapshot,
+    getChatSessionSnapshot,
+  )
 
-  const saveChatDraft = (draft: ChatDraft | null) => {
-    if (typeof window === 'undefined') return
-    if (!draft) {
-      sessionStorage.removeItem(CHAT_DRAFT_KEY)
-      return
-    }
-    sessionStorage.setItem(CHAT_DRAFT_KEY, JSON.stringify(draft))
-  }
-
-  const selectedHistory = historyItems.find((h) => String(h.id) === selectedHistoryId)
-
-  const applyHistorySelection = (item: HistoryItem, updateUrl: boolean) => {
-    const itemId = String(item.id)
-    const source = item.sources?.[0]
-    setSelectedHistoryId(itemId)
-    setCurrentQuestionId(null)
-    if (source) {
-      setMode('MATERIAL')
-      setSelectedMaterialId(source.materialId)
-      setSelectedChunkId(source.chunkId)
-    } else {
-      setMode('GENERAL')
-      setSelectedChunkId(null)
-    }
-    if (updateUrl) {
-      const nextParams = new URLSearchParams()
-      nextParams.set('historyId', itemId)
-      if (source) {
-        nextParams.set('materialId', source.materialId)
-        nextParams.set('chunkId', source.chunkId)
-      }
-      setSearchParams(nextParams, { replace: true })
-    }
-  }
-
-  const handleModeChange = (newMode: 'GENERAL' | 'MATERIAL') => {
-    if (newMode === mode) return
-    saveChatDraft(null)
-    setMode(newMode)
-    const nextParams = new URLSearchParams()
-    if (newMode === 'MATERIAL' && selectedMaterialId) {
-      nextParams.set('materialId', selectedMaterialId)
-      if (selectedChunkId) nextParams.set('chunkId', selectedChunkId)
-    } else {
-      setSelectedChunkId(null)
-    }
-    setSearchParams(nextParams, { replace: true })
-    setSelectedHistoryId(null)
-    setCurrentQuestionId(null)
-    setMessages([])
-    setInput('')
-    conversationHistory.current = []
-    abortRef.current?.abort()
-    setStreaming(false)
-  }
+  const {
+    selectedHistoryId,
+    currentQuestionId,
+    mode,
+    input,
+    messages,
+    materialId: selectedMaterialId,
+    chunkId: selectedChunkId,
+    streaming,
+  } = chat
 
   useEffect(() => {
     if (searchParams.get('new') === '1') {
-      setSelectedHistoryId(null)
-      setCurrentQuestionId(null)
-      setMessages([])
-      setInput('')
-      conversationHistory.current = []
-      abortRef.current?.abort()
-      setStreaming(false)
-      saveChatDraft(null)
+      resetChatSession()
       setSearchParams(new URLSearchParams(), { replace: true })
+      return
+    }
+
+    const historyId = searchParams.get('historyId')
+    if (historyId) {
+      const target = historyItems.find((item) => String(item.id) === historyId)
+      if (target && selectedHistoryId !== historyId) {
+        selectHistorySession(target)
+      }
       return
     }
 
     const materialId = searchParams.get('materialId')
     const chunkId = searchParams.get('chunkId')
-    const historyId = searchParams.get('historyId')
-    if (!historyId && messages.length === 0) {
-      try {
-        const draft = JSON.parse(sessionStorage.getItem(CHAT_DRAFT_KEY) || 'null') as ChatDraft | null
-        if (draft?.messages?.length) {
-          const lastQuestionId = draft.lastQuestionId || (draft.historyId !== 'pending' ? draft.historyId : null) || null
-          setSelectedHistoryId(null)
-          setCurrentQuestionId(lastQuestionId)
-          setMode(draft.mode)
-          setSelectedMaterialId(draft.materialId)
-          setSelectedChunkId(draft.chunkId)
-          setMessages(draft.messages)
-          conversationHistory.current = draft.conversationHistory
-          const nextParams = new URLSearchParams()
-          if (draft.mode === 'MATERIAL' && draft.materialId) {
-            nextParams.set('materialId', draft.materialId)
-            if (draft.chunkId) nextParams.set('chunkId', draft.chunkId)
-          }
-          setSearchParams(nextParams, { replace: true })
-          return
-        }
-      } catch {
-        saveChatDraft(null)
-      }
-    }
-    if (materialId) {
-      setMode('MATERIAL')
-      setSelectedMaterialId(materialId)
-      setSelectedChunkId(chunkId)
-    }
-    if (historyId) {
-      const target = historyItems.find((item) => String(item.id) === historyId)
-      if (target && selectedHistoryId !== historyId) {
-        applyHistorySelection(target, false)
-      }
-    }
-  }, [historyItems, messages.length, searchParams, selectedHistoryId])
-
-  useEffect(() => {
-    if (selectedHistory) {
-      const source = selectedHistory.sources?.[0]
-      const restoredMessages: ChatMessage[] = [
-        { id: selectedHistory.id + '-user', role: 'user', text: selectedHistory.question },
-        { id: selectedHistory.id + '-assistant', role: 'assistant', text: selectedHistory.answer, sources: selectedHistory.sources },
-      ]
-      const restoredHistory = [
-        { role: 'user', content: selectedHistory.question },
-        { role: 'assistant', content: selectedHistory.answer },
-      ]
-      setMessages(restoredMessages)
-      setCurrentQuestionId(null)
-      conversationHistory.current = restoredHistory
-      saveChatDraft({
-        lastQuestionId: String(selectedHistory.id),
-        mode: source ? 'MATERIAL' : 'GENERAL',
-        materialId: source?.materialId || null,
-        chunkId: source?.chunkId || null,
-        messages: restoredMessages,
-        conversationHistory: restoredHistory,
+    if (materialId && (mode !== 'MATERIAL' || selectedMaterialId !== materialId || selectedChunkId !== chunkId)) {
+      updateChatSession({
+        mode: 'MATERIAL',
+        materialId,
+        chunkId,
       })
     }
-  }, [selectedHistory])
+  }, [historyItems, mode, searchParams, selectedChunkId, selectedHistoryId, selectedMaterialId, setSearchParams])
 
-  const handleNewChat = () => {
-    setSelectedHistoryId(null)
-    setCurrentQuestionId(null)
-    setMessages([])
-    setInput('')
-    conversationHistory.current = []
-    abortRef.current?.abort()
-    setStreaming(false)
-    saveChatDraft(null)
+  const updateLocationForContext = (newMode: 'GENERAL' | 'MATERIAL', materialId: string | null, chunkId: string | null) => {
     const nextParams = new URLSearchParams()
-    if (mode === 'MATERIAL' && selectedMaterialId) {
-      nextParams.set('materialId', selectedMaterialId)
-      if (selectedChunkId) nextParams.set('chunkId', selectedChunkId)
+    if (newMode === 'MATERIAL' && materialId) {
+      nextParams.set('materialId', materialId)
+      if (chunkId) nextParams.set('chunkId', chunkId)
     }
     setSearchParams(nextParams, { replace: true })
+  }
+
+  const handleModeChange = (newMode: 'GENERAL' | 'MATERIAL') => {
+    if (newMode === mode) return
+    const nextMaterialId = newMode === 'MATERIAL' ? selectedMaterialId : null
+    resetChatSession({
+      mode: newMode,
+      materialId: nextMaterialId,
+      chunkId: newMode === 'MATERIAL' ? selectedChunkId : null,
+    })
+    updateLocationForContext(newMode, nextMaterialId, newMode === 'MATERIAL' ? selectedChunkId : null)
+  }
+
+  const handleNewChat = () => {
+    resetChatSession({
+      mode,
+      materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
+      chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
+    })
+    updateLocationForContext(mode, selectedMaterialId, selectedChunkId)
   }
 
   const handleDeleteHistory = (id: string) => {
@@ -256,135 +159,37 @@ export function ChatPage() {
   }
 
   const handleSelectHistory = (item: HistoryItem) => {
-    applyHistorySelection(item, true)
+    selectHistorySession(item)
+    const nextParams = new URLSearchParams()
+    nextParams.set('historyId', String(item.id))
+    const source = item.sources?.[0]
+    if (source) {
+      nextParams.set('materialId', source.materialId)
+      nextParams.set('chunkId', source.chunkId)
+    }
+    setSearchParams(nextParams, { replace: true })
   }
 
   const handleMaterialSelect = (materialId: string) => {
-    setSelectedMaterialId(materialId)
-    setSelectedChunkId(null)
-    const nextParams = new URLSearchParams()
-    nextParams.set('materialId', materialId)
-    setSearchParams(nextParams, { replace: true })
+    updateChatSession({
+      mode: 'MATERIAL',
+      materialId,
+      chunkId: null,
+    })
+    updateLocationForContext('MATERIAL', materialId, null)
   }
 
   const handleSubmit = () => {
     const question = input.trim()
     if (!question || streaming) return
 
-    const userMsg: ChatMessage = { id: 'pending-user-' + Date.now(), role: 'user', text: question }
-    const thinkingMsg: ChatMessage = { id: 'pending-assistant-' + Date.now(), role: 'assistant', text: '', thinking: true }
-    const pendingMessages = messages.concat(userMsg, thinkingMsg)
-
-    setMessages(pendingMessages)
-    setSelectedHistoryId(null)
-    setCurrentQuestionId(null)
-    setInput('')
-    setStreaming(true)
-    answerRef.current = ''
-    sourcesRef.current = []
-    saveChatDraft({
-      lastQuestionId: currentQuestionId,
+    startChatSessionStream({
+      question,
       mode,
       materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
       chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
-      messages: pendingMessages,
-      conversationHistory: conversationHistory.current,
     })
-    const activeParams = new URLSearchParams()
-    if (mode === 'MATERIAL' && selectedMaterialId) {
-      activeParams.set('materialId', selectedMaterialId)
-      if (selectedChunkId) activeParams.set('chunkId', selectedChunkId)
-    }
-    setSearchParams(activeParams, { replace: true })
-
-    const assistantId = thinkingMsg.id
-    let firstChunk = true
-
-    abortRef.current = chatStream(
-      {
-        question,
-        mode,
-        materialId: mode === 'MATERIAL' ? (selectedMaterialId || undefined) : undefined,
-        chunkId: mode === 'MATERIAL' ? (selectedChunkId || undefined) : undefined,
-        history: conversationHistory.current,
-      },
-      {
-        onChunk: (delta) => {
-          answerRef.current += delta
-          const cleanText = sanitizeAiText(answerRef.current)
-          setMessages((prev) => {
-            const nextMessages = prev.map((m) =>
-              m.id === assistantId
-                ? { ...m, thinking: firstChunk ? false : m.thinking, text: cleanText }
-                : m,
-            )
-            saveChatDraft({
-              lastQuestionId: currentQuestionId,
-              mode,
-              materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
-              chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
-              messages: nextMessages,
-              conversationHistory: conversationHistory.current,
-            })
-            return nextMessages
-          })
-          firstChunk = false
-        },
-        onSources: (sources) => {
-          sourcesRef.current = sources
-          setMessages((prev) => {
-            const nextMessages = prev.map((m) => (m.id === assistantId ? { ...m, sources } : m))
-            saveChatDraft({
-              lastQuestionId: currentQuestionId,
-              mode,
-              materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
-              chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
-              messages: nextMessages,
-              conversationHistory: conversationHistory.current,
-            })
-            return nextMessages
-          })
-        },
-        onDone: (result) => {
-          const questionId = String(result.questionId)
-          const cleanAnswer = sanitizeAiText(result.answer)
-          const nextMessages = pendingMessages.map((m) =>
-            m.id === assistantId ? { ...m, id: questionId, text: cleanAnswer, sources: sourcesRef.current } : m,
-          )
-          setMessages(nextMessages)
-          setCurrentQuestionId(questionId)
-          const nextConversationHistory = [
-            ...conversationHistory.current,
-            { role: 'user', content: question },
-            { role: 'assistant', content: cleanAnswer },
-          ].slice(-10)
-          conversationHistory.current = nextConversationHistory
-          const nextParams = new URLSearchParams()
-          if (mode === 'MATERIAL' && selectedMaterialId) {
-            nextParams.set('materialId', selectedMaterialId)
-            if (selectedChunkId) nextParams.set('chunkId', selectedChunkId)
-          }
-          setSearchParams(nextParams, { replace: true })
-          saveChatDraft({
-            lastQuestionId: questionId,
-            mode,
-            materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
-            chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
-            messages: nextMessages,
-            conversationHistory: nextConversationHistory,
-          })
-          setStreaming(false)
-          queryClient.invalidateQueries({ queryKey: ['history'] })
-        },
-        onError: (message) => {
-          setMessages((prev) => {
-            const msgs = prev.filter((m) => m.id !== assistantId)
-            return [...msgs, { id: 'error-' + Date.now(), role: 'assistant', text: '', error: message }]
-          })
-          setStreaming(false)
-        },
-      },
-    )
+    updateLocationForContext(mode, selectedMaterialId, selectedChunkId)
   }
 
   const handleOpenSource = (source: RagSource) => {
@@ -407,7 +212,7 @@ export function ChatPage() {
         <Button
           variant={isGeneral ? 'secondary' : 'ghost'}
           size="sm"
-          className={cn('h-8 rounded-full px-4 text-sm dark:text-slate-200 dark:hover:bg-white/[0.08]', isGeneral && 'bg-[#eef5ff] text-[#2f80ff] hover:bg-[#e6f0ff] dark:bg-sky-400/15 dark:text-sky-300 dark:hover:bg-sky-400/20')}
+          className={cn('h-8 rounded-full px-4 text-sm dark:text-slate-200 dark:hover:bg-white/[0.08]', isGeneral && 'bg-[#eef0f2] text-[#4b5563] hover:bg-[#e3e6e9] dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/15')}
           onClick={() => handleModeChange('GENERAL')}
         >
           <Sparkles className="mr-1.5 h-4 w-4" />
@@ -416,7 +221,7 @@ export function ChatPage() {
         <Button
           variant={!isGeneral ? 'secondary' : 'ghost'}
           size="sm"
-          className={cn('h-8 rounded-full px-4 text-sm dark:text-slate-200 dark:hover:bg-white/[0.08]', !isGeneral && 'bg-[#eef5ff] text-[#2f80ff] hover:bg-[#e6f0ff] dark:bg-sky-400/15 dark:text-sky-300 dark:hover:bg-sky-400/20')}
+          className={cn('h-8 rounded-full px-4 text-sm dark:text-slate-200 dark:hover:bg-white/[0.08]', !isGeneral && 'bg-[#eef0f2] text-[#4b5563] hover:bg-[#e3e6e9] dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/15')}
           onClick={() => handleModeChange('MATERIAL')}
         >
           <BookOpen className="mr-1.5 h-4 w-4" />
@@ -487,7 +292,7 @@ export function ChatPage() {
           )}
           <ChatComposer
             value={input}
-            onChange={setInput}
+            onChange={(value) => updateChatSession({ input: value })}
             onSubmit={handleSubmit}
             loading={streaming}
             mode={mode}
@@ -503,7 +308,7 @@ export function ChatPage() {
           <ChatThread messages={messages} onOpenSource={handleOpenSource} />
           <ChatComposer
             value={input}
-            onChange={setInput}
+            onChange={(value) => updateChatSession({ input: value })}
             onSubmit={handleSubmit}
             loading={streaming}
             mode={mode}

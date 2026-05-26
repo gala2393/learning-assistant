@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record RagHistoryItemResponse(
     Long id,
+    Long conversationId,
     String title,
     String question,
     String answer,
