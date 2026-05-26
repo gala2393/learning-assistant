@@ -19,6 +19,8 @@ VITE_API_BASE=https://<your-railway-backend-domain>/api
 
 The app reads `VITE_API_BASE` at build time. After changing it, redeploy the Vercel project.
 
+If you use a Vercel preview or the default `*.vercel.app` domain, make sure Railway also allows that exact origin in `APP_CORS_ALLOWED_ORIGINS`.
+
 ## Routing
 
 `vercel.json` keeps browser refreshes working for React Router by rewriting non-API paths to `index.html`.
