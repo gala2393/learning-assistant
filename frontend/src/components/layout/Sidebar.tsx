@@ -40,6 +40,7 @@ import { UserAvatar } from './UserAvatar'
 import { useHistory, useDeleteHistory, useRenameHistory, useTogglePinHistory } from '@/api/rag'
 import { useToast } from '@/components/ui/toast'
 import { queryClient } from '@/lib/query-client'
+import { useAddFavorite, useDeleteFavorite, useFavorites } from '@/api/favorites'
 
 const iconMap: Record<string, React.ElementType> = {
   'message-square': MessageSquare,
@@ -75,9 +76,12 @@ export function Sidebar() {
   const isChat = location.pathname === '/workspace/chat'
   const sections = isAdminRoute ? ADMIN_SECTIONS : WORKSPACE_SECTIONS
   const { data: historyItems = [] } = useHistory()
+  const { data: favorites = [] } = useFavorites()
   const deleteHistoryMutation = useDeleteHistory()
   const renameHistoryMutation = useRenameHistory()
   const togglePinHistoryMutation = useTogglePinHistory()
+  const addFavoriteMutation = useAddFavorite()
+  const deleteFavoriteMutation = useDeleteFavorite()
 
   useEffect(() => {
     api.get('/llm/status')
@@ -100,6 +104,9 @@ export function Sidebar() {
   const openHistory = (item: HistoryItem) => {
     navigate(`/workspace/chat?historyId=${encodeURIComponent(String(item.id))}`)
   }
+
+  const getFavoriteId = (item: HistoryItem) =>
+    favorites.find((favorite) => String(favorite.questionId) === String(item.id))?.id || item.favoriteId || null
 
   const handleRename = (item: HistoryItem) => {
     const next = window.prompt('重命名会话', item.title || item.question)
@@ -134,6 +141,27 @@ export function Sidebar() {
       },
       onError: (error) => showToast(error instanceof Error ? error.message : '删除失败'),
     })
+  }
+
+  const handleToggleFavorite = (item: HistoryItem) => {
+    const favoriteId = getFavoriteId(item)
+    if (favoriteId) {
+      deleteFavoriteMutation.mutate(favoriteId, {
+        onSuccess: () => {
+          showToast('已取消收藏')
+          queryClient.invalidateQueries({ queryKey: ['history'] })
+        },
+        onError: (error) => showToast(error instanceof Error ? error.message : '取消收藏失败'),
+      })
+    } else {
+      addFavoriteMutation.mutate(String(item.id), {
+        onSuccess: () => {
+          showToast('已加入收藏')
+          queryClient.invalidateQueries({ queryKey: ['history'] })
+        },
+        onError: (error) => showToast(error instanceof Error ? error.message : '收藏失败'),
+      })
+    }
   }
 
   return (
@@ -272,6 +300,16 @@ export function Sidebar() {
                         sideOffset={8}
                         className="w-40 rounded-2xl border-[#eceff3] bg-white/95 p-1.5 shadow-[0_14px_32px_rgba(15,23,42,0.10)] backdrop-blur-sm"
                       >
+                        <DropdownMenuItem
+                          className="rounded-xl px-3 py-2 text-[#3f4247] focus:bg-[#eef1f4] focus:text-[#3f4247]"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            handleToggleFavorite(item)
+                          }}
+                        >
+                          <Star className={cn('mr-3 h-4 w-4', getFavoriteId(item) && 'fill-amber-400 text-amber-500')} />
+                          {getFavoriteId(item) ? '取消收藏' : '收藏'}
+                        </DropdownMenuItem>
                         <DropdownMenuItem
                           className="rounded-xl px-3 py-2 text-[#3f4247] focus:bg-[#eef1f4] focus:text-[#3f4247]"
                           onClick={(event) => {

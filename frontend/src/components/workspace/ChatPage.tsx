@@ -20,7 +20,8 @@ import type { ChatMessage } from './ChatThread'
 const CHAT_DRAFT_KEY = 'learning-assistant.chat.current'
 
 interface ChatDraft {
-  historyId: string
+  lastQuestionId?: string | null
+  historyId?: string | null
   mode: 'GENERAL' | 'MATERIAL'
   materialId: string | null
   chunkId: string | null
@@ -130,16 +131,16 @@ export function ChatPage() {
     if (!historyId && messages.length === 0) {
       try {
         const draft = JSON.parse(sessionStorage.getItem(CHAT_DRAFT_KEY) || 'null') as ChatDraft | null
-        if (draft?.historyId) {
-          setSelectedHistoryId(draft.historyId)
-          setCurrentQuestionId(draft.historyId)
+        if (draft?.messages?.length) {
+          const lastQuestionId = draft.lastQuestionId || (draft.historyId !== 'pending' ? draft.historyId : null) || null
+          setSelectedHistoryId(null)
+          setCurrentQuestionId(lastQuestionId)
           setMode(draft.mode)
           setSelectedMaterialId(draft.materialId)
           setSelectedChunkId(draft.chunkId)
           setMessages(draft.messages)
           conversationHistory.current = draft.conversationHistory
           const nextParams = new URLSearchParams()
-          nextParams.set('historyId', draft.historyId)
           if (draft.mode === 'MATERIAL' && draft.materialId) {
             nextParams.set('materialId', draft.materialId)
             if (draft.chunkId) nextParams.set('chunkId', draft.chunkId)
@@ -179,7 +180,7 @@ export function ChatPage() {
       setCurrentQuestionId(null)
       conversationHistory.current = restoredHistory
       saveChatDraft({
-        historyId: String(selectedHistory.id),
+        lastQuestionId: String(selectedHistory.id),
         mode: source ? 'MATERIAL' : 'GENERAL',
         materialId: source?.materialId || null,
         chunkId: source?.chunkId || null,
@@ -282,13 +283,19 @@ export function ChatPage() {
     answerRef.current = ''
     sourcesRef.current = []
     saveChatDraft({
-      historyId: 'pending',
+      lastQuestionId: currentQuestionId,
       mode,
       materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
       chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
       messages: pendingMessages,
       conversationHistory: conversationHistory.current,
     })
+    const activeParams = new URLSearchParams()
+    if (mode === 'MATERIAL' && selectedMaterialId) {
+      activeParams.set('materialId', selectedMaterialId)
+      if (selectedChunkId) activeParams.set('chunkId', selectedChunkId)
+    }
+    setSearchParams(activeParams, { replace: true })
 
     const assistantId = thinkingMsg.id
     let firstChunk = true
@@ -312,7 +319,7 @@ export function ChatPage() {
                 : m,
             )
             saveChatDraft({
-              historyId: 'pending',
+              lastQuestionId: currentQuestionId,
               mode,
               materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
               chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
@@ -328,7 +335,7 @@ export function ChatPage() {
           setMessages((prev) => {
             const nextMessages = prev.map((m) => (m.id === assistantId ? { ...m, sources } : m))
             saveChatDraft({
-              historyId: 'pending',
+              lastQuestionId: currentQuestionId,
               mode,
               materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
               chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
@@ -346,7 +353,6 @@ export function ChatPage() {
           )
           setMessages(nextMessages)
           setCurrentQuestionId(questionId)
-          setSelectedHistoryId(questionId)
           const nextConversationHistory = [
             ...conversationHistory.current,
             { role: 'user', content: question },
@@ -354,14 +360,13 @@ export function ChatPage() {
           ].slice(-10)
           conversationHistory.current = nextConversationHistory
           const nextParams = new URLSearchParams()
-          nextParams.set('historyId', questionId)
           if (mode === 'MATERIAL' && selectedMaterialId) {
             nextParams.set('materialId', selectedMaterialId)
             if (selectedChunkId) nextParams.set('chunkId', selectedChunkId)
           }
           setSearchParams(nextParams, { replace: true })
           saveChatDraft({
-            historyId: questionId,
+            lastQuestionId: questionId,
             mode,
             materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
             chunkId: mode === 'MATERIAL' ? selectedChunkId : null,

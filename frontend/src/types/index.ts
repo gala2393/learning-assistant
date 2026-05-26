@@ -186,7 +186,5 @@ export interface PageResult<T> {
 export interface LlmStatus {
   enabled: boolean
   configured: boolean
-  baseUrl: string
-  model: string
   message: string
 }
