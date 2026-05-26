@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
@@ -69,10 +70,15 @@ function splitAssistantParagraphs(text: string) {
 
 export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
   const { session } = useAuth()
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [messages])
 
   return (
-    <ScrollArea className="flex-1 px-4">
-      <div className="max-w-3xl mx-auto space-y-4 py-4">
+    <ScrollArea className="h-full min-h-0 w-full overflow-hidden px-4">
+      <div className="mx-auto max-w-3xl space-y-4 py-4">
         {messages.length === 0 && <div className="h-8" />}
         {messages.map((msg) => (
           <motion.div
@@ -153,6 +159,7 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
             {msg.role === 'user' && <UserAvatar session={session} className="mt-1 h-9 w-9 shrink-0 text-sm" />}
           </motion.div>
         ))}
+        <div ref={bottomRef} />
       </div>
     </ScrollArea>
   )

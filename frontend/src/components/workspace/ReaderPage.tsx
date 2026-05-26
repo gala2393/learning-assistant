@@ -18,6 +18,9 @@ export function ReaderPage() {
 
   const selectedMaterial = materials.find((m) => m.id === selectedMaterialId) || null
   const currentChunk = chunks[selectedChunkIndex] || null
+  const currentPage = pages.find((page) => page.pageNo === currentChunk?.pageNo)
+    || pages.find((page) => page.chunkIds.map(String).includes(String(currentChunk?.id)))
+    || pages[0]
 
   useEffect(() => {
     const materialId = searchParams.get('materialId')
@@ -80,7 +83,7 @@ export function ReaderPage() {
 
   return (
     <motion.div
-      className="flex h-full"
+      className="flex h-full min-h-0 overflow-hidden"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
@@ -94,7 +97,7 @@ export function ReaderPage() {
         onSelectChunk={handleSelectChunk}
       />
 
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {currentChunk ? (
           <ReaderPaper
             chunk={currentChunk}
@@ -123,6 +126,8 @@ export function ReaderPage() {
         material={selectedMaterial}
         chunk={currentChunk}
         chunks={chunks}
+        currentPageNo={currentPage?.pageNo ?? currentChunk?.pageNo ?? null}
+        currentPageChunkIds={currentPage?.chunkIds || []}
         onNavigateToChunk={handleSelectChunk}
       />
     </motion.div>

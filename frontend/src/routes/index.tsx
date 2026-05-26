@@ -5,6 +5,7 @@ import { LoginForm } from '@/components/auth/LoginForm'
 import { RegisterForm } from '@/components/auth/RegisterForm'
 import { AppShell } from '@/components/layout/AppShell'
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute'
+import { RouteFallback } from '@/components/layout/RouteFallback'
 import { ChatPage } from '@/components/workspace/ChatPage'
 import { MaterialsPage } from '@/components/workspace/MaterialsPage'
 import { ReaderPage } from '@/components/workspace/ReaderPage'
@@ -63,6 +64,7 @@ export const router = createBrowserRouter([
           },
         ],
       },
+      { path: '*', element: <RouteFallback /> },
     ],
   },
 ])

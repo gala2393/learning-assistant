@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mytext.learningassistant.embedding.EmbeddingClient;
 import com.mytext.learningassistant.llm.LlmCompletion;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
 
@@ -47,10 +48,14 @@ class RagMaterialQaAcceptanceTest {
     private ObjectMapper objectMapper;
 
     @MockBean
+    private EmbeddingClient embeddingClient;
+
+    @MockBean
     private ThirdPartyLlmClient thirdPartyLlmClient;
 
     @BeforeEach
     void useLocalFallbackByDefault() {
+        when(embeddingClient.embed(anyString())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean(), any())).thenReturn(Optional.empty());
@@ -125,6 +130,62 @@ class RagMaterialQaAcceptanceTest {
         Assertions.assertEquals(0, noEvidenceAnswer.at("/sources").size(), noEvidenceAnswer.toPrettyString());
         assertAnswerContains(noEvidenceAnswer, "\u5f53\u524d\u8d44\u6599\u672a\u68c0\u7d22\u5230\u8db3\u591f\u9875\u7801");
         assertAnswerNotContains(noEvidenceAnswer, "Other Database Material");
+    }
+
+    @Test
+    void semanticRewriteQuestionCanUseEmbeddingRetrievalWithinCurrentMaterial() throws Exception {
+        when(embeddingClient.embed(org.mockito.ArgumentMatchers.contains("retrieval enhanced generation")))
+            .thenReturn(Optional.of(List.of(0.9, 0.1, 0.1)));
+        when(embeddingClient.embed(org.mockito.ArgumentMatchers.contains("RAG refers to retrieval augmented generation")))
+            .thenReturn(Optional.of(List.of(0.9, 0.1, 0.1)));
+        when(embeddingClient.embed(org.mockito.ArgumentMatchers.argThat(text ->
+            text != null && text.contains("BM25 and vector search are different"))))
+            .thenReturn(Optional.of(List.of(0.1, 0.9, 0.1)));
+
+        String token = registerAndLogin(uniqueName("rag-embedding-user"));
+        Long materialId = uploadTextMaterial(
+            token,
+            "Embedding Retrieval Material",
+            "RAG refers to retrieval augmented generation."
+                + "\n\nBM25 and vector search are different: BM25 matches exact terms, while vector search captures semantic similarity."
+        );
+
+        JsonNode answer = chat(token, "What is retrieval enhanced generation?", materialId, null);
+        assertFirstSourceExcerptContains(answer, "RAG refers to retrieval augmented generation");
+    }
+
+    @Test
+    void currentPageChunkIdsCanAnchorReaderQaEvenWithoutChunkId() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-page-context-user"));
+
+        Long materialId = uploadPdfMaterial(
+            token,
+            "Reader Page Context Material",
+            "PAGE_ONE_MARKER Photosynthesis converts sunlight into plant energy.",
+            "PAGE_TWO_MARKER Database indexes speed lookup and filtering."
+        );
+        JsonNode chunks = getChunks(token, materialId);
+        Long pageTwoChunkId = findChunkIdContaining(chunks, "PAGE_TWO_MARKER");
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("question", "这一页讲了什么？");
+        payload.put("mode", "MATERIAL");
+        payload.put("materialId", materialId);
+        payload.put("currentPageNo", 2);
+        payload.put("currentPageChunkIds", List.of(pageTwoChunkId));
+
+        var result = mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(payload)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andReturn();
+
+        JsonNode answer = objectMapper.readTree(result.getResponse().getContentAsString()).at("/data");
+        assertAnswerContains(answer, "PAGE_TWO_MARKER");
+        assertAnswerNotContains(answer, "PAGE_ONE_MARKER");
+        assertFirstSourceChunk(answer, pageTwoChunkId);
     }
 
     private JsonNode chat(String token, String question, Long materialId, Long chunkId) throws Exception {

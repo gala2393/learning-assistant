@@ -24,6 +24,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import com.mytext.learningassistant.common.BusinessException;
+import com.mytext.learningassistant.embedding.EmbeddingClient;
+import com.mytext.learningassistant.embedding.EmbeddingProperties;
 import com.mytext.learningassistant.llm.LlmCompletion;
 import com.mytext.learningassistant.llm.LlmImage;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
@@ -65,6 +67,8 @@ public class RagService {
     private final UserFavoriteRepository userFavoriteRepository;
     private final MaterialSummaryRepository materialSummaryRepository;
     private final ThirdPartyLlmClient thirdPartyLlmClient;
+    private final EmbeddingClient embeddingClient;
+    private final EmbeddingProperties embeddingProperties;
     private final Path storageRoot;
 
     public RagService(
@@ -75,6 +79,8 @@ public class RagService {
         UserFavoriteRepository userFavoriteRepository,
         MaterialSummaryRepository materialSummaryRepository,
         ThirdPartyLlmClient thirdPartyLlmClient,
+        EmbeddingClient embeddingClient,
+        EmbeddingProperties embeddingProperties,
         @Value("${app.storage-dir:${user.dir}/target/learning-assistant-files}") String storageDir
     ) {
         this.learningMaterialRepository = learningMaterialRepository;
@@ -84,6 +90,8 @@ public class RagService {
         this.userFavoriteRepository = userFavoriteRepository;
         this.materialSummaryRepository = materialSummaryRepository;
         this.thirdPartyLlmClient = thirdPartyLlmClient;
+        this.embeddingClient = embeddingClient;
+        this.embeddingProperties = embeddingProperties;
         this.storageRoot = Path.of(storageDir).toAbsolutePath().normalize();
     }
 
@@ -121,7 +129,7 @@ public class RagService {
         LlmCompletion completion = new LlmCompletion(
             generalChat
                 ? decorateGeneralAnswer(rawCompletion.content())
-                : decorateAnswer(request.question(), rawCompletion.content(), selectedChunks, request.answerStyle()),
+                : decorateAnswer(request, rawCompletion.content(), selectedChunks),
             rawCompletion.modelName()
         );
 
@@ -200,7 +208,7 @@ public class RagService {
 
         String decoratedAnswer = generalChat
             ? decorateGeneralAnswer(answer)
-            : decorateAnswer(request.question(), answer, selectedChunks, request.answerStyle());
+            : decorateAnswer(request, answer, selectedChunks);
 
         Long questionId = saveStreamResult(userId, request.question(), decoratedAnswer, selectedChunks);
 
@@ -219,8 +227,19 @@ public class RagService {
         if (!keywordChunks.isEmpty()) {
             return keywordChunks;
         }
+        List<ScoredChunk> currentPageChunks = findCurrentPageChunks(userId, request);
         if (request.chunkId() == null) {
-            List<ScoredChunk> topChunks = selectTopChunks(findScoredChunks(userId, request.question(), request.materialId()));
+            if (!currentPageChunks.isEmpty()) {
+                if (isLocalContextQuestion(request.question())) {
+                    return currentPageChunks.stream().limit(8).toList();
+                }
+                List<ScoredChunk> selected = new ArrayList<>();
+                Set<Long> seenChunkIds = new HashSet<>();
+                appendUniqueChunks(selected, seenChunkIds, currentPageChunks);
+                appendUniqueChunks(selected, seenChunkIds, selectVectorOrKeywordChunks(userId, request.question(), request.materialId()));
+                return limitContextChunks(selected);
+            }
+            List<ScoredChunk> topChunks = selectVectorOrKeywordChunks(userId, request.question(), request.materialId());
             if (!topChunks.isEmpty()) {
                 return topChunks;
             }
@@ -232,7 +251,7 @@ public class RagService {
 
         List<ScoredChunk> currentChunks = findChunksById(userId, request);
         if (currentChunks.isEmpty()) {
-            List<ScoredChunk> topChunks = selectTopChunks(findScoredChunks(userId, request.question(), request.materialId()));
+            List<ScoredChunk> topChunks = selectVectorOrKeywordChunks(userId, request.question(), request.materialId());
             if (!topChunks.isEmpty()) {
                 return topChunks;
             }
@@ -245,7 +264,7 @@ public class RagService {
         List<ScoredChunk> selected = new ArrayList<>();
         Set<Long> seenChunkIds = new HashSet<>();
         appendUniqueChunks(selected, seenChunkIds, currentChunks);
-        appendUniqueChunks(selected, seenChunkIds, currentPageChunks(currentChunks.get(0)));
+        appendUniqueChunks(selected, seenChunkIds, !currentPageChunks.isEmpty() ? currentPageChunks : currentPageChunks(currentChunks.get(0)));
         appendUniqueChunks(selected, seenChunkIds, currentSectionChunks(currentChunks.get(0)));
         if (isLocalContextQuestion(request.question())) {
             return selected.stream().limit(8).toList();
@@ -253,9 +272,17 @@ public class RagService {
         appendUniqueChunks(
             selected,
             seenChunkIds,
-            selectTopChunks(findScoredChunks(userId, request.question(), currentChunks.get(0).material().getId()))
+            selectVectorOrKeywordChunks(userId, request.question(), currentChunks.get(0).material().getId())
         );
-        return selected.stream().limit(6).toList();
+        return limitContextChunks(selected);
+    }
+
+    private List<ScoredChunk> selectVectorOrKeywordChunks(long userId, String question, Long materialId) {
+        List<ScoredChunk> vectorChunks = selectTopChunks(findVectorScoredChunks(userId, question, materialId));
+        if (!vectorChunks.isEmpty()) {
+            return vectorChunks;
+        }
+        return selectTopChunks(findScoredChunks(userId, question, materialId));
     }
 
     private List<ScoredChunk> findTermDefinitionChunks(long userId, String question, Long materialId) {
@@ -547,6 +574,36 @@ public class RagService {
         return materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(currentChunk.material().getId()).stream()
             .filter(chunk -> pageNo.equals(chunk.getPageNo()))
             .map(chunk -> new ScoredChunk(currentChunk.material(), chunk, chunk.getId().equals(currentChunk.chunk().getId()) ? 1.0 : 0.95))
+            .toList();
+    }
+
+    private List<ScoredChunk> findCurrentPageChunks(long userId, ChatRequest request) {
+        if (request.materialId() == null) {
+            return List.of();
+        }
+        LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(request.materialId(), userId)
+            .orElse(null);
+        if (material == null || material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+            return List.of();
+        }
+        List<MaterialChunkEntity> allChunks = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId());
+        if (request.currentPageChunkIds() != null && !request.currentPageChunkIds().isEmpty()) {
+            Set<Long> pageChunkIds = request.currentPageChunkIds().stream()
+                .filter(id -> id != null)
+                .collect(Collectors.toSet());
+            if (!pageChunkIds.isEmpty()) {
+                return allChunks.stream()
+                    .filter(chunk -> chunk.getId() != null && pageChunkIds.contains(chunk.getId()))
+                    .map(chunk -> new ScoredChunk(material, chunk, chunk.getId().equals(request.chunkId()) ? 1.0 : 0.96))
+                    .toList();
+            }
+        }
+        if (request.currentPageNo() == null) {
+            return List.of();
+        }
+        return allChunks.stream()
+            .filter(chunk -> request.currentPageNo().equals(chunk.getPageNo()))
+            .map(chunk -> new ScoredChunk(material, chunk, chunk.getId().equals(request.chunkId()) ? 1.0 : 0.96))
             .toList();
     }
 
@@ -998,7 +1055,13 @@ public class RagService {
         return normalized.substring(0, 500) + "...";
     }
 
-    private String decorateAnswer(String question, String content, List<ScoredChunk> selectedChunks, String answerStyle) {
+    private String decorateAnswer(ChatRequest request, String content, List<ScoredChunk> selectedChunks) {
+        String question = request.question();
+        String answerStyle = request.answerStyle();
+        if (request.selectedText() != null && !request.selectedText().isBlank()) {
+            String selectedAnswer = cleanAnswerText(content);
+            return selectedAnswer.isBlank() ? "鏈敓鎴愭湁鏁堝洖绛斻€?" : selectedAnswer;
+        }
         if (selectedChunks.isEmpty() && !isCasualQuestion(question)) {
             return noEvidenceAnswer(question);
         }
@@ -1176,14 +1239,47 @@ public class RagService {
         return scoredChunks;
     }
 
+    private List<ScoredChunk> findVectorScoredChunks(long userId, String question, Long materialId) {
+        Optional<List<Double>> questionEmbedding = embeddingClient.embed(question);
+        if (questionEmbedding.isEmpty() || questionEmbedding.get().isEmpty()) {
+            return List.of();
+        }
+        List<LearningMaterialEntity> materials = materialId == null
+            ? learningMaterialRepository.findByOwnerIdOrderByCreatedAtDesc(userId)
+            : learningMaterialRepository.findByIdAndOwnerId(materialId, userId).stream().toList();
+
+        List<ScoredChunk> scoredChunks = new ArrayList<>();
+        for (LearningMaterialEntity material : materials) {
+            if (material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+                continue;
+            }
+            for (MaterialChunkEntity chunk : materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId())) {
+                List<Double> chunkEmbedding = parseEmbedding(chunk.getEmbeddingJson());
+                if (chunkEmbedding.isEmpty()) {
+                    continue;
+                }
+                double score = cosineSimilarity(questionEmbedding.get(), chunkEmbedding);
+                if (Double.isNaN(score) || score < embeddingProperties.scoreThreshold()) {
+                    continue;
+                }
+                scoredChunks.add(new ScoredChunk(material, chunk, score));
+            }
+        }
+        scoredChunks.sort(Comparator.comparingDouble(ScoredChunk::score).reversed());
+        return scoredChunks;
+    }
+
     private List<ScoredChunk> selectTopChunks(List<ScoredChunk> scoredChunks) {
         List<ScoredChunk> selected = new ArrayList<>();
         Set<String> seenPages = new HashSet<>();
         for (ScoredChunk chunk : scoredChunks) {
-            if (chunk.score() < 1.0) {
+            if (chunk.score() <= 0.0) {
+                continue;
+            }
+            if (usesBm25Scores(scoredChunks) && chunk.score() < 1.0) {
                 break;
             }
-            if (selected.size() >= 5) {
+            if (selected.size() >= embeddingProperties.topK()) {
                 break;
             }
             String pageKey = chunk.material().getId() + ":" + (chunk.chunk().getPageNo() == null ? "null" : chunk.chunk().getPageNo());
@@ -1194,6 +1290,69 @@ public class RagService {
             seenPages.add(pageKey);
         }
         return selected;
+    }
+
+    private boolean usesBm25Scores(List<ScoredChunk> scoredChunks) {
+        return scoredChunks.stream().map(ScoredChunk::score).anyMatch(score -> score > 1.0);
+    }
+
+    private List<ScoredChunk> limitContextChunks(List<ScoredChunk> selected) {
+        List<ScoredChunk> limited = new ArrayList<>();
+        int totalChars = 0;
+        for (ScoredChunk chunk : selected) {
+            String text = cleanExcerptText(chunk.chunk().getChunkText());
+            if (limited.size() >= Math.max(embeddingProperties.topK(), 6)) {
+                break;
+            }
+            if (!limited.isEmpty() && totalChars + text.length() > 3500) {
+                break;
+            }
+            limited.add(chunk);
+            totalChars += text.length();
+        }
+        return limited;
+    }
+
+    private List<Double> parseEmbedding(String embeddingJson) {
+        if (embeddingJson == null || embeddingJson.isBlank() || embeddingJson.trim().startsWith("{")) {
+            return List.of();
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(embeddingJson);
+            if (!root.isArray() || root.isEmpty()) {
+                return List.of();
+            }
+            List<Double> embedding = new ArrayList<>(root.size());
+            for (com.fasterxml.jackson.databind.JsonNode node : root) {
+                if (!node.isNumber()) {
+                    return List.of();
+                }
+                embedding.add(node.asDouble());
+            }
+            return embedding;
+        } catch (Exception exception) {
+            return List.of();
+        }
+    }
+
+    private double cosineSimilarity(List<Double> left, List<Double> right) {
+        if (left.size() != right.size() || left.isEmpty()) {
+            return Double.NaN;
+        }
+        double dot = 0.0;
+        double leftNorm = 0.0;
+        double rightNorm = 0.0;
+        for (int index = 0; index < left.size(); index++) {
+            double l = left.get(index);
+            double r = right.get(index);
+            dot += l * r;
+            leftNorm += l * l;
+            rightNorm += r * r;
+        }
+        if (leftNorm == 0.0 || rightNorm == 0.0) {
+            return Double.NaN;
+        }
+        return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
     }
 
     private static final java.util.regex.Pattern IMAGE_MARKER_PATTERN =

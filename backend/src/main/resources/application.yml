@@ -45,3 +45,11 @@ app:
     api-key: ${LLM_API_KEY:}
     model: ${LLM_MODEL:}
     timeout: ${LLM_TIMEOUT:20s}
+  embedding:
+    enabled: ${EMBEDDING_ENABLED:false}
+    base-url: ${EMBEDDING_BASE_URL:}
+    api-key: ${EMBEDDING_API_KEY:}
+    model: ${EMBEDDING_MODEL:text-embedding-v3}
+    timeout: ${EMBEDDING_TIMEOUT:20s}
+    top-k: ${EMBEDDING_TOP_K:5}
+    score-threshold: ${EMBEDDING_SCORE_THRESHOLD:0.55}

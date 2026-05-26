@@ -6,7 +6,6 @@ import { MaterialGrid } from './MaterialGrid'
 import { queryClient } from '@/lib/query-client'
 import {
   useMaterials,
-  useImportWebMaterial,
   useDeleteMaterial,
   useUpdateMaterial,
   useReparseMaterial,
@@ -33,7 +32,6 @@ export function MaterialsPage() {
   const navigate = useNavigate()
   const { showToast } = useToast()
   const { data: materials = [], isLoading } = useMaterials()
-  const importWebMutation = useImportWebMaterial()
   const deleteMutation = useDeleteMaterial()
   const updateMutation = useUpdateMaterial()
   const reparseMutation = useReparseMaterial()
@@ -50,59 +48,56 @@ export function MaterialsPage() {
 
   const debouncedKeyword = useDebounce(keyword, 300)
 
-  const filtered = materials.filter((m) => {
-    if (sourceTypeFilter !== 'ALL' && m.sourceType !== sourceTypeFilter) return false
-    if (statusFilter !== 'ALL' && m.parseStatus !== statusFilter) return false
+  const filtered = materials.filter((material) => {
+    if (sourceTypeFilter !== 'ALL' && material.sourceType !== sourceTypeFilter) return false
+    if (statusFilter !== 'ALL' && material.parseStatus !== statusFilter) return false
     if (debouncedKeyword) {
       const kw = debouncedKeyword.toLowerCase()
-      return (m.title || '').toLowerCase().includes(kw) || (m.originalName || '').toLowerCase().includes(kw)
+      return (material.title || '').toLowerCase().includes(kw) || (material.originalName || '').toLowerCase().includes(kw)
     }
     return true
   })
 
-  const handleUpload = async (data: { title?: string; url?: string; file?: File }) => {
-    if (data.file) {
-      setUploading(true)
+  const handleUpload = async (data: { title?: string; file?: File }) => {
+    if (!data.file) return
+    setUploading(true)
+    setUploadProgress(null)
+    try {
+      await uploadMaterialInChunks({
+        file: data.file,
+        title: data.title,
+        sourceType: inferSourceType(data.file.name),
+      }, setUploadProgress)
+      await queryClient.invalidateQueries({ queryKey: ['materials'] })
+      showToast('资料上传成功')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '上传失败，请重试'
+      showToast(message)
+    } finally {
+      setUploading(false)
       setUploadProgress(null)
-      try {
-        await uploadMaterialInChunks({
-          file: data.file,
-          title: data.title,
-          sourceType: inferSourceType(data.file.name),
-        }, setUploadProgress)
-        await queryClient.invalidateQueries({ queryKey: ['materials'] })
-        showToast('资料上传成功')
-      } catch (error) {
-        const message = error instanceof Error ? error.message : '上传失败，请重试'
-        showToast(message)
-      } finally {
-        setUploading(false)
-        setUploadProgress(null)
-      }
-    } else if (data.url) {
-      importWebMutation.mutate({ title: data.title, sourceUrl: data.url }, {
-        onSuccess: () => showToast('网页导入成功'),
-        onError: () => showToast('导入失败，请重试'),
-      })
     }
   }
 
-  const handleEdit = (m: Material) => {
-    setEditTarget(m)
-    setEditTitle(m.title)
+  const handleEdit = (material: Material) => {
+    setEditTarget(material)
+    setEditTitle(material.title)
   }
 
   const handleEditSave = () => {
     if (editTarget && editTitle.trim()) {
       updateMutation.mutate({ id: editTarget.id, payload: { title: editTitle.trim() } }, {
-        onSuccess: () => { setEditTarget(null); showToast('资料已更新') },
+        onSuccess: () => {
+          setEditTarget(null)
+          showToast('资料已更新')
+        },
         onError: () => showToast('更新失败'),
       })
     }
   }
 
-  const handleDelete = (m: Material) => {
-    setDeleteTarget(m)
+  const handleDelete = (material: Material) => {
+    setDeleteTarget(material)
   }
 
   const handleDeleteConfirm = () => {
@@ -118,23 +113,23 @@ export function MaterialsPage() {
     }
   }
 
-  const handleContinueReading = (m: Material) => {
-    navigate(`/workspace/reader?materialId=${encodeURIComponent(m.id)}`)
+  const handleContinueReading = (material: Material) => {
+    navigate(`/workspace/reader?materialId=${encodeURIComponent(material.id)}`)
   }
 
-  const handleOpenFile = async (m: Material) => {
+  const handleOpenFile = async (material: Material) => {
     try {
-      const { blob } = await getMaterialFile(m.id)
+      const { blob } = await getMaterialFile(material.id)
       const url = URL.createObjectURL(blob)
       window.open(url, '_blank')
       setTimeout(() => URL.revokeObjectURL(url), 60000)
     } catch {
-      // silently fail
+      // Keep the file action quiet if the browser blocks the preview.
     }
   }
 
-  const handleReparse = (m: Material) => {
-    reparseMutation.mutate(m.id, {
+  const handleReparse = (material: Material) => {
+    reparseMutation.mutate(material.id, {
       onSuccess: (updated) => {
         setSelected((current) => current?.id === updated.id ? updated : current)
         showToast('资料已重新解析')
@@ -143,66 +138,62 @@ export function MaterialsPage() {
     })
   }
 
-  const isBusy = uploading || importWebMutation.isPending
+  const isBusy = uploading
 
   return (
     <motion.div
-      className="flex flex-col h-full"
+      className="flex h-full flex-col"
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="flex items-center justify-between px-6 pt-4 pb-2">
-        <h2 className="text-lg font-semibold flex items-center gap-2">
+      <div className="flex items-center justify-between px-6 pb-2 pt-4">
+        <h2 className="flex items-center gap-2 text-lg font-semibold">
           <BookOpen className="h-5 w-5" /> 资料管理
         </h2>
         <span className="text-sm text-muted-foreground">共 {filtered.length} 份资料</span>
       </div>
 
-      <div className="flex flex-1 gap-4 px-6 pb-4 overflow-hidden">
-        {/* Left: Upload form */}
+      <div className="flex flex-1 gap-4 overflow-hidden px-6 pb-4">
         <div className="w-72 shrink-0 overflow-auto">
           <MaterialUploadForm onSubmit={handleUpload} loading={isBusy} progress={uploadProgress} />
         </div>
 
-        {/* Right: Material grid with filters */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Filters */}
-          <div className="flex items-center gap-2 mb-3 flex-wrap">
-            <div className="relative flex-1 min-w-[180px]">
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[180px] flex-1">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
                 placeholder="搜索标题..."
-                className="pl-8 h-9"
+                className="h-9 pl-8"
                 value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
+                onChange={(event) => setKeyword(event.target.value)}
               />
             </div>
             <Select value={sourceTypeFilter} onValueChange={setSourceTypeFilter}>
-              <SelectTrigger className="w-[120px] h-9">
+              <SelectTrigger className="h-9 w-[120px]">
                 <SelectValue placeholder="类型" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="ALL">全部类型</SelectItem>
-                {Object.entries(SOURCE_TYPE_LABELS).map(([k, v]) => (
-                  <SelectItem key={k} value={k}>{v}</SelectItem>
+                {Object.entries(SOURCE_TYPE_LABELS).map(([key, value]) => (
+                  <SelectItem key={key} value={key}>{value}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-[120px] h-9">
+              <SelectTrigger className="h-9 w-[120px]">
                 <SelectValue placeholder="状态" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="ALL">全部状态</SelectItem>
-                {Object.entries(PARSE_STATUS_LABELS).map(([k, v]) => (
-                  <SelectItem key={k} value={k}>{v}</SelectItem>
+                {Object.entries(PARSE_STATUS_LABELS).map(([key, value]) => (
+                  <SelectItem key={key} value={key}>{value}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
 
-          {/* Grid */}
           <div className="flex-1 overflow-auto">
             {isLoading ? (
               <div className="flex items-center justify-center py-12">
@@ -223,13 +214,12 @@ export function MaterialsPage() {
             )}
           </div>
 
-          {/* Selected detail strip */}
           {selected && (
-            <div className="mt-3 p-3 rounded-lg border bg-muted/30 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3 min-w-0">
+            <div className="mt-3 flex items-center justify-between gap-4 rounded-lg border bg-muted/30 p-3">
+              <div className="flex min-w-0 items-center gap-3">
                 <BookOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">{selected.title || selected.originalName}</p>
+                  <p className="truncate text-sm font-medium">{selected.title || selected.originalName}</p>
                   <p className="text-xs text-muted-foreground">
                     {SOURCE_TYPE_LABELS[selected.sourceType] || selected.sourceType}
                     {' / '}
@@ -250,14 +240,13 @@ export function MaterialsPage() {
         </div>
       </div>
 
-      {/* Edit dialog */}
-      <Dialog open={!!editTarget} onOpenChange={(v) => !v && setEditTarget(null)}>
+      <Dialog open={!!editTarget} onOpenChange={(open) => !open && setEditTarget(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>编辑资料</DialogTitle>
             <DialogDescription>修改资料标题</DialogDescription>
           </DialogHeader>
-          <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} placeholder="标题" />
+          <Input value={editTitle} onChange={(event) => setEditTitle(event.target.value)} placeholder="标题" />
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditTarget(null)}>取消</Button>
             <Button onClick={handleEditSave} disabled={updateMutation.isPending}>
@@ -267,19 +256,18 @@ export function MaterialsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Delete dialog */}
-      <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>确认删除</DialogTitle>
             <DialogDescription>
-              确定要删除资料「{deleteTarget?.title || deleteTarget?.originalName}」吗？此操作不可撤销。
+              确定要删除资料“{deleteTarget?.title || deleteTarget?.originalName}”吗？此操作不可撤销。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
             <Button variant="destructive" onClick={handleDeleteConfirm} disabled={deleteMutation.isPending}>
-              <Trash2 className="h-4 w-4 mr-1" />
+              <Trash2 className="mr-1 h-4 w-4" />
               {deleteMutation.isPending ? '删除中...' : '确认删除'}
             </Button>
           </DialogFooter>

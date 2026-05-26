@@ -38,6 +38,7 @@ import javax.imageio.ImageIO;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mytext.learningassistant.common.BusinessException;
+import com.mytext.learningassistant.embedding.EmbeddingClient;
 import com.mytext.learningassistant.rag.MaterialSummaryRepository;
 import com.mytext.learningassistant.rag.RagQuestionSourceRepository;
 
@@ -86,6 +87,7 @@ public class MaterialService {
     private final RagQuestionSourceRepository ragQuestionSourceRepository;
     private final MaterialUploadSessionRepository materialUploadSessionRepository;
     private final ObjectMapper objectMapper;
+    private final EmbeddingClient embeddingClient;
     private final HttpClient httpClient;
     private final Path storageRoot;
     private final boolean ocrEnabled;
@@ -107,6 +109,7 @@ public class MaterialService {
         RagQuestionSourceRepository ragQuestionSourceRepository,
         MaterialUploadSessionRepository materialUploadSessionRepository,
         ObjectMapper objectMapper,
+        EmbeddingClient embeddingClient,
         @Value("${app.storage-dir:${user.dir}/target/learning-assistant-files}") String storageDir,
         @Value("${app.ocr.enabled:false}") boolean ocrEnabled,
         @Value("${app.ocr.lang:eng+chi_sim}") String ocrLang,
@@ -124,6 +127,7 @@ public class MaterialService {
         this.ragQuestionSourceRepository = ragQuestionSourceRepository;
         this.materialUploadSessionRepository = materialUploadSessionRepository;
         this.objectMapper = objectMapper;
+        this.embeddingClient = embeddingClient;
         this.storageRoot = Path.of(storageDir).toAbsolutePath().normalize();
         this.ocrEnabled = ocrEnabled;
         this.ocrLang = ocrLang == null || ocrLang.isBlank() ? "eng+chi_sim" : ocrLang.trim();
@@ -1735,26 +1739,31 @@ public class MaterialService {
     }
 
     private String toEmbeddingJson(String text) {
-        Map<String, Integer> counts = new LinkedHashMap<>();
-        for (String token : tokenize(text)) {
-            counts.merge(token, 1, Integer::sum);
-        }
         try {
-            return objectMapper.writeValueAsString(counts);
+            return embeddingClient.embed(cleanEmbeddingText(text))
+                .filter(embedding -> !embedding.isEmpty())
+                .map(embedding -> {
+                    try {
+                        return objectMapper.writeValueAsString(embedding);
+                    } catch (Exception exception) {
+                        return null;
+                    }
+                })
+                .orElse(null);
         } catch (Exception exception) {
-            return "{}";
+            return null;
         }
     }
 
-    private List<String> tokenize(String text) {
-        List<String> tokens = new ArrayList<>();
-        String[] parts = text.toLowerCase(Locale.ROOT).split("[^\\p{IsHan}a-z0-9]+");
-        for (String part : parts) {
-            if (!part.isBlank()) {
-                tokens.add(part);
-            }
+    private String cleanEmbeddingText(String text) {
+        if (text == null) {
+            return "";
         }
-        return tokens;
+        return text
+            .replaceAll("\\[\\[material-image:[^\\]]+\\]\\]\\s*", " ")
+            .replaceAll("\\[image ocr:[^\\]]*\\]\\s*", " ")
+            .replaceAll("\\s+", " ")
+            .trim();
     }
 
     private String normalizeTitle(String title, String originalName) {

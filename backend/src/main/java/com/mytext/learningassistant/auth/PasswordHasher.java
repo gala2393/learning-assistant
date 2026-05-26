@@ -21,14 +21,21 @@ public class PasswordHasher {
     }
 
     public boolean matches(String rawPassword, String storedValue) {
+        if (storedValue == null || storedValue.isBlank()) {
+            return false;
+        }
         String[] parts = storedValue.split(":", 2);
         if (parts.length != 2) {
             return false;
         }
-        byte[] salt = Base64.getDecoder().decode(parts[0]);
-        byte[] expectedDigest = Base64.getDecoder().decode(parts[1]);
-        byte[] actualDigest = digest(salt, rawPassword);
-        return MessageDigest.isEqual(expectedDigest, actualDigest);
+        try {
+            byte[] salt = Base64.getDecoder().decode(parts[0]);
+            byte[] expectedDigest = Base64.getDecoder().decode(parts[1]);
+            byte[] actualDigest = digest(salt, rawPassword);
+            return MessageDigest.isEqual(expectedDigest, actualDigest);
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
     }
 
     private byte[] digest(byte[] salt, String rawPassword) {

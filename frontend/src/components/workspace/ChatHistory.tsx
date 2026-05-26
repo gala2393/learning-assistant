@@ -103,15 +103,15 @@ export function ChatHistory({
   }
 
   return (
-    <div className="flex h-full w-full min-w-0 flex-col bg-[#f7f8fa] dark:bg-[#111318]">
-      <ScrollArea className="flex-1 px-3 pt-3">
-        <div className="space-y-4 pb-5">
+    <div className="flex h-full w-full min-w-0 flex-col bg-transparent">
+      <ScrollArea className="flex-1 px-1 pt-1">
+        <div className="space-y-2.5 pb-4">
           {items.length === 0 && (
             <p className="py-6 text-center text-xs text-muted-foreground">暂无会话</p>
           )}
           {groups.map((group) => (
             <section key={group.label} className="space-y-1">
-              <div className="px-3 pb-1 text-[13px] font-semibold text-[#9aa0a6] dark:text-slate-500">
+              <div className="px-3 pb-1 text-xs font-medium text-[#a7adb5] dark:text-slate-500">
                 {group.label}
               </div>
               {group.items.map((item) => {
@@ -122,18 +122,15 @@ export function ChatHistory({
                   <div
                     key={itemId}
                     onClick={() => onSelect(item)}
-                    onMouseLeave={() => setOpenMenuId((current) => (current === itemId ? null : current))}
                     className={cn(
-                      'group relative flex w-full items-center gap-2 rounded-lg border border-transparent px-3 py-2 text-left transition-colors',
+                      'group relative flex w-full items-center gap-2 rounded-xl border px-3 py-2 pr-10 text-left transition-colors',
                       selected
-                        ? 'border-[#d8deea] bg-[#eaf1ff] text-[#2457ff] dark:border-white/10 dark:bg-white/[0.08] dark:text-white'
-                        : 'border-[#e6ebf2] bg-transparent text-[#202124] hover:bg-[#f1f4f8] dark:border-slate-800 dark:text-slate-300 dark:hover:bg-white/[0.04]',
+                        ? 'border-[#d8deea] bg-[#eef4ff] text-[#2457ff] shadow-[0_1px_0_rgba(255,255,255,0.7)_inset] dark:border-white/10 dark:bg-white/[0.08] dark:text-white'
+                        : 'border-[#e6ebf2] bg-white/90 text-[#9aa0a6] hover:bg-[#f6f8fb] dark:border-slate-800 dark:bg-white/[0.02] dark:text-slate-400 dark:hover:bg-white/[0.06]',
                     )}
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] leading-5">
-                        {title}
-                      </div>
+                      <div className="truncate text-[13px] leading-5">{title}</div>
                     </div>
                     {item.pinned && <ChevronUp className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
                     <DropdownMenu>
@@ -141,19 +138,16 @@ export function ChatHistory({
                         <button
                           type="button"
                           className={cn(
-                            'absolute right-24 top-1/2 z-20 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-[#667085] transition-all',
-                            openMenuId === itemId || selected
-                              ? 'opacity-100'
-                              : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+                            'absolute right-0 top-1/2 z-20 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-[#667085] transition-all opacity-100',
                             openMenuId === itemId
-                              ? 'border border-white/50 bg-white/65 shadow-sm backdrop-blur-[2px] dark:border-white/10 dark:bg-slate-900/55'
-                              : 'border border-transparent bg-transparent shadow-none hover:bg-white/60 dark:hover:bg-slate-900/40',
+                              ? 'border border-white/50 bg-white/80 shadow-sm backdrop-blur-[2px] dark:border-white/10 dark:bg-slate-900/55'
+                              : 'border border-transparent bg-transparent shadow-none hover:bg-white/70 dark:hover:bg-slate-900/40',
                           )}
                           onClick={(event) => {
                             event.stopPropagation()
                             setOpenMenuId((current) => (current === itemId ? null : itemId))
                           }}
-                          aria-label="浼氳瘽鑿滃崟"
+                          aria-label="会话菜单"
                         >
                           <MoreHorizontal className="h-4 w-4" />
                         </button>

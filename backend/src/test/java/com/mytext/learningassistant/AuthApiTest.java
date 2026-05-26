@@ -257,6 +257,29 @@ class AuthApiTest {
             .andExpect(jsonPath("$.code").value(400));
     }
 
+    @Test
+    void loginReturnsBadRequestInsteadOfServerErrorForMalformedStoredPasswordHash() throws Exception {
+        String username = uniqueName("broken_hash");
+        UserEntity user = new UserEntity();
+        user.setUsername(username);
+        user.setNickname("Broken Hash");
+        user.setPasswordHash("not-a-valid-base64-hash");
+        user.setRole(UserRole.USER);
+        user.setStatus(com.mytext.learningassistant.user.UserStatus.ACTIVE);
+        userRepository.save(user);
+
+        mockMvc.perform(post("/api/auth/login")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "username": "%s",
+                      "password": "12345678"
+                    }
+                    """.formatted(username)))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value(400));
+    }
+
     private void register(String username, String nickname) throws Exception {
         mockMvc.perform(post("/api/auth/register")
                 .contentType(MediaType.APPLICATION_JSON)

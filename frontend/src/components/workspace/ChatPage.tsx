@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { BookOpen, Sparkles } from 'lucide-react'
-import { ChatHistory } from './ChatHistory'
 import { ChatThread } from './ChatThread'
 import { ChatComposer } from './ChatComposer'
 import { chatStream, useDeleteHistory, useHistory, useRenameHistory, useTogglePinHistory } from '@/api/rag'
@@ -394,12 +393,12 @@ export function ChatPage() {
 
   return (
     <motion.div
-      className="flex h-full flex-col bg-white dark:bg-[#171a21]"
+      className="flex h-full min-h-0 flex-col overflow-hidden bg-white dark:bg-[#171a21]"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="flex items-center justify-center gap-1 px-4 py-2">
+      <div className="relative flex items-center justify-center gap-1 px-4 py-2">
         <Button
           variant={isGeneral ? 'secondary' : 'ghost'}
           size="sm"
@@ -425,176 +424,91 @@ export function ChatPage() {
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <AnimatePresence mode="wait">
-          {!isEmptyChat && isGeneral ? (
-            <motion.div
-              key="general-sidebar"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="flex h-full w-[19rem] flex-col border-r bg-[#fafafa] dark:border-slate-800 dark:bg-[#111318]"
-            >
-              <ChatHistory
-                items={historyItems}
-                selectedId={selectedHistoryId}
-                onSelect={handleSelectHistory}
-                onDelete={handleDeleteHistory}
-                deletingId={deleteHistoryMutation.isPending ? String(deleteHistoryMutation.variables || '') : null}
-                onRename={handleRenameHistory}
-                onTogglePin={handleTogglePinHistory}
-                onToggleFavorite={handleToggleFavorite}
-                isFavorited={(item) => !!getHistoryFavoriteId(item)}
-                renamingId={renameHistoryMutation.isPending ? String(renameHistoryMutation.variables?.id || '') : null}
-              />
-            </motion.div>
-          ) : !isEmptyChat ? (
-            <motion.div
-              key="material-sidebar"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="flex h-full w-[19rem] flex-col border-r bg-[#fafafa] dark:border-slate-800 dark:bg-[#111318]"
-            >
-              <div className="border-b p-3 dark:border-slate-800">
-                <p className="mb-2 text-xs font-medium text-muted-foreground">选择资料</p>
-                <div className="max-h-40 space-y-1 overflow-y-auto">
-                  {parsedMaterials.length === 0 ? (
-                    <p className="py-2 text-xs text-muted-foreground">暂无已解析资料</p>
-                  ) : (
-                    parsedMaterials.map((m) => (
-                      <button
-                        key={m.id}
-                        onClick={() => {
-                          handleMaterialSelect(m.id)
-                          handleNewChat()
-                        }}
-                        className={cn(
-                          'w-full rounded-md px-3 py-2 text-left text-xs transition-colors',
-                          selectedMaterialId === m.id
-                            ? 'bg-primary/10 font-medium text-primary dark:bg-sky-400/10 dark:text-sky-300'
-                            : 'text-muted-foreground hover:bg-muted dark:text-slate-400 dark:hover:bg-white/[0.08]',
-                        )}
-                      >
-                        <span className="mr-1.5 inline-block rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold">
-                          {m.sourceType}
-                        </span>
-                        {m.title}
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-              <div className="flex-1 overflow-hidden">
-                <ChatHistory
-                  items={historyItems}
-                  selectedId={selectedHistoryId}
-                  onSelect={handleSelectHistory}
-                  onDelete={handleDeleteHistory}
-                  deletingId={deleteHistoryMutation.isPending ? String(deleteHistoryMutation.variables || '') : null}
-                  onRename={handleRenameHistory}
-                  onTogglePin={handleTogglePinHistory}
-                  onToggleFavorite={handleToggleFavorite}
-                  isFavorited={(item) => !!getHistoryFavoriteId(item)}
-                  renamingId={renameHistoryMutation.isPending ? String(renameHistoryMutation.variables?.id || '') : null}
-                />
-              </div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-
-        <div className="flex min-w-0 flex-1 flex-col">
-          {!isEmptyChat && (
-            <div className="flex items-center gap-2 border-b bg-background px-4 py-2 dark:border-slate-800 dark:bg-[#171a21]">
-              {isGeneral ? (
-                <p className="text-xs text-muted-foreground">基于通用知识回答，适合概念解释和开放式讨论</p>
-              ) : (
-                <>
-                  <p className="text-xs text-muted-foreground">
-                    {selectedMaterialId
-                      ? `已绑定：${materials.find((m) => m.id === selectedMaterialId)?.title || '未知资料'}`
-                      : '请先在左侧选择一份资料，再发起提问'}
-                  </p>
-                  {selectedMaterialId && (
-                    <Badge variant="outline" className="text-[10px]">
-                      {materials.find((m) => m.id === selectedMaterialId)?.chunkCount || 0} 个切片
-                    </Badge>
-                  )}
-                </>
-              )}
-              <div className="ml-auto" />
-            </div>
-          )}
-
-          {isEmptyChat ? (
-            <div className="flex flex-1 flex-col items-center justify-center px-6 pb-20">
-              <div className="mb-7 text-center">
-                <h2 className="text-5xl font-black tracking-[0.02em] text-black dark:text-white">智慧问答</h2>
-                <p className="mt-3 text-sm text-muted-foreground">
-                  描述问题、上传资料或选择资料后开始提问
-                </p>
-              </div>
-              {!isGeneral && (
-                <div className="order-3 mt-4 w-full max-w-[760px]">
-                  {parsedMaterials.length === 0 ? (
-                    <div className="flex items-center justify-between gap-3 rounded-2xl border border-dashed border-slate-300 bg-[#fafafa] px-4 py-3 text-sm text-muted-foreground dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
-                      <span>暂无已解析资料，请先导入并完成解析。</span>
-                      <Button size="sm" variant="outline" onClick={() => navigate('/workspace/materials')}>
-                        去导入资料
-                      </Button>
-                    </div>
-                  ) : (
-                    <Select value={selectedMaterialId || ''} onValueChange={handleMaterialSelect}>
-                      <SelectTrigger className="h-11 rounded-2xl border-slate-200 bg-[#fafafa] px-4 text-sm shadow-none focus:ring-1 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
-                        <SelectValue placeholder="选择一份资料开始提问" />
-                      </SelectTrigger>
-                      <SelectContent className="max-h-72 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
-                        {parsedMaterials.map((material) => (
-                          <SelectItem key={material.id} value={material.id} className="dark:focus:bg-slate-800">
-                            <span className="mr-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-800">
-                              {material.sourceType}
-                            </span>
-                            {material.title || material.originalName}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  )}
-                </div>
-              )}
-              <ChatComposer
-                value={input}
-                onChange={setInput}
-                onSubmit={handleSubmit}
-                loading={streaming}
-                mode={mode}
-                onModeChange={handleModeChange}
-                quickPrompts={quickPrompts}
-                disabled={!isGeneral && !selectedMaterialId}
-                disabledHint="请先选择资料"
-                centered
-              />
-            </div>
+      {!isEmptyChat && (
+        <div className="flex items-center gap-2 border-b bg-background px-4 py-2 dark:border-slate-800 dark:bg-[#171a21]">
+          {isGeneral ? (
+            <p className="text-xs text-muted-foreground">基于通用知识回答，适合概念解释和开放式讨论</p>
           ) : (
             <>
-              <ChatThread messages={messages} onOpenSource={handleOpenSource} />
-              <ChatComposer
-                value={input}
-                onChange={setInput}
-                onSubmit={handleSubmit}
-                loading={streaming}
-                mode={mode}
-                onModeChange={handleModeChange}
-                quickPrompts={quickPrompts}
-                disabled={!isGeneral && !selectedMaterialId}
-                disabledHint="请先选择资料"
-              />
+              <p className="text-xs text-muted-foreground">
+                {selectedMaterialId
+                  ? `已绑定：${materials.find((m) => m.id === selectedMaterialId)?.title || '未知资料'}`
+                  : '请先在左侧选择一份资料，再发起提问'}
+              </p>
+              {selectedMaterialId && (
+                <Badge variant="outline" className="text-[10px]">
+                  {materials.find((m) => m.id === selectedMaterialId)?.chunkCount || 0} 个切片
+                </Badge>
+              )}
             </>
           )}
+          <div className="ml-auto" />
         </div>
-      </div>
+      )}
+
+      {isEmptyChat ? (
+        <div className="flex flex-1 flex-col items-center justify-center px-6 pb-20">
+          <div className="mb-7 text-center">
+            <h2 className="text-5xl font-black tracking-[0.02em] text-black dark:text-white">智慧问答</h2>
+            <p className="mt-3 text-sm text-muted-foreground">描述问题、上传资料或选择资料后开始提问</p>
+          </div>
+          {!isGeneral && (
+            <div className="order-3 mt-4 w-full max-w-[760px]">
+              {parsedMaterials.length === 0 ? (
+                <div className="flex items-center justify-between gap-3 rounded-2xl border border-dashed border-slate-300 bg-[#fafafa] px-4 py-3 text-sm text-muted-foreground dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+                  <span>暂无已解析资料，请先导入并完成解析。</span>
+                  <Button size="sm" variant="outline" onClick={() => navigate('/workspace/materials')}>
+                    去导入资料
+                  </Button>
+                </div>
+              ) : (
+                <Select value={selectedMaterialId || ''} onValueChange={handleMaterialSelect}>
+                  <SelectTrigger className="h-11 rounded-2xl border-slate-200 bg-[#fafafa] px-4 text-sm shadow-none focus:ring-1 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+                    <SelectValue placeholder="选择一份资料开始提问" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-72 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+                    {parsedMaterials.map((material) => (
+                      <SelectItem key={material.id} value={material.id} className="dark:focus:bg-slate-800">
+                        <span className="mr-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-800">
+                          {material.sourceType}
+                        </span>
+                        {material.title || material.originalName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          )}
+          <ChatComposer
+            value={input}
+            onChange={setInput}
+            onSubmit={handleSubmit}
+            loading={streaming}
+            mode={mode}
+            onModeChange={handleModeChange}
+            quickPrompts={quickPrompts}
+            disabled={!isGeneral && !selectedMaterialId}
+            disabledHint="请先选择资料"
+            centered
+          />
+        </div>
+      ) : (
+        <>
+          <ChatThread messages={messages} onOpenSource={handleOpenSource} />
+          <ChatComposer
+            value={input}
+            onChange={setInput}
+            onSubmit={handleSubmit}
+            loading={streaming}
+            mode={mode}
+            onModeChange={handleModeChange}
+            quickPrompts={quickPrompts}
+            disabled={!isGeneral && !selectedMaterialId}
+            disabledHint="请先选择资料"
+          />
+        </>
+      )}
     </motion.div>
   )
 }

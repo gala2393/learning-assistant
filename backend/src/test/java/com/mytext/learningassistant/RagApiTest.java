@@ -19,6 +19,7 @@ import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.mytext.learningassistant.embedding.EmbeddingClient;
 import com.mytext.learningassistant.llm.LlmCompletion;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
 
@@ -40,10 +41,14 @@ class RagApiTest {
     private MockMvc mockMvc;
 
     @MockBean
+    private EmbeddingClient embeddingClient;
+
+    @MockBean
     private ThirdPartyLlmClient thirdPartyLlmClient;
 
     @BeforeEach
     void useLocalFallbackByDefault() {
+        when(embeddingClient.embed(anyString())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean(), any())).thenReturn(Optional.empty());
@@ -887,6 +892,47 @@ class RagApiTest {
             .andExpect(jsonPath("$.data.sources[0].materialId").value(ragMaterialId.intValue()))
             .andExpect(jsonPath("$.data.sources[0].chunkId").isNumber())
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Course RAG Material")));
+    }
+
+    @Test
+    void selectedTextQuestionUsesSelectedExcerptEvenWhenNoChunkSourcesMatch() throws Exception {
+        when(thirdPartyLlmClient.answer(
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts ->
+                excerpts != null
+                    && excerpts.size() == 1
+                    && excerpts.get(0).contains("[用户选中内容]")
+                    && excerpts.get(0).contains("事务隔离用于控制并发读写的一致性")
+            ),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(false),
+            org.mockito.ArgumentMatchers.eq("HOMEWORK")
+        )).thenReturn(Optional.of(new LlmCompletion("事务隔离用于控制并发读写的一致性，核心目的是保证数据在并发场景下的正确性。", "mock-model")));
+
+        String token = registerAndLogin(uniqueName("rag-selected-text-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Selected Text Material",
+            "事务隔离用于控制并发读写的一致性。索引用于提升查询速度。"
+        );
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "请解释这段内容",
+                      "mode": "MATERIAL",
+                      "materialId": %d,
+                      "selectedText": "事务隔离用于控制并发读写的一致性",
+                      "answerStyle": "HOMEWORK"
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("事务隔离用于控制并发读写的一致性")))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("未检索到足够页码依据"))))
+            .andExpect(jsonPath("$.data.sources").isEmpty());
     }
 
     @Test

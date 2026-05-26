@@ -23,12 +23,17 @@ import java.util.zip.ZipOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.Optional;
 
+import com.mytext.learningassistant.embedding.EmbeddingClient;
+import com.mytext.learningassistant.material.MaterialChunkRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
@@ -39,6 +44,18 @@ class MaterialApiTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @Autowired
+    private MaterialChunkRepository materialChunkRepository;
+
+    @MockBean
+    private EmbeddingClient embeddingClient;
+
+    @BeforeEach
+    void defaultEmbeddingStub() {
+        org.mockito.Mockito.when(embeddingClient.embed(org.mockito.ArgumentMatchers.anyString()))
+            .thenReturn(Optional.empty());
+    }
 
     @Test
     void uploadsTextMaterialAndListsIt() throws Exception {
@@ -73,6 +90,39 @@ class MaterialApiTest {
             .andExpect(jsonPath("$.data[0].id").value(materialId.intValue()))
             .andExpect(jsonPath("$.data[0].title").value("课程资料1"))
             .andExpect(jsonPath("$.data[0].parseStatus").value("SUCCESS"));
+    }
+
+    @Test
+    void uploadsTextMaterialAndStoresEmbeddingWithoutBreakingChunkReadApi() throws Exception {
+        org.mockito.Mockito.when(embeddingClient.embed(org.mockito.ArgumentMatchers.anyString()))
+            .thenReturn(Optional.of(List.of(0.11, 0.22, 0.33)));
+        String token = registerAndLogin(uniqueName("embedding-material-user"));
+
+        MockMultipartFile file = new MockMultipartFile(
+            "file",
+            "embedding.txt",
+            MediaType.TEXT_PLAIN_VALUE,
+            "Semantic retrieval for study materials.".getBytes(StandardCharsets.UTF_8)
+        );
+
+        var uploadResult = mockMvc.perform(multipart("/api/materials")
+                .file(file)
+                .header("Authorization", "Bearer " + token)
+                .param("title", "Embedding TXT")
+                .param("sourceType", "TXT"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andReturn();
+
+        Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+
+        mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data[0].chunkText").value("Semantic retrieval for study materials."));
+
+        String embeddingJson = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(materialId).get(0).getEmbeddingJson();
+        org.junit.jupiter.api.Assertions.assertEquals("[0.11,0.22,0.33]", embeddingJson);
     }
 
     @Test

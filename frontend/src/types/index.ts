@@ -96,6 +96,8 @@ export interface StreamChatPayload {
   mode: 'GENERAL' | 'MATERIAL'
   materialId?: string
   chunkId?: string
+  currentPageNo?: number
+  currentPageChunkIds?: Array<string | number>
   selectedText?: string
   answerStyle?: 'STUDY' | 'HOMEWORK'
   history?: { role: string; content: string }[]
