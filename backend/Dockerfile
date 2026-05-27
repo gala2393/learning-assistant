@@ -1,9 +1,15 @@
 FROM eclipse-temurin:21-jdk-jammy AS builder
 
-WORKDIR /app
+WORKDIR /workspace
 COPY . .
-RUN sed -i 's/\r$//' mvnw && chmod +x mvnw
-RUN ./mvnw -q -DskipTests clean package
+RUN set -eux; \
+    app_dir="/workspace"; \
+    if [ ! -f "$app_dir/mvnw" ] && [ -f "/workspace/backend/mvnw" ]; then app_dir="/workspace/backend"; fi; \
+    cd "$app_dir"; \
+    sed -i 's/\r$//' mvnw; \
+    chmod +x mvnw; \
+    ./mvnw -q -DskipTests clean package; \
+    cp target/*.jar /workspace/app.jar
 
 FROM eclipse-temurin:21-jre-jammy
 
@@ -19,7 +25,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/*.jar /app/app.jar
+COPY --from=builder /workspace/app.jar /app/app.jar
 
 ENV SPRING_PROFILES_ACTIVE=prod
 ENV APP_STORAGE_DIR=/data/learning-assistant-files

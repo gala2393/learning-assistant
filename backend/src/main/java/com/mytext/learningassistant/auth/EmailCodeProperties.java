@@ -9,6 +9,9 @@ public class EmailCodeProperties {
     private int ttlSeconds = 300;
     private int emailCooldownSeconds = 60;
     private int ipHourlyLimit = 10;
+    private int connectTimeoutMillis = 10000;
+    private int timeoutMillis = 10000;
+    private int writeTimeoutMillis = 10000;
     private String subject = "学习助手登录验证码";
     private String from = "";
     private String defaultProvider = "qq";
@@ -46,6 +49,30 @@ public class EmailCodeProperties {
 
     public void setIpHourlyLimit(int ipHourlyLimit) {
         this.ipHourlyLimit = ipHourlyLimit;
+    }
+
+    public int getConnectTimeoutMillis() {
+        return connectTimeoutMillis;
+    }
+
+    public void setConnectTimeoutMillis(int connectTimeoutMillis) {
+        this.connectTimeoutMillis = connectTimeoutMillis;
+    }
+
+    public int getTimeoutMillis() {
+        return timeoutMillis;
+    }
+
+    public void setTimeoutMillis(int timeoutMillis) {
+        this.timeoutMillis = timeoutMillis;
+    }
+
+    public int getWriteTimeoutMillis() {
+        return writeTimeoutMillis;
+    }
+
+    public void setWriteTimeoutMillis(int writeTimeoutMillis) {
+        this.writeTimeoutMillis = writeTimeoutMillis;
     }
 
     public String getSubject() {
@@ -105,6 +132,7 @@ public class EmailCodeProperties {
         private String from = "";
         private boolean auth = true;
         private boolean sslEnable = true;
+        private boolean starttlsEnable = false;
 
         public String getHost() {
             return host;
@@ -160,6 +188,14 @@ public class EmailCodeProperties {
 
         public void setSslEnable(boolean sslEnable) {
             this.sslEnable = sslEnable;
+        }
+
+        public boolean isStarttlsEnable() {
+            return starttlsEnable;
+        }
+
+        public void setStarttlsEnable(boolean starttlsEnable) {
+            this.starttlsEnable = starttlsEnable;
         }
 
         public boolean isConfigured() {

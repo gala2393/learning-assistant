@@ -21,6 +21,9 @@ app:
     ttl-seconds: ${EMAIL_CODE_TTL_SECONDS:300}
     email-cooldown-seconds: ${EMAIL_CODE_EMAIL_COOLDOWN_SECONDS:60}
     ip-hourly-limit: ${EMAIL_CODE_IP_HOURLY_LIMIT:10}
+    connect-timeout-millis: ${EMAIL_CODE_CONNECT_TIMEOUT_MILLIS:10000}
+    timeout-millis: ${EMAIL_CODE_TIMEOUT_MILLIS:10000}
+    write-timeout-millis: ${EMAIL_CODE_WRITE_TIMEOUT_MILLIS:10000}
     subject: ${EMAIL_CODE_SUBJECT:Learning Assistant Login Code}
     from: ${EMAIL_CODE_FROM:${SMTP_USERNAME:}}
     default-provider: ${EMAIL_CODE_DEFAULT_PROVIDER:qq}
@@ -33,6 +36,7 @@ app:
       from: ${EMAIL_CODE_QQ_FROM:${EMAIL_CODE_FROM:${SMTP_USERNAME:}}}
       auth: ${EMAIL_CODE_QQ_AUTH:${SMTP_AUTH:true}}
       ssl-enable: ${EMAIL_CODE_QQ_SSL_ENABLE:${SMTP_SSL_ENABLE:true}}
+      starttls-enable: ${EMAIL_CODE_QQ_STARTTLS_ENABLE:${SMTP_STARTTLS_ENABLE:false}}
     netease:
       host: ${EMAIL_CODE_NETEASE_HOST:smtp.163.com}
       port: ${EMAIL_CODE_NETEASE_PORT:465}
@@ -41,6 +45,7 @@ app:
       from: ${EMAIL_CODE_NETEASE_FROM:${EMAIL_CODE_NETEASE_USERNAME:}}
       auth: ${EMAIL_CODE_NETEASE_AUTH:true}
       ssl-enable: ${EMAIL_CODE_NETEASE_SSL_ENABLE:true}
+      starttls-enable: ${EMAIL_CODE_NETEASE_STARTTLS_ENABLE:false}
   llm:
     enabled: ${LLM_ENABLED:true}
     base-url: ${LLM_BASE_URL:}

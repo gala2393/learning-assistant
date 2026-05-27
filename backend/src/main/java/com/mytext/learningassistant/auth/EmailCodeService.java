@@ -103,6 +103,10 @@ public class EmailCodeService {
         mailSender.setPassword(account.getPassword());
         mailSender.getJavaMailProperties().put("mail.smtp.auth", String.valueOf(account.isAuth()));
         mailSender.getJavaMailProperties().put("mail.smtp.ssl.enable", String.valueOf(account.isSslEnable()));
+        mailSender.getJavaMailProperties().put("mail.smtp.starttls.enable", String.valueOf(account.isStarttlsEnable()));
+        mailSender.getJavaMailProperties().put("mail.smtp.connectiontimeout", String.valueOf(properties.getConnectTimeoutMillis()));
+        mailSender.getJavaMailProperties().put("mail.smtp.timeout", String.valueOf(properties.getTimeoutMillis()));
+        mailSender.getJavaMailProperties().put("mail.smtp.writetimeout", String.valueOf(properties.getWriteTimeoutMillis()));
         return mailSender;
     }
 
