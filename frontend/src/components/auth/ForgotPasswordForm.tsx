@@ -8,6 +8,7 @@ import { resetPassword, sendEmailCode } from '@/api/auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
+import { normalizeEmail, providerForEmail } from '@/lib/email'
 
 const forgotPasswordSchema = z
   .object({
@@ -54,8 +55,8 @@ export function ForgotPasswordForm() {
   const code = watch('code')
   const newPassword = watch('newPassword')
   const confirmPassword = watch('confirmPassword')
-  const email = useMemo(() => `${emailPrefix.trim()}@${emailDomain}`, [emailPrefix, emailDomain])
-  const provider = emailDomain === '163.com' ? '163 邮箱' : 'QQ 邮箱'
+  const email = useMemo(() => normalizeEmail(emailPrefix, emailDomain), [emailPrefix, emailDomain])
+  const provider = providerForEmail(emailPrefix, emailDomain) === 'netease' ? '163 邮箱' : 'QQ 邮箱'
   const canSendCode = emailPrefix.trim().length > 0 && !codeLoading && cooldown <= 0
   const canReset = emailPrefix.trim().length > 0
     && code.trim().length > 0
@@ -71,7 +72,7 @@ export function ForgotPasswordForm() {
 
   const handleSendCode = async () => {
     const values = getValues()
-    const targetEmail = `${values.emailPrefix.trim()}@${values.emailDomain}`
+    const targetEmail = normalizeEmail(values.emailPrefix, values.emailDomain)
     if (!values.emailPrefix.trim()) {
       setError('请先填写邮箱地址。')
       return
@@ -80,7 +81,7 @@ export function ForgotPasswordForm() {
     setSuccess('')
     setCodeLoading(true)
     try {
-      await sendEmailCode(targetEmail, values.emailDomain === '163.com' ? 'netease' : 'qq')
+      await sendEmailCode(targetEmail, providerForEmail(values.emailPrefix, values.emailDomain))
       setCooldown(60)
       setSuccess('验证码已发送，请在 5 分钟内完成密码重置。')
     } catch (err: unknown) {
@@ -97,7 +98,7 @@ export function ForgotPasswordForm() {
     setLoading(true)
     try {
       await resetPassword({
-        email: `${data.emailPrefix.trim()}@${data.emailDomain}`,
+        email: normalizeEmail(data.emailPrefix, data.emailDomain),
         code: data.code,
         newPassword: data.newPassword,
         confirmPassword: data.confirmPassword,

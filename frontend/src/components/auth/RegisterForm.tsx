@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input'
 import { useAuth } from '@/context/AuthContext'
 import { useDebounce } from '@/hooks/useDebounce'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
+import { normalizeEmail, providerForEmail } from '@/lib/email'
 
 const registerSchema = z
   .object({
@@ -63,8 +64,8 @@ export function RegisterForm() {
   const shouldCheck = debouncedUsername.length >= 3
   const { data: usernameStatus, isLoading: checkingUsername } = useCheckUsername(debouncedUsername, shouldCheck)
 
-  const email = useMemo(() => `${emailPrefix.trim()}@${emailDomain}`, [emailPrefix, emailDomain])
-  const provider = emailDomain === '163.com' ? 'netease' : 'qq'
+  const email = useMemo(() => normalizeEmail(emailPrefix, emailDomain), [emailPrefix, emailDomain])
+  const provider = providerForEmail(emailPrefix, emailDomain)
   const canRegister = emailPrefix.trim().length > 0
     && username.trim().length > 0
     && password.trim().length > 0
@@ -80,7 +81,7 @@ export function RegisterForm() {
 
   const handleSendCode = async () => {
     const values = getValues()
-    const targetEmail = `${values.emailPrefix.trim()}@${values.emailDomain}`
+    const targetEmail = normalizeEmail(values.emailPrefix, values.emailDomain)
     if (!values.emailPrefix.trim()) {
       setError('请先填写邮箱地址。')
       return
@@ -88,7 +89,7 @@ export function RegisterForm() {
     setError('')
     setCodeLoading(true)
     try {
-      await sendEmailCode(targetEmail, values.emailDomain === '163.com' ? 'netease' : 'qq')
+      await sendEmailCode(targetEmail, providerForEmail(values.emailPrefix, values.emailDomain))
       setCooldown(60)
     } catch (err: unknown) {
       const e = err as { message?: string }
@@ -103,7 +104,7 @@ export function RegisterForm() {
     setLoading(true)
     try {
       await registerUser({
-        email: `${data.emailPrefix.trim()}@${data.emailDomain}`,
+        email: normalizeEmail(data.emailPrefix, data.emailDomain),
         username: data.username,
         password: data.password,
         confirmPassword: data.confirmPassword,
