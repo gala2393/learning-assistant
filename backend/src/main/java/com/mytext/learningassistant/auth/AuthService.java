@@ -1,6 +1,9 @@
 package com.mytext.learningassistant.auth;
 
 import java.time.format.DateTimeFormatter;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
 
 import com.mytext.learningassistant.common.BusinessException;
 import com.mytext.learningassistant.user.UserEntity;
@@ -15,12 +18,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class AuthService {
 
     private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final String ACCOUNT_DISABLED_MESSAGE = "该账户已禁用，请联系管理员解除封禁。";
 
     private final UserRepository userRepository;
     private final PasswordHasher passwordHasher;
     private final TokenService tokenService;
     private final EmailCodeService emailCodeService;
-    private static final String ACCOUNT_DISABLED_MESSAGE = "该账户已禁用，请联系管理员解除封禁。";
 
     public AuthService(
         UserRepository userRepository,
@@ -36,19 +39,19 @@ public class AuthService {
 
     @Transactional
     public AuthUserResponse register(RegisterRequest request) {
-        String username = request.username() == null ? "" : request.username().trim();
-        if (username.isBlank()) {
-            throw new BusinessException(400, "用户名不能为空");
+        String username = normalizeRequired(request.username(), "请输入用户名");
+        String email = normalizeEmail(request.email());
+        if (request.confirmPassword() != null && !request.password().equals(request.confirmPassword())) {
+            throw new BusinessException(400, "两次输入的密码不一致");
+        }
+        if (email != null && !emailCodeService.verify(email, request.code())) {
+            throw new BusinessException(400, "验证码错误或已过期");
         }
         if (userRepository.existsByUsername(username)) {
             throw new BusinessException(400, "用户名已存在");
         }
-        if (request.confirmPassword() != null && !String.valueOf(request.password()).equals(request.confirmPassword())) {
-            throw new BusinessException(400, "两次输入的密码不一致");
-        }
-        String email = normalizeEmail(request.email());
         if (email != null && userRepository.existsByEmail(email)) {
-            throw new BusinessException(400, "邮箱已注册");
+            throw new BusinessException(400, "邮箱已注册，请直接登录");
         }
 
         UserEntity user = new UserEntity();
@@ -68,12 +71,12 @@ public class AuthService {
 
     @Transactional
     public LoginResponse emailLogin(EmailLoginRequest request) {
-        if (!emailCodeService.verify(request.email(), request.code())) {
+        String email = normalizeEmail(request.email());
+        if (!emailCodeService.verify(email, request.code())) {
             throw new BusinessException(400, "验证码错误或已过期");
         }
-        String email = normalizeEmail(request.email());
         UserEntity user = userRepository.findByEmail(email)
-            .orElseGet(() -> createEmailLoginUser(email));
+            .orElseGet(() -> userRepository.save(createEmailUser(email)));
         if (user.getStatus() != UserStatus.ACTIVE) {
             throw new BusinessException(400, ACCOUNT_DISABLED_MESSAGE);
         }
@@ -83,13 +86,13 @@ public class AuthService {
     @Transactional
     public void resetPassword(ResetPasswordRequest request) {
         String email = normalizeEmail(request.email());
-        UserEntity user = userRepository.findByEmail(email)
-            .orElseThrow(() -> new BusinessException(400, "该邮箱未注册，请先注册"));
-        if (!emailCodeService.verify(request.email(), request.code())) {
-            throw new BusinessException(400, "验证码错误或已过期");
-        }
         if (!request.newPassword().equals(request.confirmPassword())) {
             throw new BusinessException(400, "两次输入的密码不一致");
+        }
+        UserEntity user = userRepository.findByEmail(email)
+            .orElseThrow(() -> new BusinessException(400, "该邮箱未注册，请先注册"));
+        if (!emailCodeService.verify(email, request.code())) {
+            throw new BusinessException(400, "验证码错误或已过期");
         }
         user.setPasswordHash(passwordHasher.hash(request.newPassword()));
         userRepository.save(user);
@@ -97,42 +100,16 @@ public class AuthService {
 
     @Transactional(readOnly = true)
     public LoginResponse login(LoginRequest request) {
-        String identifier = request.username().trim();
-        UserEntity user = findByUsernameOrEmail(identifier)
-            .orElseThrow(() -> new BusinessException(400, "用户名或密码错误"));
+        String loginId = normalizeRequired(request.username(), "请输入用户名或邮箱");
+        UserEntity user = findByUsernameOrEmail(loginId)
+            .orElseThrow(() -> new BusinessException(400, "用户名、邮箱或密码错误"));
         if (user.getStatus() != UserStatus.ACTIVE) {
             throw new BusinessException(400, ACCOUNT_DISABLED_MESSAGE);
         }
         if (!passwordHasher.matches(request.password(), user.getPasswordHash())) {
-            throw new BusinessException(400, "用户名或密码错误");
+            throw new BusinessException(400, "用户名、邮箱或密码错误");
         }
         return new LoginResponse(tokenService.createToken(user), toResponse(user));
-    }
-
-    private java.util.Optional<UserEntity> findByUsernameOrEmail(String identifier) {
-        if (identifier.contains("@")) {
-            return userRepository.findByEmail(normalizeEmail(identifier));
-        }
-        return userRepository.findByUsername(identifier);
-    }
-
-    private UserEntity createEmailLoginUser(String email) {
-        if (userRepository.existsByUsername(email)) {
-            throw new BusinessException(400, "用户名已存在");
-        }
-        UserEntity user = new UserEntity();
-        user.setUsername(email);
-        user.setEmail(email);
-        user.setPasswordHash(passwordHasher.hash(java.util.UUID.randomUUID().toString()));
-        user.setNickname(email);
-        user.setRole(UserRole.USER);
-        user.setStatus(UserStatus.ACTIVE);
-        return userRepository.save(user);
-    }
-
-    private String defaultNickname(String nickname, String username) {
-        String normalized = nickname == null ? "" : nickname.trim();
-        return normalized.isBlank() ? username : normalized;
     }
 
     @Transactional(readOnly = true)
@@ -206,8 +183,46 @@ public class AuthService {
     }
 
     private String normalizeEmail(String email) {
-        String normalized = email == null ? "" : email.trim().toLowerCase(java.util.Locale.ROOT);
+        String normalized = email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
         return normalized.isBlank() ? null : normalized;
+    }
+
+    private String normalizeRequired(String value, String message) {
+        String normalized = value == null ? "" : value.trim();
+        if (normalized.isBlank()) {
+            throw new BusinessException(400, message);
+        }
+        return normalized;
+    }
+
+    private Optional<UserEntity> findByUsernameOrEmail(String loginId) {
+        if (loginId.contains("@")) {
+            return userRepository.findByEmail(normalizeEmail(loginId));
+        }
+        return userRepository.findByUsername(loginId);
+    }
+
+    private UserEntity createEmailUser(String email) {
+        if (userRepository.existsByUsername(email)) {
+            throw new BusinessException(400, "用户名已存在");
+        }
+        UserEntity user = new UserEntity();
+        user.setUsername(email);
+        user.setEmail(email);
+        user.setPasswordHash(passwordHasher.hash(randomUnusablePassword()));
+        user.setNickname(email);
+        user.setRole(UserRole.USER);
+        user.setStatus(UserStatus.ACTIVE);
+        return user;
+    }
+
+    private String defaultNickname(String nickname, String username) {
+        String normalized = nickname == null ? "" : nickname.trim();
+        return normalized.isBlank() ? username : normalized;
+    }
+
+    private String randomUnusablePassword() {
+        return "email-login-" + UUID.randomUUID().toString().replace("-", "").toLowerCase(Locale.ROOT);
     }
 
     private AuthUserResponse toResponse(UserEntity user) {

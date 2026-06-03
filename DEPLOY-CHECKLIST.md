@@ -64,13 +64,21 @@ Railway injects `PORT` automatically. The production backend config now reads `P
 2. Set Root Directory to `frontend`.
 3. Build Command: `npm run build`
 4. Output Directory: `dist`
-5. Set this environment variable:
+5. Set one of these environment variable options:
 
 ```env
 VITE_API_BASE=https://<your-railway-backend-domain>/api
 ```
 
-Do not hard-code a Railway domain in `vercel.json`. The frontend uses `VITE_API_BASE` at build time.
+or:
+
+```env
+BACKEND_API_BASE=https://<your-railway-backend-domain>/api
+```
+
+`VITE_API_BASE` is baked into the frontend at build time. If it is not set, the app falls back to `/api` and the included Vercel API proxy forwards those requests to `BACKEND_API_BASE`. This prevents `https://<your-vercel-domain>/api/auth/login` from returning Vercel's 404 page.
+
+Do not hard-code a Railway domain in `vercel.json`.
 
 ## Final smoke test
 

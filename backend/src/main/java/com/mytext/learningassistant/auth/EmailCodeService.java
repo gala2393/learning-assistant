@@ -2,7 +2,9 @@ package com.mytext.learningassistant.auth;
 
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -64,7 +66,31 @@ public class EmailCodeService {
     }
 
     private void sendMail(String email, String code, String provider) {
-        EmailCodeProperties.SmtpAccount account = accountFor(provider);
+        List<ProviderAccount> accounts = accountsFor(provider);
+        MailException lastFailure = null;
+        for (ProviderAccount providerAccount : accounts) {
+            try {
+                sendMailWithAccount(email, code, providerAccount.account());
+                if (!providerAccount.provider().equals(normalizeProvider(provider))) {
+                    log.info("Sent email login code to {} through fallback provider {}", email, providerAccount.provider());
+                }
+                return;
+            } catch (MailException exception) {
+                lastFailure = exception;
+                log.warn(
+                    "Failed to send email login code to {} through provider {} using {}:{}",
+                    email,
+                    providerAccount.provider(),
+                    providerAccount.account().getHost(),
+                    providerAccount.account().getPort(),
+                    exception
+                );
+            }
+        }
+        throw new BusinessException(500, "验证码发送失败，请稍后再试");
+    }
+
+    private void sendMailWithAccount(String email, String code, EmailCodeProperties.SmtpAccount account) {
         JavaMailSenderImpl mailSender = mailSender(account);
         SimpleMailMessage message = new SimpleMailMessage();
         String from = firstNonBlank(account.getFrom(), properties.getFrom(), account.getUsername());
@@ -73,26 +99,35 @@ public class EmailCodeService {
         }
         message.setTo(email);
         message.setSubject(properties.getSubject());
-        message.setText("您的登录验证码是：" + code + "，5分钟内有效。请勿泄露给他人。");
-        try {
-            mailSender.send(message);
-        } catch (MailException exception) {
-            log.warn("Failed to send email login code to {}", email, exception);
-            throw new BusinessException(500, "验证码发送失败，请稍后再试");
-        }
+        message.setText("您的登录验证码是：" + code + "，5 分钟内有效。请勿泄露给他人。");
+        mailSender.send(message);
     }
 
-    private EmailCodeProperties.SmtpAccount accountFor(String provider) {
+    private List<ProviderAccount> accountsFor(String provider) {
         String normalizedProvider = normalizeProvider(provider);
-        EmailCodeProperties.SmtpAccount account = switch (normalizedProvider) {
+        List<ProviderAccount> accounts = new ArrayList<>();
+        addAccount(accounts, normalizedProvider);
+        if (!"qq".equals(normalizedProvider)) {
+            addAccount(accounts, "qq");
+        }
+        if (!"netease".equals(normalizedProvider) && !"163".equals(normalizedProvider)) {
+            addAccount(accounts, "netease");
+        }
+        if (accounts.isEmpty()) {
+            throw new BusinessException(500, "邮箱验证码服务未配置");
+        }
+        return accounts;
+    }
+
+    private void addAccount(List<ProviderAccount> accounts, String provider) {
+        EmailCodeProperties.SmtpAccount account = switch (provider) {
             case "netease", "163" -> properties.getNetease();
             case "qq" -> properties.getQq();
             default -> throw new BusinessException(400, "验证码通道不正确");
         };
-        if (account == null || !account.isConfigured()) {
-            throw new BusinessException(500, "邮箱验证码服务未配置");
+        if (account != null && account.isConfigured()) {
+            accounts.add(new ProviderAccount(provider, account));
         }
-        return account;
     }
 
     private JavaMailSenderImpl mailSender(EmailCodeProperties.SmtpAccount account) {
@@ -156,6 +191,9 @@ public class EmailCodeService {
             }
         }
         return "";
+    }
+
+    private record ProviderAccount(String provider, EmailCodeProperties.SmtpAccount account) {
     }
 
     private record CodeEntry(String code, Instant expiresAt) {
