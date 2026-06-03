@@ -68,6 +68,9 @@ export interface Material {
   sourceUrl: string
   fileSize: number
   parseStatus: ParseStatus
+  parseProgressPercent?: number | null
+  parseStage?: string | null
+  parseMessage?: string | null
   summaryStatus: SummaryStatus
   previewStatus?: PreviewStatus
   previewError?: string | null
@@ -84,6 +87,9 @@ export interface MaterialChunk {
   chunkText: string
   pageNo: number | null
   sectionTitle: string
+  hierarchyPath?: string | null
+  summary?: string | null
+  keywords?: string | null
   excerpt: string
   createdAt?: string
 }
@@ -103,6 +109,7 @@ export interface ChatPayload {
   materialId?: string
   answerStyle?: 'STUDY' | 'HOMEWORK'
   conversationId?: string | number | null
+  images?: ChatImagePayload[]
 }
 
 export interface StreamChatPayload {
@@ -116,6 +123,12 @@ export interface StreamChatPayload {
   answerStyle?: 'STUDY' | 'HOMEWORK'
   history?: { role: string; content: string }[]
   conversationId?: string | number | null
+  images?: ChatImagePayload[]
+}
+
+export interface ChatImagePayload {
+  dataUrl: string
+  mediaType: string
 }
 
 export interface RagSource {
@@ -125,6 +138,13 @@ export interface RagSource {
   pageNo: number
   excerpt: string
   score: number
+}
+
+export interface RagUsage {
+  dailyLimit: number
+  usedToday: number
+  remainingToday: number | null
+  unlimited: boolean
 }
 
 export interface HistoryItem {
@@ -143,6 +163,90 @@ export interface HistoryItem {
     text: string
   }>
   sources?: RagSource[]
+}
+
+export interface RagEvaluationCasePayload {
+  question: string
+  materialId?: string | number | null
+  expectedAnswerTerms?: string[]
+  expectedSourceTerms?: string[]
+}
+
+export interface RagEvaluationSuitePayload {
+  cases: RagEvaluationCasePayload[]
+}
+
+export interface RagEvaluationSuiteSavePayload {
+  name: string
+  description?: string
+  cases: RagEvaluationCasePayload[]
+}
+
+export interface RagEvaluationCaseResult {
+  caseIndex: number
+  questionId: string | number | null
+  question: string
+  faithfulnessScore: number
+  contextRelevanceScore: number
+  overallScore: number
+  expectedAnswerCoverage: number
+  expectedSourceCoverage: number
+  verdict: string
+  passed: boolean
+  missingAnswerTerms: string[]
+  missingSourceTerms: string[]
+}
+
+export interface RagEvaluationSuiteResult {
+  totalCases: number
+  passedCases: number
+  passRate: number
+  averageFaithfulnessScore: number
+  averageContextRelevanceScore: number
+  averageOverallScore: number
+  cases: RagEvaluationCaseResult[]
+}
+
+export interface RagEvaluationSuiteSummary {
+  id: string
+  name: string
+  description?: string | null
+  caseCount: number
+  lastTotalCases?: number | null
+  lastPassedCases?: number | null
+  lastPassRate?: number | null
+  lastAverageOverallScore?: number | null
+  lastRunAt?: string | null
+  scheduled: boolean
+  scheduleIntervalHours: number
+  nextRunAt?: string | null
+  updatedAt?: string | null
+}
+
+export interface RagEvaluationSuiteRun {
+  id: string
+  suiteId: string
+  totalCases: number
+  passedCases: number
+  passRate: number
+  averageFaithfulnessScore: number
+  averageContextRelevanceScore: number
+  averageOverallScore: number
+  result?: RagEvaluationSuiteResult | null
+  createdAt: string
+}
+
+export interface RagEvaluationSuiteDetail {
+  id: string
+  name: string
+  description?: string | null
+  cases: RagEvaluationCasePayload[]
+  latestRun?: RagEvaluationSuiteRun | null
+  scheduled: boolean
+  scheduleIntervalHours: number
+  nextRunAt?: string | null
+  createdAt?: string | null
+  updatedAt?: string | null
 }
 
 export interface FavoriteItem {
@@ -203,6 +307,21 @@ export interface AdminLog {
   createdAt: string
 }
 
+export interface AdminUsageRecord {
+  id: string
+  userId: string
+  username: string
+  action: string
+  targetType: string
+  targetId: string
+  modelName?: string | null
+  promptTokens?: number | null
+  completionTokens?: number | null
+  totalTokens?: number | null
+  detail: string
+  createdAt: string
+}
+
 export interface PageResult<T> {
   items: T[]
   page: number
@@ -214,4 +333,38 @@ export interface LlmStatus {
   enabled: boolean
   configured: boolean
   message: string
+}
+
+export interface UserLlmConfig {
+  enabled: boolean
+  baseUrl: string
+  model: string
+  hasApiKey: boolean
+  activeLabel: string
+  activeConfigId: string | number | null
+  configs: UserLlmConfigItem[]
+}
+
+export interface UserLlmConfigItem {
+  id: string | number
+  displayName: string
+  baseUrl: string
+  model: string
+  hasApiKey: boolean
+  active: boolean
+}
+
+export interface UserLlmConfigPayload {
+  id?: string | number | null
+  enabled: boolean
+  displayName?: string
+  baseUrl: string
+  apiKey?: string
+  model: string
+}
+
+export interface UserLlmTestResult {
+  ok: boolean
+  message: string
+  model: string
 }

@@ -32,6 +32,15 @@ public class MaterialChunkEntity {
     @Column(name = "section_title", length = 255)
     private String sectionTitle;
 
+    @Column(name = "hierarchy_path", length = 500)
+    private String hierarchyPath;
+
+    @Column(name = "summary", length = 500)
+    private String summary;
+
+    @Column(name = "keywords", length = 500)
+    private String keywords;
+
     @Column(name = "embedding_json", columnDefinition = "TEXT")
     private String embeddingJson;
 
@@ -84,6 +93,30 @@ public class MaterialChunkEntity {
 
     public void setSectionTitle(String sectionTitle) {
         this.sectionTitle = sectionTitle;
+    }
+
+    public String getHierarchyPath() {
+        return hierarchyPath;
+    }
+
+    public void setHierarchyPath(String hierarchyPath) {
+        this.hierarchyPath = hierarchyPath;
+    }
+
+    public String getSummary() {
+        return summary;
+    }
+
+    public void setSummary(String summary) {
+        this.summary = summary;
+    }
+
+    public String getKeywords() {
+        return keywords;
+    }
+
+    public void setKeywords(String keywords) {
+        this.keywords = keywords;
     }
 
     public String getEmbeddingJson() {

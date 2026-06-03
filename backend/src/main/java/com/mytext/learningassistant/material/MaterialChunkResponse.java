@@ -7,6 +7,9 @@ public record MaterialChunkResponse(
     String chunkText,
     Integer pageNo,
     String sectionTitle,
+    String hierarchyPath,
+    String summary,
+    String keywords,
     String excerpt,
     String createdAt
 ) {

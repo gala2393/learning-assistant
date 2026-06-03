@@ -2,9 +2,10 @@ import { chatStream, getHistory } from '@/api/rag'
 import { queryClient } from '@/lib/query-client'
 import { sanitizeAiText } from '@/lib/utils'
 import type { ChatMessage } from '@/components/workspace/ChatThread'
-import type { HistoryItem, RagSource } from '@/types'
+import type { ChatImagePayload, HistoryItem, RagSource } from '@/types'
 
 export const CHAT_DRAFT_KEY = 'learning-assistant.chat.current'
+const CHAT_DRAFT_BACKUP_KEY = 'learning-assistant.chat.current.backup'
 export const CHAT_HISTORY_CONVERSATION_KEY = 'learning-assistant.chat.history-conversations'
 const CHAT_CONVERSATION_ARCHIVE_KEY = 'learning-assistant.chat.conversation-archive'
 
@@ -22,6 +23,7 @@ export interface ChatSessionSnapshot {
   messages: ChatMessage[]
   conversationHistory: ConversationMessage[]
   streaming: boolean
+  images: ChatImagePayload[]
 }
 
 interface PersistedChatDraft {
@@ -33,6 +35,7 @@ interface PersistedChatDraft {
   chunkId: string | null
   messages: ChatMessage[]
   conversationHistory: ConversationMessage[]
+  images?: ChatImagePayload[]
 }
 
 interface ConversationArchiveItem {
@@ -43,6 +46,7 @@ interface ConversationArchiveItem {
   chunkId: string | null
   messages: ChatMessage[]
   conversationHistory: ConversationMessage[]
+  images?: ChatImagePayload[]
 }
 
 const defaultState: ChatSessionSnapshot = {
@@ -56,6 +60,7 @@ const defaultState: ChatSessionSnapshot = {
   messages: [],
   conversationHistory: [],
   streaming: false,
+  images: [],
 }
 
 let activeController: AbortController | null = null
@@ -85,6 +90,7 @@ export function resetChatSession(options?: {
   mode?: ChatMode
   materialId?: string | null
   chunkId?: string | null
+  images?: ChatImagePayload[]
   abortActive?: boolean
 }) {
   if (options?.abortActive !== false) {
@@ -95,6 +101,7 @@ export function resetChatSession(options?: {
     mode: options?.mode || defaultState.mode,
     materialId: options?.materialId ?? null,
     chunkId: options?.chunkId ?? null,
+    images: options?.images ?? [],
   }
   persistSnapshot()
   notify()
@@ -152,10 +159,12 @@ export function startChatSessionStream(params: {
   mode: ChatMode
   materialId: string | null
   chunkId: string | null
+  images?: ChatImagePayload[]
 }) {
   if (state.streaming) return
 
-  const userMsg: ChatMessage = { id: 'pending-user-' + Date.now(), role: 'user', text: params.question }
+  const requestImages = params.images || state.images || []
+  const userMsg: ChatMessage = { id: 'pending-user-' + Date.now(), role: 'user', text: params.question, images: requestImages }
   const assistantId = 'pending-assistant-' + Date.now()
   const thinkingMsg: ChatMessage = { id: assistantId, role: 'assistant', text: '', thinking: true }
   const historyBefore = state.conversationHistory
@@ -175,6 +184,7 @@ export function startChatSessionStream(params: {
     input: '',
     materialId: params.mode === 'MATERIAL' ? params.materialId : null,
     chunkId: params.mode === 'MATERIAL' ? params.chunkId : null,
+    images: [],
     messages: state.messages.concat(userMsg, thinkingMsg),
     conversationHistory: historyBefore,
     streaming: true,
@@ -190,8 +200,22 @@ export function startChatSessionStream(params: {
       chunkId: params.mode === 'MATERIAL' ? (params.chunkId || undefined) : undefined,
       history: historyBefore,
       conversationId: conversationIdBefore,
+      images: requestImages,
     },
     {
+      onStatus: (status) => {
+        if (activeRunId !== runId || answer.trim()) return
+        state = {
+          ...state,
+          messages: state.messages.map((message) =>
+            message.id === assistantId
+              ? { ...message, thinking: false, text: streamStatusText(status) }
+              : message,
+          ),
+        }
+        persistSnapshot()
+        notify()
+      },
       onChunk: (delta) => {
         if (activeRunId !== runId) return
         answer += delta
@@ -248,6 +272,8 @@ export function startChatSessionStream(params: {
         rememberConversationArchive()
         notify()
         queryClient.invalidateQueries({ queryKey: ['history'] })
+        queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
+        queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
       },
       onError: (message) => {
         if (activeRunId !== runId) return
@@ -265,9 +291,18 @@ export function startChatSessionStream(params: {
         persistSnapshot()
         notify()
         queryClient.invalidateQueries({ queryKey: ['history'] })
+        queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
+        queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
       },
     },
   )
+}
+
+function streamStatusText(status: { stage?: string; message?: string }) {
+  if (status.message?.trim()) return status.message.trim()
+  if (status.stage === 'searching') return '正在检索相关资料...'
+  if (status.stage === 'thinking') return '正在准备回答...'
+  return '正在准备回答...'
 }
 
 function abortActiveStream() {
@@ -279,7 +314,9 @@ function abortActiveStream() {
 function restoreSnapshot(): ChatSessionSnapshot {
   if (typeof window === 'undefined') return defaultState
   try {
-    const draft = JSON.parse(sessionStorage.getItem(CHAT_DRAFT_KEY) || 'null') as PersistedChatDraft | null
+    const draft = JSON.parse(
+      sessionStorage.getItem(CHAT_DRAFT_KEY) || localStorage.getItem(CHAT_DRAFT_BACKUP_KEY) || 'null',
+    ) as PersistedChatDraft | null
     if (!draft?.messages?.length) return defaultState
     return {
       ...defaultState,
@@ -288,11 +325,19 @@ function restoreSnapshot(): ChatSessionSnapshot {
       mode: draft.mode,
       materialId: draft.materialId,
       chunkId: draft.chunkId,
-      messages: draft.messages.map((message) => ({ ...message, thinking: false })),
+      messages: draft.messages.map((message) => {
+        if (!message.thinking) return message
+        if (message.text.trim()) {
+          return { ...message, thinking: false, text: message.text.trim() + '\n\nStream interrupted by page refresh. Partial answer restored.' }
+        }
+        return { ...message, thinking: false, error: 'Stream interrupted by page refresh. Please send the question again.', text: '' }
+      }),
       conversationHistory: draft.conversationHistory || [],
+      images: draft.images || [],
     }
   } catch {
     sessionStorage.removeItem(CHAT_DRAFT_KEY)
+    localStorage.removeItem(CHAT_DRAFT_BACKUP_KEY)
     return defaultState
   }
 }
@@ -301,6 +346,7 @@ function persistSnapshot() {
   if (typeof window === 'undefined') return
   if (state.messages.length === 0) {
     sessionStorage.removeItem(CHAT_DRAFT_KEY)
+    localStorage.removeItem(CHAT_DRAFT_BACKUP_KEY)
     return
   }
   const draft: PersistedChatDraft = {
@@ -311,8 +357,10 @@ function persistSnapshot() {
     chunkId: state.mode === 'MATERIAL' ? state.chunkId : null,
     messages: state.messages,
     conversationHistory: state.conversationHistory,
+    images: state.images,
   }
   sessionStorage.setItem(CHAT_DRAFT_KEY, JSON.stringify(draft))
+  localStorage.setItem(CHAT_DRAFT_BACKUP_KEY, JSON.stringify(draft))
 }
 
 function rememberHistoryConversation(questionId: string, conversationId: string) {
@@ -352,6 +400,7 @@ function rememberConversationArchive() {
       chunkId: state.chunkId,
       messages: state.messages,
       conversationHistory: state.conversationHistory,
+      images: state.images,
     }
     localStorage.setItem(CHAT_CONVERSATION_ARCHIVE_KEY, JSON.stringify(archive))
   } catch {

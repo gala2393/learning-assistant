@@ -33,6 +33,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Separator } from '@/components/ui/separator'
 import { useAuth } from '@/context/AuthContext'
 import api from '@/lib/axios'
+import { useUserLlmConfig } from '@/api/llm'
 import { cn } from '@/lib/utils'
 import type { HistoryItem, LlmStatus } from '@/types'
 import { ProfileDialog } from './ProfileDialog'
@@ -77,6 +78,7 @@ export function Sidebar() {
   const sections = isAdminRoute ? ADMIN_SECTIONS : WORKSPACE_SECTIONS
   const { data: historyItems = [] } = useHistory()
   const { data: favorites = [] } = useFavorites()
+  const { data: userLlmConfig } = useUserLlmConfig()
   const deleteHistoryMutation = useDeleteHistory()
   const renameHistoryMutation = useRenameHistory()
   const togglePinHistoryMutation = useTogglePinHistory()
@@ -100,6 +102,12 @@ export function Sidebar() {
 
   const recentHistory = useMemo(() => historyItems.slice(0, 6), [historyItems])
   const selectedHistoryId = new URLSearchParams(location.search).get('historyId')
+  const effectiveLlmConfigured = Boolean(llmStatus?.configured || userLlmConfig?.enabled)
+  const effectiveLlmLabel = userLlmConfig?.enabled
+    ? `${userLlmConfig.activeLabel || '自定义模型'} 已连接`
+    : llmStatus?.configured
+      ? 'LLM 已连接'
+      : 'LLM 未配置'
 
   const openHistory = (item: HistoryItem) => {
     navigate(`/workspace/chat?historyId=${encodeURIComponent(String(item.id))}`)
@@ -375,12 +383,12 @@ export function Sidebar() {
           <div
             className={cn(
               'flex items-center gap-2 rounded-lg px-3 py-2 text-xs',
-              llmStatus.configured ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600',
+              effectiveLlmConfigured ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600',
             )}
           >
-            {llmStatus.configured ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+            {effectiveLlmConfigured ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
             <Cpu className="h-3.5 w-3.5" />
-            <span className="truncate">{llmStatus.configured ? 'LLM 已连接' : 'LLM 未配置'}</span>
+            <span className="truncate">{effectiveLlmLabel}</span>
           </div>
         )}
 

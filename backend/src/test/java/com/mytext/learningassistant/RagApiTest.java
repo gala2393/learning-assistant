@@ -3,6 +3,7 @@ package com.mytext.learningassistant;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -12,9 +13,13 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.when;
 
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -23,6 +28,8 @@ import java.util.regex.Pattern;
 import com.mytext.learningassistant.embedding.EmbeddingClient;
 import com.mytext.learningassistant.llm.LlmCompletion;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
+import com.mytext.learningassistant.material.MaterialChunkRepository;
+import com.mytext.learningassistant.rag.RagEvaluationSuiteScheduler;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -47,6 +54,12 @@ class RagApiTest {
     @MockBean
     private ThirdPartyLlmClient thirdPartyLlmClient;
 
+    @Autowired
+    private MaterialChunkRepository materialChunkRepository;
+
+    @Autowired
+    private RagEvaluationSuiteScheduler ragEvaluationSuiteScheduler;
+
     @BeforeEach
     void useLocalFallbackByDefault() {
         when(embeddingClient.embed(anyString())).thenReturn(Optional.empty());
@@ -54,6 +67,8 @@ class RagApiTest {
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean(), any())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.summarize(anyString(), anyList())).thenReturn(Optional.empty());
+        when(thirdPartyLlmClient.expandQuery(anyString())).thenReturn(Optional.empty());
+        when(thirdPartyLlmClient.generateHydeAnswer(anyString())).thenReturn(Optional.empty());
     }
 
     @Test
@@ -113,6 +128,249 @@ class RagApiTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data[0].questionId").value(questionId.intValue()))
             .andExpect(jsonPath("$.data[0].messages", hasSize(2)));
+    }
+
+    @Test
+    void canSubmitAndUpdateRagFeedback() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-feedback-user"));
+        uploadMaterial(token);
+
+        Long questionId = createChatAndReturnQuestionId(token, "How does RAG retrieve relevant course chunks?");
+
+        mockMvc.perform(patch("/api/rag/history/" + questionId + "/feedback")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "rating": 1,
+                      "comment": "Relevant sources"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.questionId").value(questionId.intValue()))
+            .andExpect(jsonPath("$.data.rating").value(1))
+            .andExpect(jsonPath("$.data.comment").value("Relevant sources"));
+
+        mockMvc.perform(patch("/api/rag/history/" + questionId + "/feedback")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "rating": -1,
+                      "comment": "Missing detail"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.questionId").value(questionId.intValue()))
+            .andExpect(jsonPath("$.data.rating").value(-1))
+            .andExpect(jsonPath("$.data.comment").value("Missing detail"));
+    }
+
+    @Test
+    void canEvaluateRagAnswerFaithfulnessAndContextRelevance() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-evaluation-user"));
+        uploadMaterial(token);
+
+        Long questionId = createChatAndReturnQuestionId(token, "How does RAG retrieve relevant course chunks?");
+
+        var evaluationResult = mockMvc.perform(post("/api/rag/history/" + questionId + "/evaluation")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.questionId").value(questionId.intValue()))
+            .andExpect(jsonPath("$.data.faithfulnessScore").isNumber())
+            .andExpect(jsonPath("$.data.contextRelevanceScore").isNumber())
+            .andExpect(jsonPath("$.data.overallScore").isNumber())
+            .andExpect(jsonPath("$.data.verdict").isNotEmpty())
+            .andExpect(jsonPath("$.data.evidence").value(org.hamcrest.Matchers.containsString("sources=")))
+            .andReturn();
+        Long evaluationId = extractLong(evaluationResult.getResponse().getContentAsString(), "id");
+
+        mockMvc.perform(get("/api/rag/history/" + questionId + "/evaluation")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.id").value(evaluationId.intValue()))
+            .andExpect(jsonPath("$.data.questionId").value(questionId.intValue()))
+            .andExpect(jsonPath("$.data.evidence").isNotEmpty());
+    }
+
+    @Test
+    void canRunOfflineRagEvaluationSuite() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-suite-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Offline Evaluation Material",
+            "RAG retrieves relevant course chunks before answering student questions. "
+                + "BM25 and vector search are different retrieval methods."
+        );
+
+        mockMvc.perform(post("/api/rag/evaluation-suite")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "cases": [
+                        {
+                          "question": "How does RAG answer student questions?",
+                          "materialId": %d,
+                          "expectedAnswerTerms": ["RAG", "student"],
+                          "expectedSourceTerms": ["relevant course chunks"]
+                        },
+                        {
+                          "question": "What retrieval methods are mentioned?",
+                          "materialId": %d,
+                          "expectedAnswerTerms": ["BM25", "vector search"],
+                          "expectedSourceTerms": ["BM25", "vector search"]
+                        }
+                      ]
+                    }
+                    """.formatted(materialId, materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.totalCases").value(2))
+            .andExpect(jsonPath("$.data.passedCases").value(2))
+            .andExpect(jsonPath("$.data.passRate").value(1.0))
+            .andExpect(jsonPath("$.data.averageOverallScore").isNumber())
+            .andExpect(jsonPath("$.data.cases[0].questionId").isNumber())
+            .andExpect(jsonPath("$.data.cases[0].expectedAnswerCoverage").value(1.0))
+            .andExpect(jsonPath("$.data.cases[0].expectedSourceCoverage").value(1.0))
+            .andExpect(jsonPath("$.data.cases[0].passed").value(true))
+            .andExpect(jsonPath("$.data.cases[1].expectedAnswerCoverage").value(1.0))
+            .andExpect(jsonPath("$.data.cases[1].expectedSourceCoverage").value(1.0))
+            .andExpect(jsonPath("$.data.cases[1].missingAnswerTerms", hasSize(0)))
+            .andExpect(jsonPath("$.data.cases[1].missingSourceTerms", hasSize(0)));
+    }
+
+    @Test
+    void canPersistAndRunRagEvaluationSuite() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-persisted-suite-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Persisted Evaluation Material",
+            "RAG retrieves relevant course chunks before answering student questions."
+        );
+
+        var saveResult = mockMvc.perform(post("/api/rag/evaluation-suites")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "name": "Core RAG Regression",
+                      "description": "Saved regression cases",
+                      "cases": [
+                        {
+                          "question": "How does RAG answer student questions?",
+                          "materialId": %d,
+                          "expectedAnswerTerms": ["RAG", "student"],
+                          "expectedSourceTerms": ["relevant course chunks"]
+                        }
+                      ]
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.name").value("Core RAG Regression"))
+            .andExpect(jsonPath("$.data.cases[0].question").value("How does RAG answer student questions?"))
+            .andReturn();
+        Long suiteId = extractLong(saveResult.getResponse().getContentAsString(), "id");
+
+        mockMvc.perform(get("/api/rag/evaluation-suites")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data[0].id").value(suiteId.intValue()))
+            .andExpect(jsonPath("$.data[0].caseCount").value(1));
+
+        var runResult = mockMvc.perform(post("/api/rag/evaluation-suites/" + suiteId + "/runs")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.suiteId").value(suiteId.intValue()))
+            .andExpect(jsonPath("$.data.totalCases").value(1))
+            .andExpect(jsonPath("$.data.passedCases").value(1))
+            .andExpect(jsonPath("$.data.passRate").value(1.0))
+            .andExpect(jsonPath("$.data.result.cases[0].passed").value(true))
+            .andReturn();
+        Long runId = extractLong(runResult.getResponse().getContentAsString(), "id");
+
+        mockMvc.perform(get("/api/rag/evaluation-suites/" + suiteId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.latestRun.id").value(runId.intValue()))
+            .andExpect(jsonPath("$.data.latestRun.result.totalCases").value(1));
+
+        mockMvc.perform(get("/api/rag/evaluation-suites/" + suiteId + "/runs")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data[0].id").value(runId.intValue()))
+            .andExpect(jsonPath("$.data[0].result.passRate").value(1.0));
+    }
+
+    @Test
+    void scheduledRagEvaluationSuiteRunsWhenDue() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-scheduled-suite-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Scheduled Evaluation Material",
+            "RAG retrieves relevant course chunks before answering student questions."
+        );
+
+        var saveResult = mockMvc.perform(post("/api/rag/evaluation-suites")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "name": "Scheduled RAG Regression",
+                      "description": "Runs on a cadence",
+                      "cases": [
+                        {
+                          "question": "How does RAG answer student questions?",
+                          "materialId": %d,
+                          "expectedAnswerTerms": ["RAG", "student"],
+                          "expectedSourceTerms": ["relevant course chunks"]
+                        }
+                      ]
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andReturn();
+        Long suiteId = extractLong(saveResult.getResponse().getContentAsString(), "id");
+
+        mockMvc.perform(patch("/api/rag/evaluation-suites/" + suiteId + "/schedule")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "scheduled": true,
+                      "intervalHours": 1
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.scheduled").value(true))
+            .andExpect(jsonPath("$.data.scheduleIntervalHours").value(1))
+            .andExpect(jsonPath("$.data.nextRunAt").isNotEmpty());
+
+        int runCount = ragEvaluationSuiteScheduler.runDueSuitesOnce(LocalDateTime.now().plusHours(2));
+        org.assertj.core.api.Assertions.assertThat(runCount).isGreaterThanOrEqualTo(1);
+
+        mockMvc.perform(get("/api/rag/evaluation-suites/" + suiteId + "/runs")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data[0].totalCases").value(1))
+            .andExpect(jsonPath("$.data[0].passedCases").value(1));
+
+        mockMvc.perform(get("/api/rag/evaluation-suites/" + suiteId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.scheduled").value(true))
+            .andExpect(jsonPath("$.data.latestRun.result.passRate").value(1.0))
+            .andExpect(jsonPath("$.data.nextRunAt").isNotEmpty());
     }
 
     @Test
@@ -286,6 +544,43 @@ class RagApiTest {
     }
 
     @Test
+    void chatUsesMaterialSummaryAsHierarchicalSeedBeforeChunkRetrieval() throws Exception {
+        when(thirdPartyLlmClient.summarize(anyString(), anyList()))
+            .thenReturn(Optional.of(new LlmCompletion("AuroraGraph explains layered graph planning and retrieval routing.", "mock-model")));
+        String token = registerAndLogin(uniqueName("summary-seed-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Layered Planning Material",
+            "The first chapter describes neutral planning workflows. "
+                + "The second chapter describes general routing examples without naming the rare concept."
+        );
+
+        mockMvc.perform(post("/api/rag/summarize")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "materialId": %d
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.summary").value(org.hamcrest.Matchers.containsString("AuroraGraph")));
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "What does AuroraGraph explain?"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.sources[0].materialId").value(materialId.intValue()))
+            .andExpect(jsonPath("$.data.sources[0].materialTitle").value("Layered Planning Material"));
+    }
+
+    @Test
     void summaryHistoryReturnsLatestVersionsForMaterial() throws Exception {
         String token = registerAndLogin(uniqueName("summary-history-user"));
         Long materialId = uploadMaterialAndReturnId(token);
@@ -386,7 +681,9 @@ class RagApiTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Provider answer")))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("First point")))
-            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("*"))))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("**Provider answer**")))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("* First point")))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("- Second point")))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("资料依据")))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Course RAG Material")))
             .andExpect(jsonPath("$.data.sources[0].materialTitle").value("Course RAG Material"));
@@ -746,6 +1043,117 @@ class RagApiTest {
     }
 
     @Test
+    void queryExpansionCanRetrieveChunkWhenOriginalQuestionHasNoMatchingTerms() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-query-expansion-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Expansion Material",
+            "alpha retrieval marker appears only here."
+        );
+        var chunksResult = mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andReturn();
+        Long expandedChunkId = extractChunkIdContaining(chunksResult.getResponse().getContentAsString(), "alpha retrieval marker");
+
+        when(thirdPartyLlmClient.expandQuery(anyString()))
+            .thenReturn(Optional.of(List.of("alpha retrieval marker")));
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "Can you recover the clue?",
+                      "mode": "MATERIAL",
+                      "materialId": %d
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.sources[0].chunkId").value(expandedChunkId.intValue()))
+            .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("alpha retrieval marker")));
+
+        verify(thirdPartyLlmClient).expandQuery("Can you recover the clue?");
+    }
+
+    @Test
+    void retrievalUsesPersistedChunkKeywords() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-chunk-keywords-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Keyword Metadata Material",
+            "alpha marker body text."
+        );
+        Long chunkId = extractChunkIdContaining(
+            mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                    .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString(),
+            "alpha marker"
+        );
+        materialChunkRepository.findById(chunkId).ifPresent(chunk -> {
+            chunk.setKeywords("rarekeyword");
+            materialChunkRepository.save(chunk);
+        });
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "Where is rarekeyword mentioned?",
+                      "mode": "MATERIAL",
+                      "materialId": %d
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.sources[0].chunkId").value(chunkId.intValue()))
+            .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("alpha marker")));
+    }
+
+    @Test
+    void identicalQuestionReusesRetrievalResultCache() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-retrieval-cache-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Retrieval Cache Material",
+            "cache marker retrieval text appears in this material."
+        );
+        when(thirdPartyLlmClient.expandQuery(anyString()))
+            .thenReturn(Optional.of(List.of("cache marker retrieval text")));
+
+        String requestBody = """
+            {
+              "question": "Where is the cache marker?",
+              "mode": "MATERIAL",
+              "materialId": %d
+            }
+            """.formatted(materialId);
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(requestBody))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("cache marker")));
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(requestBody))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("cache marker")));
+
+        verify(thirdPartyLlmClient, times(1)).expandQuery("Where is the cache marker?");
+    }
+
+    @Test
     void comparisonQuestionPrefersChunkContainingBothTerms() throws Exception {
         String token = registerAndLogin(uniqueName("rag-comparison-user"));
         String singleTermParagraph = "BM25 is a keyword matching retrieval method. ".repeat(20);
@@ -873,6 +1281,42 @@ class RagApiTest {
             .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("\u5411\u91cf\u68c0\u7d22\u7684\u533a\u522b")));
     }
 
+    @Test
+    void followUpQuestionUsesHistoryTopicForRetrieval() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-follow-up-user"));
+        String distractorParagraph = "UDP\u534f\u8bae\u7684\u4f18\u70b9\u662f\u5ef6\u8fdf\u4f4e\uff0c\u7f3a\u70b9\u662f\u4e0d\u4fdd\u8bc1\u53ef\u9760\u4f20\u8f93\u3002".repeat(40);
+        String tcpParagraph = "TCP\u534f\u8bae\u7684\u4f18\u70b9\u662f\u53ef\u9760\u4f20\u8f93\u3001\u6709\u5e8f\u5230\u8fbe\uff0c\u7f3a\u70b9\u662f\u63e1\u624b\u548c\u91cd\u4f20\u5e26\u6765\u989d\u5916\u5f00\u9500\u3002";
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "Follow-up Retrieval Material",
+            distractorParagraph + "\n\n" + tcpParagraph
+        );
+        var chunksResult = mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andReturn();
+        Long tcpChunkId = extractChunkIdContaining(chunksResult.getResponse().getContentAsString(), "TCP");
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "\u90a3\u5b83\u7684\u4f18\u7f3a\u70b9\u5462\uff1f",
+                      "mode": "MATERIAL",
+                      "materialId": %d,
+                      "history": [
+                        {"role": "user", "content": "\u4ec0\u4e48\u662f TCP\u534f\u8bae\uff1f"},
+                        {"role": "assistant", "content": "TCP\u534f\u8bae\u662f\u9762\u5411\u8fde\u63a5\u7684\u4f20\u8f93\u5c42\u534f\u8bae\u3002"}
+                      ]
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.sources[0].chunkId").value(tcpChunkId.intValue()))
+            .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("TCP")));
+    }
+
 
     @Test
     void materialModeDoesNotUseChunksFromOtherMaterialsEvenWhenOtherMaterialMatchesBetter() throws Exception {
@@ -986,6 +1430,54 @@ class RagApiTest {
             .andExpect(jsonPath("$.data.sources[0].materialId").value(ragMaterialId.intValue()))
             .andExpect(jsonPath("$.data.sources[0].chunkId").isNumber())
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Course RAG Material")));
+    }
+
+    @Test
+    void hydeAnswerEmbeddingCanRetrieveChunkWhenOriginalQuestionHasNoTerms() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-hyde-user"));
+        Long materialId = uploadMaterialAndReturnId(
+            token,
+            "HyDE Vector Material",
+            "semantic anchor vector target passage"
+        );
+        Long targetChunkId = extractChunkIdContaining(
+            mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                    .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString(),
+            "semantic anchor vector target"
+        );
+
+        materialChunkRepository.findById(targetChunkId).ifPresent(chunk -> {
+            chunk.setEmbeddingJson("[1.0,0.0]");
+            materialChunkRepository.save(chunk);
+        });
+        when(thirdPartyLlmClient.generateHydeAnswer("Can you infer the hidden concept?"))
+            .thenReturn(Optional.of("semantic anchor vector target passage"));
+        when(embeddingClient.embed("Can you infer the hidden concept?"))
+            .thenReturn(Optional.of(List.of(0.0, 1.0)));
+        when(embeddingClient.embed("semantic anchor vector target passage"))
+            .thenReturn(Optional.of(List.of(1.0, 0.0)));
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "Can you infer the hidden concept?",
+                      "mode": "MATERIAL",
+                      "materialId": %d
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.sources[0].chunkId").value(targetChunkId.intValue()))
+            .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("semantic anchor vector target")));
+
+        verify(thirdPartyLlmClient).generateHydeAnswer("Can you infer the hidden concept?");
+        verify(embeddingClient, atLeastOnce()).embed("semantic anchor vector target passage");
     }
 
     @Test

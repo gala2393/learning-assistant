@@ -9,7 +9,7 @@ import {
   useDeleteMaterial,
   useUpdateMaterial,
   useReparseMaterial,
-  getMaterialFile,
+  createMaterialFileTicket,
   uploadMaterialInChunks,
 } from '@/api/materials'
 import { useDebounce } from '@/hooks/useDebounce'
@@ -22,9 +22,9 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog'
-import { Search, Trash2, BookOpen, Loader2 } from 'lucide-react'
+import { Search, Trash2, BookOpen, Loader2, Upload } from 'lucide-react'
 import { SOURCE_TYPE_LABELS, PARSE_STATUS_LABELS } from '@/constants'
-import { formatDate, formatBytes, inferSourceType } from '@/lib/utils'
+import { formatDate, formatBytes, inferSourceType, cn } from '@/lib/utils'
 import type { Material } from '@/types'
 import type { UploadProgress } from '@/api/materials'
 
@@ -45,6 +45,7 @@ export function MaterialsPage() {
   const [editTitle, setEditTitle] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)
+  const [uploadOpen, setUploadOpen] = useState(false)
 
   const debouncedKeyword = useDebounce(keyword, 300)
 
@@ -69,6 +70,7 @@ export function MaterialsPage() {
         sourceType: inferSourceType(data.file.name),
       }, setUploadProgress)
       await queryClient.invalidateQueries({ queryKey: ['materials'] })
+      setUploadOpen(false)
       showToast('资料上传成功')
     } catch (error) {
       const message = error instanceof Error ? error.message : '上传失败，请重试'
@@ -118,13 +120,17 @@ export function MaterialsPage() {
   }
 
   const handleOpenFile = async (material: Material) => {
+    const opened = window.open('', '_blank')
     try {
-      const { blob } = await getMaterialFile(material.id)
-      const url = URL.createObjectURL(blob)
-      window.open(url, '_blank')
-      setTimeout(() => URL.revokeObjectURL(url), 60000)
-    } catch {
-      // Keep the file action quiet if the browser blocks the preview.
+      const ticket = await createMaterialFileTicket(material.id)
+      if (opened) {
+        opened.location.href = ticket.url
+      } else {
+        showToast('浏览器拦截了新窗口，请允许弹窗后再试')
+      }
+    } catch (error) {
+      opened?.close()
+      showToast(error instanceof Error ? error.message : '原文件打开失败')
     }
   }
 
@@ -147,21 +153,33 @@ export function MaterialsPage() {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="flex items-center justify-between px-6 pb-2 pt-4">
-        <h2 className="flex items-center gap-2 text-lg font-semibold">
-          <BookOpen className="h-5 w-5" /> 资料管理
+      <div className="flex items-center justify-between gap-3 px-1 pb-2 pt-1 md:px-6 md:pt-4">
+        <h2 className="flex min-w-0 items-center gap-2 truncate text-base font-semibold md:text-lg">
+          <BookOpen className="h-5 w-5 shrink-0" /> 资料管理
         </h2>
-        <span className="text-sm text-muted-foreground">共 {filtered.length} 份资料</span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="text-sm text-muted-foreground">共 {filtered.length} 份</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5 px-2 md:hidden"
+            onClick={() => setUploadOpen((open) => !open)}
+          >
+            <Upload className="h-3.5 w-3.5" />
+            导入
+          </Button>
+        </div>
       </div>
 
-      <div className="flex flex-1 gap-4 overflow-hidden px-6 pb-4">
-        <div className="w-72 shrink-0 overflow-auto">
+      <div className="flex flex-1 flex-col gap-3 overflow-hidden px-1 pb-2 md:flex-row md:gap-4 md:px-6 md:pb-4">
+        <div className={cn('shrink-0 overflow-auto md:block md:max-h-none md:w-72', uploadOpen || uploading ? 'max-h-[52dvh]' : 'hidden')}>
           <MaterialUploadForm onSubmit={handleUpload} loading={isBusy} progress={uploadProgress} />
         </div>
 
-        <div className="flex flex-1 flex-col overflow-hidden">
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <div className="relative min-w-[180px] flex-1">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="mb-2 flex flex-wrap items-center gap-2 md:mb-3">
+            <div className="relative min-w-full flex-1 sm:min-w-[180px]">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
                 placeholder="搜索标题..."
@@ -171,7 +189,7 @@ export function MaterialsPage() {
               />
             </div>
             <Select value={sourceTypeFilter} onValueChange={setSourceTypeFilter}>
-              <SelectTrigger className="h-9 w-[120px]">
+              <SelectTrigger className="h-9 w-[calc(50vw-1rem)] sm:w-[120px]">
                 <SelectValue placeholder="类型" />
               </SelectTrigger>
               <SelectContent>
@@ -182,7 +200,7 @@ export function MaterialsPage() {
               </SelectContent>
             </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="h-9 w-[120px]">
+              <SelectTrigger className="h-9 w-[calc(50vw-1rem)] sm:w-[120px]">
                 <SelectValue placeholder="状态" />
               </SelectTrigger>
               <SelectContent>
@@ -194,7 +212,7 @@ export function MaterialsPage() {
             </Select>
           </div>
 
-          <div className="flex-1 overflow-auto">
+          <div className="min-h-0 flex-1 overflow-auto pb-2">
             {isLoading ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -215,12 +233,12 @@ export function MaterialsPage() {
           </div>
 
           {selected && (
-            <div className="mt-3 flex items-center justify-between gap-4 rounded-lg border bg-muted/30 p-3">
+            <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border bg-muted/30 p-2 md:mt-3 md:p-3">
               <div className="flex min-w-0 items-center gap-3">
                 <BookOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{selected.title || selected.originalName}</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="truncate text-xs text-muted-foreground">
                     {SOURCE_TYPE_LABELS[selected.sourceType] || selected.sourceType}
                     {' / '}
                     {PARSE_STATUS_LABELS[selected.parseStatus] || selected.parseStatus}
@@ -232,8 +250,8 @@ export function MaterialsPage() {
                   </p>
                 </div>
               </div>
-              <Button variant="ghost" size="sm" onClick={() => setSelected(null)}>
-                取消选择
+              <Button variant="ghost" size="sm" className="shrink-0" onClick={() => setSelected(null)}>
+                取消
               </Button>
             </div>
           )}

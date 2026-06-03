@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -35,10 +35,12 @@ function MaterialImage({
   materialId,
   fileName,
   className,
+  onError,
 }: {
   materialId: string
   fileName: string
   className?: string
+  onError?: () => void
 }) {
   const [src, setSrc] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -65,8 +67,11 @@ function MaterialImage({
         objectUrl = URL.createObjectURL(blob)
         setSrc(objectUrl)
       })
-      .catch((err) => {
-        if (!revoked) setError(err instanceof Error ? err.message : '图片加载失败')
+      .catch(() => {
+        if (!revoked) {
+          setError('图片加载失败')
+          onError?.()
+        }
       })
 
     return () => {
@@ -164,8 +169,10 @@ export function ReaderPaper({
 }: ReaderPaperProps) {
   const [zoom, setZoom] = useState(1)
   const [currentPageOverride, setCurrentPageOverride] = useState<number | null>(null)
+  const [pagePreviewFailed, setPagePreviewFailed] = useState(false)
+  const scrollViewportRef = useRef<HTMLDivElement | null>(null)
   const progressPercent = Math.round(progress * 100)
-  const hasPagePreview = !!material?.id && pages.length > 0 && material.previewStatus === 'READY'
+  const hasPagePreview = !!material?.id && pages.length > 0 && material.previewStatus === 'READY' && !pagePreviewFailed
   const currentPageNo = currentPageOverride || chunk.pageNo || pages[0]?.pageNo || 1
   const currentPage = pages.find((page) => page.pageNo === currentPageNo) || pages[0]
   const currentPageIndex = currentPage ? pages.findIndex((page) => page.pageNo === currentPage.pageNo) : -1
@@ -180,7 +187,12 @@ export function ReaderPaper({
 
   useEffect(() => {
     setCurrentPageOverride(null)
+    setPagePreviewFailed(false)
   }, [material?.id, chunk.id])
+
+  useEffect(() => {
+    scrollViewportRef.current?.scrollTo({ top: 0, left: 0 })
+  }, [chunk.id, currentPage?.pageNo, material?.id])
 
   useEffect(() => {
     if (!currentPageOverride || pages.some((page) => page.pageNo === currentPageOverride)) return
@@ -214,7 +226,7 @@ export function ReaderPaper({
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex items-center justify-between gap-3 px-6 py-3 border-b">
+      <div className="flex items-center justify-between gap-2 border-b px-3 py-2 md:gap-3 md:px-6 md:py-3">
         <div className="flex items-center gap-2 min-w-0">
           <h3 className="text-sm font-medium truncate">
             {material?.title || material?.originalName || '未选择资料'}
@@ -230,7 +242,7 @@ export function ReaderPaper({
           )}
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex shrink-0 items-center gap-1.5 md:gap-2">
           {hasPagePreview && (
             <div className="flex items-center rounded-md border bg-background">
               <Button variant="ghost" size="sm" className="h-7 w-7 px-0" onClick={() => setZoom((z) => Math.max(0.7, Number((z - 0.1).toFixed(1))))}>
@@ -247,20 +259,20 @@ export function ReaderPaper({
               <ExternalLink className="h-3.5 w-3.5 mr-1" /> 原文
             </Button>
           )}
-          <span className="text-xs text-muted-foreground">{progressPercent}%</span>
-          <div className="w-20 h-1.5 rounded-full bg-muted overflow-hidden">
+          <span className="hidden text-xs text-muted-foreground sm:inline">{progressPercent}%</span>
+          <div className="hidden h-1.5 w-20 overflow-hidden rounded-full bg-muted sm:block">
             <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${progressPercent}%` }} />
           </div>
         </div>
       </div>
 
-      <ScrollArea className="flex-1 bg-[#eceff1]">
+      <ScrollArea className="flex-1 bg-[#eceff1]" viewportRef={scrollViewportRef}>
         {hasPagePreview && currentPage && material?.id ? (
-          <div className="min-h-full px-4 py-6 w-max min-w-full">
+          <div className="min-h-full min-w-full px-2 py-3 md:w-max md:px-4 md:py-6">
             <div
-              className="mx-auto bg-white shadow-lg ring-1 ring-black/10"
+              className="mx-auto max-w-full bg-white shadow-lg ring-1 ring-black/10 md:max-w-none"
               style={{
-                width: `${Math.round(794 * zoom)}px`,
+                width: `min(${Math.round(794 * zoom)}px, calc(100vw - 1rem))`,
                 aspectRatio: currentPage.width && currentPage.height
                   ? `${currentPage.width} / ${currentPage.height}`
                   : '210 / 297',
@@ -270,6 +282,7 @@ export function ReaderPaper({
                 materialId={material.id}
                 fileName={currentPage.imageName}
                 className="h-full w-full object-contain"
+                onError={() => setPagePreviewFailed(true)}
               />
             </div>
             {pageChunkIndexes.length > 0 && (
@@ -292,14 +305,19 @@ export function ReaderPaper({
             )}
           </div>
         ) : (
-          <div className="max-w-2xl mx-auto px-6 py-6 bg-background min-h-full">
-            {material?.previewError && (
+          <div className="mx-auto min-h-full max-w-2xl bg-background px-4 py-4 md:px-6 md:py-6">
+            {(material?.previewError || pagePreviewFailed) && (
               <p className="mb-3 rounded-md border border-dashed bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                {material.previewError}
+                {pagePreviewFailed ? '当前页图片暂时无法加载，已切换为解析文本阅读。' : material?.previewError}
               </p>
             )}
             {chunk.sectionTitle && (
               <h4 className="text-base font-semibold mb-3 text-primary">{chunk.sectionTitle}</h4>
+            )}
+            {chunk.hierarchyPath && (
+              <p className="mb-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] font-medium text-muted-foreground">
+                {chunk.hierarchyPath}
+              </p>
             )}
             <div className="text-sm leading-7 whitespace-pre-wrap text-foreground/90">
               {material?.id
@@ -310,16 +328,16 @@ export function ReaderPaper({
         )}
       </ScrollArea>
 
-      <div className="flex items-center justify-between px-6 py-3 border-t">
+      <div className="flex items-center justify-between gap-2 border-t px-3 py-2 md:px-6 md:py-3">
         <Button
           variant="outline"
           size="sm"
           onClick={hasPagePreview ? () => handlePageStep(-1) : onPrev}
           disabled={hasPagePreview ? currentPageIndex <= 0 : !canPrev}
         >
-          <ChevronLeft className="h-4 w-4 mr-1" /> {hasPagePreview ? '上一页' : '上一片段'}
+          <ChevronLeft className="mr-1 h-4 w-4" /> {hasPagePreview ? '上一页' : '上一片段'}
         </Button>
-        <span className="text-xs text-muted-foreground">
+        <span className="min-w-0 truncate text-center text-xs text-muted-foreground">
           {hasPagePreview && currentPage ? `第 ${currentPage.pageNo} 页 / 共 ${pages.length} 页` : `片段 #${chunk.chunkIndex}`}
         </span>
         <Button
@@ -328,9 +346,10 @@ export function ReaderPaper({
           onClick={hasPagePreview ? () => handlePageStep(1) : onNext}
           disabled={hasPagePreview ? currentPageIndex >= pages.length - 1 : !canNext}
         >
-          {hasPagePreview ? '下一页' : '下一片段'} <ChevronRight className="h-4 w-4 ml-1" />
+          {hasPagePreview ? '下一页' : '下一片段'} <ChevronRight className="ml-1 h-4 w-4" />
         </Button>
       </div>
     </div>
   )
 }
+

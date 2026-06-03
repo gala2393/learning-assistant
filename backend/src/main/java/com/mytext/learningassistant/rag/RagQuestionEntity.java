@@ -1,6 +1,7 @@
 package com.mytext.learningassistant.rag;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -16,6 +17,8 @@ import jakarta.persistence.Table;
 @Entity
 @Table(name = "rag_question")
 public class RagQuestionEntity {
+
+    private static final ZoneId BEIJING_ZONE = ZoneId.of("Asia/Shanghai");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -42,6 +45,18 @@ public class RagQuestionEntity {
     @Column(name = "model_name", nullable = false, length = 64)
     private String modelName;
 
+    @Column(name = "prompt_tokens")
+    private Integer promptTokens;
+
+    @Column(name = "completion_tokens")
+    private Integer completionTokens;
+
+    @Column(name = "total_tokens")
+    private Integer totalTokens;
+
+    @Column(name = "custom_model", nullable = false)
+    private boolean customModel;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "question_status", nullable = false, length = 20)
     private QuestionStatus questionStatus;
@@ -54,7 +69,7 @@ public class RagQuestionEntity {
 
     @PrePersist
     void onCreate() {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(BEIJING_ZONE);
         if (createdAt == null) {
             createdAt = now;
         }
@@ -66,7 +81,7 @@ public class RagQuestionEntity {
 
     @PreUpdate
     void onUpdate() {
-        updatedAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now(BEIJING_ZONE);
     }
 
     public Long getId() {
@@ -131,6 +146,38 @@ public class RagQuestionEntity {
 
     public void setModelName(String modelName) {
         this.modelName = modelName;
+    }
+
+    public Integer getPromptTokens() {
+        return promptTokens;
+    }
+
+    public void setPromptTokens(Integer promptTokens) {
+        this.promptTokens = promptTokens;
+    }
+
+    public Integer getCompletionTokens() {
+        return completionTokens;
+    }
+
+    public void setCompletionTokens(Integer completionTokens) {
+        this.completionTokens = completionTokens;
+    }
+
+    public Integer getTotalTokens() {
+        return totalTokens;
+    }
+
+    public void setTotalTokens(Integer totalTokens) {
+        this.totalTokens = totalTokens;
+    }
+
+    public boolean isCustomModel() {
+        return customModel;
+    }
+
+    public void setCustomModel(boolean customModel) {
+        this.customModel = customModel;
     }
 
     public QuestionStatus getQuestionStatus() {

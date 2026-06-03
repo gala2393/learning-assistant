@@ -1,10 +1,14 @@
 package com.mytext.learningassistant.admin;
 
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -14,11 +18,13 @@ import com.mytext.learningassistant.material.LearningMaterialEntity;
 import com.mytext.learningassistant.material.LearningMaterialRepository;
 import com.mytext.learningassistant.material.MaterialParseStatus;
 import com.mytext.learningassistant.material.MaterialSummaryStatus;
+import com.mytext.learningassistant.rag.RagQuestionEntity;
 import com.mytext.learningassistant.rag.RagQuestionRepository;
 import com.mytext.learningassistant.rag.UserFavoriteRepository;
 import com.mytext.learningassistant.user.UserEntity;
 import com.mytext.learningassistant.user.UserRepository;
 import com.mytext.learningassistant.user.UserRole;
+import com.mytext.learningassistant.user.UserStatus;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,19 +39,22 @@ public class AdminService {
     private final RagQuestionRepository ragQuestionRepository;
     private final UserFavoriteRepository userFavoriteRepository;
     private final SystemLogRepository systemLogRepository;
+    private final UsageRecordRepository usageRecordRepository;
 
     public AdminService(
         UserRepository userRepository,
         LearningMaterialRepository learningMaterialRepository,
         RagQuestionRepository ragQuestionRepository,
         UserFavoriteRepository userFavoriteRepository,
-        SystemLogRepository systemLogRepository
+        SystemLogRepository systemLogRepository,
+        UsageRecordRepository usageRecordRepository
     ) {
         this.userRepository = userRepository;
         this.learningMaterialRepository = learningMaterialRepository;
         this.ragQuestionRepository = ragQuestionRepository;
         this.userFavoriteRepository = userFavoriteRepository;
         this.systemLogRepository = systemLogRepository;
+        this.usageRecordRepository = usageRecordRepository;
     }
 
     @Transactional(readOnly = true)
@@ -87,6 +96,21 @@ public class AdminService {
         user.setRole(role);
         UserEntity saved = userRepository.save(user);
         recordLog(currentUserId, "UPDATE_USER_ROLE", "USER", userId, "role=" + role.name());
+        return toUserResponse(saved);
+    }
+
+    @Transactional
+    public AdminUserResponse updateUserStatus(long currentUserId, long userId, String statusValue) {
+        requireAdmin(currentUserId);
+        UserStatus status = parseStatus(statusValue);
+        UserEntity user = userRepository.findById(userId)
+            .orElseThrow(() -> new BusinessException(404, "用户不存在"));
+        if (currentUserId == userId && status == UserStatus.DISABLED) {
+            throw new BusinessException(403, "不能禁用当前登录的管理员账号");
+        }
+        user.setStatus(status);
+        UserEntity saved = userRepository.save(user);
+        recordLog(currentUserId, "UPDATE_USER_STATUS", "USER", userId, "status=" + status.name());
         return toUserResponse(saved);
     }
 
@@ -145,10 +169,76 @@ public class AdminService {
             logs.stream().map(SystemLogEntity::getActorUserId).collect(Collectors.toSet())
         );
         List<SystemLogResponse> responses = logs.stream()
+            .filter(log -> !isUsageAction(log.getAction()))
             .map(log -> toLogResponse(log, actors.get(log.getActorUserId())))
             .filter(log -> matchesLog(log, keyword))
             .toList();
         return page(responses, page, size);
+    }
+
+    @Transactional(readOnly = true)
+    public PageResponse<UsageRecordResponse> usageRecords(long currentUserId, String keyword, int page, int size) {
+        requireAdmin(currentUserId);
+        var records = usageRecordRepository.findAllByOrderByCreatedAtDesc();
+        Map<Long, UserEntity> actors = loadUsersById(
+            records.stream().map(UsageRecordEntity::getUserId).collect(Collectors.toSet())
+        );
+        List<UsageRecordResponse> responses = records.stream()
+            .map(record -> toUsageRecordResponse(record, actors.get(record.getUserId())))
+            .filter(record -> matchesUsageRecord(record, keyword))
+            .toList();
+        List<SystemLogEntity> usageLogs = systemLogRepository.findAllByOrderByCreatedAtDesc().stream()
+            .filter(log -> isUsageAction(log.getAction()))
+            .toList();
+        Map<Long, UserEntity> usageLogActors = loadUsersById(
+            usageLogs.stream().map(SystemLogEntity::getActorUserId).collect(Collectors.toSet())
+        );
+        List<UsageRecordResponse> combined = new ArrayList<>(responses);
+        usageLogs.stream()
+            .map(log -> toUsageRecordResponse(log, usageLogActors.get(log.getActorUserId())))
+            .filter(record -> matchesUsageRecord(record, keyword))
+            .forEach(combined::add);
+        appendRagQuestionUsageRecords(combined, keyword);
+        combined.sort(Comparator.comparing(UsageRecordResponse::createdAt, Comparator.nullsLast(String::compareTo)).reversed());
+        return page(combined, page, size);
+    }
+
+    private void appendRagQuestionUsageRecords(List<UsageRecordResponse> combined, String keyword) {
+        Set<Long> recordedQuestionIds = combined.stream()
+            .filter(record -> "RAG_QUESTION".equals(record.targetType()))
+            .map(UsageRecordResponse::targetId)
+            .filter(id -> id != null && id > 0)
+            .collect(Collectors.toCollection(HashSet::new));
+        List<RagQuestionEntity> questions = ragQuestionRepository.findAll();
+        Map<Long, UserEntity> users = loadUsersById(
+            questions.stream().map(RagQuestionEntity::getUserId).collect(Collectors.toSet())
+        );
+        questions.stream()
+            .filter(question -> question.getId() != null && !recordedQuestionIds.contains(question.getId()))
+            .map(question -> toUsageRecordResponse(question, users.get(question.getUserId())))
+            .filter(record -> matchesUsageRecord(record, keyword))
+            .forEach(combined::add);
+    }
+
+    private boolean matchesUsageRecord(UsageRecordResponse record, String keyword) {
+        String needle = normalizeKeyword(keyword);
+        if (needle.isBlank()) {
+            return true;
+        }
+        return contains(record.username(), needle)
+            || contains(record.action(), needle)
+            || contains(record.targetType(), needle)
+            || contains(record.detail(), needle)
+            || contains(record.modelName(), needle)
+            || contains(record.createdAt(), needle)
+            || contains(record.userId() == null ? "" : record.userId().toString(), needle);
+    }
+
+    private boolean isUsageAction(String action) {
+        return "RAG_CHAT".equals(action)
+            || "RAG_CHAT_STREAM".equals(action)
+            || "UPLOAD_MATERIAL".equals(action)
+            || "CREATE_UPLOAD_SESSION".equals(action);
     }
 
     private UserEntity requireAdmin(long currentUserId) {
@@ -233,6 +323,14 @@ public class AdminService {
         }
     }
 
+    private UserStatus parseStatus(String statusValue) {
+        try {
+            return UserStatus.valueOf(statusValue.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (Exception exception) {
+            throw new BusinessException(400, "不支持的用户状态");
+        }
+    }
+
     private MaterialParseStatus parseParseStatus(String value) {
         try {
             return MaterialParseStatus.valueOf(value.trim().toUpperCase(java.util.Locale.ROOT));
@@ -282,6 +380,9 @@ public class AdminService {
             material.getSourceUrl(),
             material.getFileSize(),
             material.getParseStatus().name(),
+            material.getParseProgressPercent(),
+            material.getParseStage(),
+            material.getParseMessage(),
             material.getSummaryStatus().name(),
             material.getChunkCount(),
             format(material.getCreatedAt()),
@@ -300,6 +401,106 @@ public class AdminService {
             log.getDetail(),
             format(log.getCreatedAt())
         );
+    }
+
+    private UsageRecordResponse toUsageRecordResponse(UsageRecordEntity record, UserEntity user) {
+        return new UsageRecordResponse(
+            record.getId(),
+            record.getUserId(),
+            user == null ? "" : user.getUsername(),
+            record.getAction(),
+            record.getTargetType(),
+            record.getTargetId(),
+            record.getModelName(),
+            record.getPromptTokens(),
+            record.getCompletionTokens(),
+            record.getTotalTokens(),
+            record.getDetail(),
+            format(record.getCreatedAt())
+        );
+    }
+
+    private UsageRecordResponse toUsageRecordResponse(SystemLogEntity log, UserEntity user) {
+        return new UsageRecordResponse(
+            log.getId(),
+            log.getActorUserId(),
+            user == null ? "" : user.getUsername(),
+            log.getAction(),
+            log.getTargetType(),
+            log.getTargetId(),
+            detailValue(log.getDetail(), "model"),
+            detailIntValue(log.getDetail(), "promptTokens"),
+            detailIntValue(log.getDetail(), "completionTokens"),
+            detailIntValue(log.getDetail(), "totalTokens"),
+            log.getDetail(),
+            format(log.getCreatedAt())
+        );
+    }
+
+    private UsageRecordResponse toUsageRecordResponse(RagQuestionEntity question, UserEntity user) {
+        String detail = "model=" + valueOrDash(question.getModelName())
+            + ", customModel=" + question.isCustomModel()
+            + ", promptTokens=" + intOrZero(question.getPromptTokens())
+            + ", completionTokens=" + intOrZero(question.getCompletionTokens())
+            + ", totalTokens=" + intOrZero(question.getTotalTokens())
+            + ", question=" + excerpt(question.getQuestionText());
+        return new UsageRecordResponse(
+            question.getId(),
+            question.getUserId(),
+            user == null ? "" : user.getUsername(),
+            "RAG_CHAT_STREAM",
+            "RAG_QUESTION",
+            question.getId(),
+            question.getModelName(),
+            question.getPromptTokens(),
+            question.getCompletionTokens(),
+            question.getTotalTokens(),
+            detail,
+            format(question.getCreatedAt())
+        );
+    }
+
+    private String valueOrDash(String value) {
+        return value == null || value.isBlank() ? "-" : value;
+    }
+
+    private int intOrZero(Integer value) {
+        return value == null ? 0 : value;
+    }
+
+    private String excerpt(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String normalized = value.replace("\r", " ").replace("\n", " ").trim();
+        return normalized.length() <= 80 ? normalized : normalized.substring(0, 80) + "...";
+    }
+
+    private String detailValue(String detail, String key) {
+        if (detail == null || detail.isBlank()) {
+            return null;
+        }
+        String prefix = key + "=";
+        for (String part : detail.split(",")) {
+            String trimmed = part.trim();
+            if (trimmed.startsWith(prefix)) {
+                String value = trimmed.substring(prefix.length()).trim();
+                return value.isBlank() ? null : value;
+            }
+        }
+        return null;
+    }
+
+    private Integer detailIntValue(String detail, String key) {
+        String value = detailValue(detail, key);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private String format(java.time.LocalDateTime value) {

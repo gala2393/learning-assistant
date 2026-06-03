@@ -23,6 +23,9 @@ export interface UploadSession {
   uploadedChunks: number
   status: 'UPLOADING' | 'PROCESSING' | 'SUCCESS' | 'FAILED'
   errorMessage: string | null
+  parseProgressPercent?: number | null
+  parseStage?: string | null
+  parseMessage?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -32,6 +35,8 @@ export interface UploadProgress {
   percent: number
   uploadedChunks: number
   totalChunks: number
+  stage?: string | null
+  message?: string | null
 }
 
 export async function listMaterials(): Promise<Material[]> {
@@ -61,6 +66,11 @@ export async function getMaterialFile(id: string) {
     contentType: (response.headers?.['content-type'] || '') as string,
     disposition: (response.headers?.['content-disposition'] || '') as string,
   }
+}
+
+export async function createMaterialFileTicket(id: string): Promise<{ ticket: string; url: string; expiresAt: number }> {
+  const { data } = await api.post(`/materials/${id}/file-ticket`)
+  return data
 }
 
 export async function uploadMaterial(params: { file: File; title?: string; sourceType?: string; sourceUrl?: string }): Promise<Material> {
@@ -175,13 +185,27 @@ async function waitForUploadProcessing(
   while (Date.now() - startedAt < PROCESSING_TIMEOUT_MS) {
     const session = await getUploadSession(sessionId) as UploadSession
     if (session.status === 'SUCCESS') {
-      onProgress?.({ phase: 'processing', percent: 100, uploadedChunks: totalChunks, totalChunks })
+      onProgress?.({
+        phase: 'processing',
+        percent: 100,
+        uploadedChunks: totalChunks,
+        totalChunks,
+        stage: session.parseStage || '解析完成',
+        message: session.parseMessage || '资料已经可以使用',
+      })
       return session
     }
     if (session.status === 'FAILED') {
       throw new Error(session.errorMessage || '资料解析失败')
     }
-    onProgress?.({ phase: 'processing', percent: 100, uploadedChunks: totalChunks, totalChunks })
+    onProgress?.({
+      phase: 'processing',
+      percent: normalizeProcessingPercent(session.parseProgressPercent),
+      uploadedChunks: totalChunks,
+      totalChunks,
+      stage: session.parseStage || '后台解析中',
+      message: session.parseMessage,
+    })
     await sleep(PROCESSING_POLL_INTERVAL_MS)
   }
   throw new Error('资料仍在后台解析，请稍后刷新资料列表查看结果')
@@ -200,10 +224,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
+function normalizeProcessingPercent(percent?: number | null): number {
+  if (typeof percent !== 'number' || Number.isNaN(percent)) return 5
+  return Math.max(0, Math.min(99, Math.round(percent)))
+}
+
 function normalizeMaterial(material: Material): Material {
   return {
     ...material,
     id: String(material.id),
+    parseProgressPercent: typeof material.parseProgressPercent === 'number' ? material.parseProgressPercent : null,
   }
 }
 
@@ -240,7 +270,16 @@ export function useMaterials() {
   return useQuery({
     queryKey: ['materials'],
     queryFn: listMaterials,
+    refetchInterval: (query) => {
+      const data = query.state.data as Material[] | undefined
+      return data?.some(isMaterialParsing) ? 1500 : false
+    },
   })
+}
+
+function isMaterialParsing(material: Material): boolean {
+  return ['PENDING', 'PARSING', 'PROCESSING'].includes(material.parseStatus)
+    && (material.parseProgressPercent ?? 0) < 100
 }
 
 export function useMaterial(id: string | null) {

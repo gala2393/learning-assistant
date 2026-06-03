@@ -55,6 +55,9 @@ public class AuthInterceptor implements HandlerInterceptor {
         if (PUBLIC_PATHS.contains(path)) {
             return true;
         }
+        if (path.matches("^/api/materials/\\d+/file$") && request.getParameter("ticket") != null) {
+            return true;
+        }
 
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
         if (header == null || !header.startsWith("Bearer ")) {

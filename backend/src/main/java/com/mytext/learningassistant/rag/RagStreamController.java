@@ -1,10 +1,9 @@
 package com.mytext.learningassistant.rag;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 import jakarta.validation.Valid;
 
@@ -18,6 +17,7 @@ import com.mytext.learningassistant.material.MaterialChunkEntity;
 import com.mytext.learningassistant.material.MaterialChunkRepository;
 
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -25,7 +25,7 @@ import org.springframework.web.bind.annotation.RequestAttribute;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 @RestController
 @RequestMapping("/api/rag")
@@ -36,7 +36,6 @@ public class RagStreamController {
     private final LearningMaterialRepository learningMaterialRepository;
     private final MaterialChunkRepository materialChunkRepository;
     private final ObjectMapper objectMapper;
-    private final ExecutorService executor = Executors.newFixedThreadPool(4);
 
     public RagStreamController(
         RagService ragService,
@@ -53,53 +52,99 @@ public class RagStreamController {
     }
 
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chatStream(
+    public ResponseEntity<StreamingResponseBody> chatStream(
         @RequestAttribute("currentUserId") long currentUserId,
         @Valid @RequestBody ChatRequest request
     ) {
-        SseEmitter emitter = new SseEmitter(120_000L);
-
-        executor.execute(() -> {
+        StreamingResponseBody stream = outputStream -> {
             try {
-                sendEvent(emitter, "status", Map.of("stage", "searching"));
+                boolean materialChat = "MATERIAL".equalsIgnoreCase(String.valueOf(request.mode()).trim());
+                sendEvent(outputStream, "status", Map.of(
+                    "stage", materialChat ? "searching" : "thinking",
+                    "message", materialChat ? "正在检索相关资料..." : "正在准备回答..."
+                ));
+
+                sendStreamPadding(outputStream);
 
                 RagStreamResult result = ragService.chatStream(
                     currentUserId, request,
                     delta -> {
                         try {
-                            sendEvent(emitter, "chunk", Map.of("delta", delta));
+                            sendChunkEvents(outputStream, delta);
                         } catch (IOException ignored) {
                         }
                     }
                 );
 
-                sendEvent(emitter, "sources", Map.of("sources", result.sources()));
-                sendEvent(emitter, "done", Map.of(
+                sendEvent(outputStream, "sources", Map.of("sources", result.sources()));
+                sendEvent(outputStream, "done", Map.of(
                     "questionId", result.questionId(),
                     "conversationId", result.conversationId(),
                     "answer", result.answer()
                 ));
-
-                emitter.complete();
             } catch (Exception e) {
                 try {
-                    sendEvent(emitter, "error", Map.of("message", e.getMessage() == null ? "内部错误" : e.getMessage()));
+                    sendEvent(outputStream, "error", Map.of("message", e.getMessage() == null ? "内部错误" : e.getMessage()));
                 } catch (IOException ignored) {
                 }
-                emitter.completeWithError(e);
             }
-        });
+        };
 
-        emitter.onTimeout(() -> emitter.complete());
-        emitter.onError(t -> {});
-
-        return emitter;
+        return ResponseEntity.ok()
+            .contentType(MediaType.TEXT_EVENT_STREAM)
+            .header("Cache-Control", "no-cache, no-transform")
+            .header("X-Accel-Buffering", "no")
+            .header("Connection", "keep-alive")
+            .body(stream);
     }
 
-    private void sendEvent(SseEmitter emitter, String eventName, Object data) throws IOException {
-        emitter.send(SseEmitter.event()
-            .name(eventName)
-            .data(objectMapper.writeValueAsString(data)));
+    private void sendEvent(OutputStream outputStream, String eventName, Object data) throws IOException {
+        String payload = "event: " + eventName + "\n"
+            + "data: " + objectMapper.writeValueAsString(data) + "\n\n";
+        outputStream.write(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        outputStream.flush();
+    }
+
+    private void sendChunkEvents(OutputStream outputStream, String delta) throws IOException {
+        if (delta == null || delta.isEmpty()) {
+            return;
+        }
+        int index = 0;
+        while (index < delta.length()) {
+            int next = nextChunkEnd(delta, index);
+            sendEvent(outputStream, "chunk", Map.of("delta", delta.substring(index, next)));
+            index = next;
+            if (index < delta.length()) {
+                sleepBetweenChunks();
+            }
+        }
+    }
+
+    private int nextChunkEnd(String value, int start) {
+        int maxEnd = Math.min(value.length(), start + 10);
+        for (int i = start + 1; i <= maxEnd; i++) {
+            char c = value.charAt(i - 1);
+            if (c == '\n' || c == '\r' || c == '\u3002' || c == '\uff0c' || c == '\uff1b'
+                || c == '\uff1a' || c == '\uff01' || c == '\uff1f' || c == '.' || c == ','
+                || c == ';' || c == ':' || c == '!' || c == '?') {
+                return i;
+            }
+        }
+        return maxEnd;
+    }
+
+    private void sleepBetweenChunks() {
+        try {
+            Thread.sleep(18);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void sendStreamPadding(OutputStream outputStream) throws IOException {
+        String padding = ":" + " ".repeat(2048) + "\n\n";
+        outputStream.write(padding.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        outputStream.flush();
     }
 
     @GetMapping("/suggest-questions")

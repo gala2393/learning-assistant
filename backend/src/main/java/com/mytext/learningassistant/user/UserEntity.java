@@ -1,6 +1,7 @@
 package com.mytext.learningassistant.user;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -9,7 +10,6 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
@@ -17,6 +17,8 @@ import jakarta.persistence.Table;
 @Entity
 @Table(name = "sys_user")
 public class UserEntity {
+
+    private static final ZoneId BEIJING_ZONE = ZoneId.of("Asia/Shanghai");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -34,8 +36,7 @@ public class UserEntity {
     @Column(nullable = false, length = 64)
     private String nickname;
 
-    @Lob
-    @Column(name = "avatar", columnDefinition = "LONGTEXT")
+    @Column(name = "avatar", columnDefinition = "TEXT")
     private String avatar;
 
     @Enumerated(EnumType.STRING)
@@ -54,7 +55,7 @@ public class UserEntity {
 
     @PrePersist
     void onCreate() {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(BEIJING_ZONE);
         if (createdAt == null) {
             createdAt = now;
         }
@@ -69,7 +70,7 @@ public class UserEntity {
 
     @PreUpdate
     void onUpdate() {
-        updatedAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now(BEIJING_ZONE);
     }
 
     public Long getId() {

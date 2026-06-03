@@ -13,5 +13,8 @@ frontend/dist/
 frontend/tsconfig.tsbuildinfo
 
 upload-package/
+frontend-dist-upload/
+.idea/
+*.ppk
 
 .vercel

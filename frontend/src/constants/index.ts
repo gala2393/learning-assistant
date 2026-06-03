@@ -17,6 +17,8 @@ export const ADMIN_SECTIONS = [
   { path: '/admin/dashboard', label: '管理员总览', icon: 'layout-dashboard', kicker: 'Overview' },
   { path: '/admin/users', label: '用户与角色', icon: 'users', kicker: 'Access' },
   { path: '/admin/materials', label: '资料队列', icon: 'folder', kicker: 'Queue' },
+  { path: '/admin/evaluation', label: 'RAG 评估', icon: 'clipboard-check', kicker: '评估' },
+  { path: '/admin/usage-records', label: '使用记录', icon: 'activity', kicker: 'Usage' },
   { path: '/admin/logs', label: '系统日志', icon: 'scroll-text', kicker: 'Audit' },
 ]
 
@@ -24,14 +26,11 @@ export const GENERAL_PROMPTS = [
   '把这个概念用通俗语言解释给本科生听。',
   '帮我比较这个知识点和另一个常见概念的差异。',
   '给我一版适合课堂展示的简明回答。',
-  '把这个问题拆成 3 个可以追问的子问题。',
 ]
 
 export const MATERIAL_PROMPTS = [
   '请结合当前资料回答，并标出可引用页码。',
   '请总结这一章的核心结论、证据和常见考点。',
-  '把当前片段整理成答辩可直接使用的要点。',
-  '请解释这段内容在课程中的实际应用。',
 ]
 
 export const SOURCE_TYPE_LABELS: Record<string, string> = {

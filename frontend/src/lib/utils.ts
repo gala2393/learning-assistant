@@ -14,6 +14,12 @@ export function formatBytes(bytes: number): string {
 }
 
 export function formatDate(value: string | Date): string {
+  if (typeof value === 'string') {
+    const plainDateTime = value.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/)
+    if (plainDateTime && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(value)) {
+      return `${plainDateTime[1]} ${plainDateTime[2]}`
+    }
+  }
   const date = value instanceof Date ? value : new Date(value)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
@@ -29,11 +35,7 @@ export function sanitizeAiText(text: string): string {
   return text
     .replace(/```[a-zA-Z0-9_-]*\n?/g, '')
     .replace(/```/g, '')
-    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
-    .replace(/\*([^*\n]+)\*/g, '$1')
-    .replace(/^\s{0,3}#{1,6}\s*/gm, '')
-    .replace(/^\s*[*-]\s+/gm, '')
-    .replace(/\*/g, '')
+    .replace(/<br\s*\/?>/gi, '\n')
     .replace(/[ \t]+\n/g, '\n')
     .trim()
 }

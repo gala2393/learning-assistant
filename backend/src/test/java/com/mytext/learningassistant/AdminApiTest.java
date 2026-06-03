@@ -17,6 +17,11 @@ import java.util.regex.Pattern;
 import com.mytext.learningassistant.user.UserEntity;
 import com.mytext.learningassistant.user.UserRepository;
 import com.mytext.learningassistant.user.UserRole;
+import com.mytext.learningassistant.admin.SystemLogEntity;
+import com.mytext.learningassistant.admin.SystemLogRepository;
+import com.mytext.learningassistant.rag.QuestionStatus;
+import com.mytext.learningassistant.rag.RagQuestionEntity;
+import com.mytext.learningassistant.rag.RagQuestionRepository;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,6 +40,12 @@ class AdminApiTest {
 
     @Autowired
     private UserRepository userRepository;
+
+    @Autowired
+    private SystemLogRepository systemLogRepository;
+
+    @Autowired
+    private RagQuestionRepository ragQuestionRepository;
 
     @Test
     void userAndAnonymousRequestsCannotAccessAdminEndpoints() throws Exception {
@@ -144,7 +155,52 @@ class AdminApiTest {
             .andExpect(jsonPath("$.data.id").value(userId.intValue()))
             .andExpect(jsonPath("$.data.role").value("ADMIN"));
 
+        mockMvc.perform(patch("/api/admin/users/{id}/status", userId)
+                .header("Authorization", "Bearer " + adminToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "status": "DISABLED"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.id").value(userId.intValue()))
+            .andExpect(jsonPath("$.data.status").value("DISABLED"));
+
+        mockMvc.perform(post("/api/auth/login")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "username": "%s",
+                      "password": "12345678"
+                    }
+                    """.formatted(userUsername)))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.message").value("该账户已禁用，请联系管理员解除封禁。"));
+
+        mockMvc.perform(patch("/api/admin/users/{id}/status", userId)
+                .header("Authorization", "Bearer " + adminToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "status": "ACTIVE"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.status").value("ACTIVE"));
+
         Long adminId = userRepository.findByUsername(adminUsername).orElseThrow().getId();
+        mockMvc.perform(patch("/api/admin/users/{id}/status", adminId)
+                .header("Authorization", "Bearer " + adminToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "status": "DISABLED"
+                    }
+                    """))
+            .andExpect(status().isForbidden())
+            .andExpect(jsonPath("$.code").value(403));
+
         mockMvc.perform(patch("/api/admin/users/{id}/role", adminId)
                 .header("Authorization", "Bearer " + adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -192,6 +248,7 @@ class AdminApiTest {
                 .header("Authorization", "Bearer " + adminToken))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data.items[*].action", hasItem("UPDATE_USER_ROLE")))
+            .andExpect(jsonPath("$.data.items[*].action", hasItem("UPDATE_USER_STATUS")))
             .andExpect(jsonPath("$.data.items[*].action", hasItem("UPDATE_MATERIAL_STATUS")))
             .andExpect(jsonPath("$.data.total", greaterThanOrEqualTo(2)));
 
@@ -205,6 +262,62 @@ class AdminApiTest {
             .andExpect(jsonPath("$.data.items[0].action").value("UPDATE_MATERIAL_STATUS"))
             .andExpect(jsonPath("$.data.page").value(0))
             .andExpect(jsonPath("$.data.size").value(1));
+    }
+
+    @Test
+    void usageActionsAreShownInUsageRecordsNotSystemLogs() throws Exception {
+        String adminUsername = uniqueName("usage-admin");
+        String adminToken = registerAndLogin(adminUsername);
+        promoteToAdmin(adminUsername);
+        Long adminId = userRepository.findByUsername(adminUsername).orElseThrow().getId();
+
+        SystemLogEntity oldUsageLog = new SystemLogEntity();
+        oldUsageLog.setActorUserId(adminId);
+        oldUsageLog.setAction("RAG_CHAT_STREAM");
+        oldUsageLog.setTargetType("RAG_QUESTION");
+        oldUsageLog.setTargetId(999L);
+        oldUsageLog.setDetail("model=mimo-v2.5-pro, customModel=true, promptTokens=2, completionTokens=9, totalTokens=11");
+        systemLogRepository.save(oldUsageLog);
+
+        mockMvc.perform(get("/api/admin/logs")
+                .header("Authorization", "Bearer " + adminToken))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.items[?(@.action=='RAG_CHAT_STREAM')]").isEmpty());
+
+        mockMvc.perform(get("/api/admin/usage-records")
+                .header("Authorization", "Bearer " + adminToken))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.items[?(@.action=='RAG_CHAT_STREAM')].username", hasItem(adminUsername)))
+            .andExpect(jsonPath("$.data.items[?(@.action=='RAG_CHAT_STREAM')].modelName", hasItem("mimo-v2.5-pro")))
+            .andExpect(jsonPath("$.data.items[?(@.action=='RAG_CHAT_STREAM')].totalTokens", hasItem(11)));
+    }
+
+    @Test
+    void ragQuestionHistoryIsVisibleInUsageRecordsEvenWithoutUsageRecordRow() throws Exception {
+        String adminUsername = uniqueName("history-usage-admin");
+        String adminToken = registerAndLogin(adminUsername);
+        promoteToAdmin(adminUsername);
+        Long adminId = userRepository.findByUsername(adminUsername).orElseThrow().getId();
+
+        RagQuestionEntity question = new RagQuestionEntity();
+        question.setUserId(adminId);
+        question.setQuestionText("usage record fallback question");
+        question.setAnswerText("usage record fallback answer");
+        question.setModelName("mimo-v2.5-pro");
+        question.setPromptTokens(12);
+        question.setCompletionTokens(18);
+        question.setTotalTokens(30);
+        question.setCustomModel(true);
+        question.setQuestionStatus(QuestionStatus.SUCCESS);
+        ragQuestionRepository.save(question);
+
+        mockMvc.perform(get("/api/admin/usage-records")
+                .header("Authorization", "Bearer " + adminToken)
+                .param("keyword", "mimo-v2.5-pro"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.items[?(@.targetId==" + question.getId() + ")].username", hasItem(adminUsername)))
+            .andExpect(jsonPath("$.data.items[?(@.targetId==" + question.getId() + ")].modelName", hasItem("mimo-v2.5-pro")))
+            .andExpect(jsonPath("$.data.items[?(@.targetId==" + question.getId() + ")].totalTokens", hasItem(30)));
     }
 
     @Test

@@ -39,7 +39,8 @@ export function MaterialCard({
   const statusColor = PARSE_STATUS_COLORS[material.parseStatus] || 'secondary'
   const statusLabel = PARSE_STATUS_LABELS[material.parseStatus] || material.parseStatus
   const typeLabel = SOURCE_TYPE_LABELS[material.sourceType] || material.sourceType
-  const isProcessing = material.parseStatus === 'PARSING' || material.parseStatus === 'PROCESSING'
+  const isProcessing = material.parseStatus === 'PARSING' || material.parseStatus === 'PROCESSING' || material.parseStatus === 'PENDING'
+  const parsePercent = Math.max(0, Math.min(100, Math.round(material.parseProgressPercent ?? (isProcessing ? 0 : 100))))
 
   return (
     <Card
@@ -49,7 +50,7 @@ export function MaterialCard({
       )}
       onClick={() => onSelect?.(material)}
     >
-      <CardHeader className="pb-2">
+      <CardHeader className="p-3 pb-2 md:p-6 md:pb-2">
         <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             {typeIcon(material.sourceType)}
@@ -60,16 +61,35 @@ export function MaterialCard({
           </Badge>
         </div>
       </CardHeader>
-      <CardContent className="pt-0">
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <div className="flex items-center gap-3">
+      <CardContent className="p-3 pt-0 md:p-6 md:pt-0">
+        <div className="flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
             <span>{typeLabel}</span>
             <span>{material.chunkCount} 片段</span>
             {material.fileSize > 0 && <span>{formatBytes(material.fileSize)}</span>}
           </div>
-          <span>{formatDate(material.createdAt)}</span>
+          <span className="truncate sm:shrink-0">{formatDate(material.createdAt)}</span>
         </div>
-        <div className="mt-3 flex flex-wrap gap-1.5">
+        {isProcessing && parsePercent < 100 && (
+          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 dark:border-slate-800 dark:bg-slate-900/40">
+            <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
+              <span className="truncate font-medium text-slate-700 dark:text-slate-200">
+                {material.parseStage || '后台解析中'}
+              </span>
+              <span className="shrink-0 tabular-nums text-slate-500">{parsePercent}%</span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-[#2563eb] via-[#0f766e] to-[#65a30d] transition-all duration-500"
+                style={{ width: `${parsePercent}%` }}
+              />
+            </div>
+            {material.parseMessage && (
+              <p className="mt-1.5 line-clamp-1 text-[11px] text-slate-500 dark:text-slate-400">{material.parseMessage}</p>
+            )}
+          </div>
+        )}
+        <div className="mt-2 flex flex-wrap gap-1 md:mt-3 md:gap-1.5">
           <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={(e) => { e.stopPropagation(); onSelect?.(material) }}>
             <Eye className="mr-1 h-3.5 w-3.5" /> 查看
           </Button>

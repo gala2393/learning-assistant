@@ -1,7 +1,20 @@
 import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
-import type { ChatPayload, HistoryItem, StreamChatPayload, SummaryResult, RagSource } from '@/types'
+import type {
+  ChatPayload,
+  HistoryItem,
+  RagEvaluationSuiteDetail,
+  RagEvaluationSuitePayload,
+  RagEvaluationSuiteResult,
+  RagEvaluationSuiteRun,
+  RagEvaluationSuiteSavePayload,
+  RagEvaluationSuiteSummary,
+  StreamChatPayload,
+  SummaryResult,
+  RagSource,
+  RagUsage,
+} from '@/types'
 
 const CHAT_HISTORY_CONVERSATION_KEY = 'learning-assistant.chat.history-conversations'
 
@@ -10,9 +23,15 @@ export async function chat(payload: ChatPayload): Promise<HistoryItem> {
   return data
 }
 
+export async function getRagUsage(): Promise<RagUsage> {
+  const { data } = await api.get('/rag/usage')
+  return data
+}
+
 export interface StreamCallbacks {
   onSources?: (sources: RagSource[]) => void
   onChunk?: (delta: string) => void
+  onStatus?: (status: { stage?: string; message?: string }) => void
   onDone?: (result: { questionId: number | string; conversationId?: number | string; answer: string }) => void
   onError?: (message: string) => void
 }
@@ -49,47 +68,60 @@ export function chatStream(
 
       const decoder = new TextDecoder()
       let buffer = ''
-      let currentEvent = ''
       let receivedTerminalEvent = false
+
+      const processFrame = (frame: string) => {
+        let currentEvent = ''
+        const dataLines: string[] = []
+
+        for (const rawLine of frame.split('\n')) {
+          const line = rawLine.trimEnd()
+          if (line.startsWith('event:')) {
+            currentEvent = line.slice(6).trim()
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart())
+          }
+        }
+
+        if (!currentEvent || dataLines.length === 0) return
+
+        try {
+          const data = JSON.parse(dataLines.join('\n'))
+          if (currentEvent === 'sources') {
+            callbacks.onSources?.(data.sources || [])
+          } else if (currentEvent === 'chunk') {
+            callbacks.onChunk?.(data.delta || '')
+          } else if (currentEvent === 'status') {
+            callbacks.onStatus?.(data)
+          } else if (currentEvent === 'done') {
+            receivedTerminalEvent = true
+            callbacks.onDone?.(data)
+          } else if (currentEvent === 'error') {
+            receivedTerminalEvent = true
+            callbacks.onError?.(data.message || '未知错误')
+          }
+        } catch {
+          // Skip malformed SSE data instead of breaking the whole stream.
+        }
+      }
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            currentEvent = line.slice(6).trim()
-            continue
-          }
-
-          if (!line.startsWith('data:')) continue
-
-          const jsonStr = line.slice(5).trim()
-          if (!jsonStr) continue
-
-          try {
-            const data = JSON.parse(jsonStr)
-            if (currentEvent === 'sources') {
-              callbacks.onSources?.(data.sources || [])
-            } else if (currentEvent === 'chunk') {
-              callbacks.onChunk?.(data.delta || '')
-            } else if (currentEvent === 'done') {
-              receivedTerminalEvent = true
-              callbacks.onDone?.(data)
-            } else if (currentEvent === 'error') {
-              receivedTerminalEvent = true
-              callbacks.onError?.(data.message || '未知错误')
-            }
-          } catch {
-            // Skip malformed SSE data instead of breaking the whole stream.
-          } finally {
-            currentEvent = ''
-          }
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+        let frameEnd = buffer.indexOf('\n\n')
+        while (frameEnd >= 0) {
+          const frame = buffer.slice(0, frameEnd)
+          buffer = buffer.slice(frameEnd + 2)
+          processFrame(frame)
+          frameEnd = buffer.indexOf('\n\n')
         }
+
+      }
+
+      if (buffer.trim()) {
+        processFrame(buffer)
       }
 
       if (!receivedTerminalEvent) {
@@ -148,6 +180,76 @@ export async function listMaterialSummaries(materialId: string): Promise<Summary
   return data
 }
 
+export async function runEvaluationSuite(payload: RagEvaluationSuitePayload): Promise<RagEvaluationSuiteResult> {
+  const { data } = await api.post('/rag/evaluation-suite', payload)
+  return data
+}
+
+function normalizeEvaluationSuiteSummary(item: RagEvaluationSuiteSummary): RagEvaluationSuiteSummary {
+  return {
+    ...item,
+    id: String(item.id),
+  }
+}
+
+function normalizeEvaluationSuiteRun(item: RagEvaluationSuiteRun): RagEvaluationSuiteRun {
+  return {
+    ...item,
+    id: String(item.id),
+    suiteId: String(item.suiteId),
+  }
+}
+
+function normalizeEvaluationSuiteDetail(item: RagEvaluationSuiteDetail): RagEvaluationSuiteDetail {
+  return {
+    ...item,
+    id: String(item.id),
+    latestRun: item.latestRun ? normalizeEvaluationSuiteRun(item.latestRun) : null,
+  }
+}
+
+export async function listEvaluationSuites(): Promise<RagEvaluationSuiteSummary[]> {
+  const { data } = await api.get('/rag/evaluation-suites')
+  return (data || []).map(normalizeEvaluationSuiteSummary)
+}
+
+export async function getEvaluationSuite(id: string): Promise<RagEvaluationSuiteDetail> {
+  const { data } = await api.get(`/rag/evaluation-suites/${id}`)
+  return normalizeEvaluationSuiteDetail(data)
+}
+
+export async function saveEvaluationSuite(payload: RagEvaluationSuiteSavePayload): Promise<RagEvaluationSuiteDetail> {
+  const { data } = await api.post('/rag/evaluation-suites', payload)
+  return normalizeEvaluationSuiteDetail(data)
+}
+
+export async function updateEvaluationSuite(id: string, payload: RagEvaluationSuiteSavePayload): Promise<RagEvaluationSuiteDetail> {
+  const { data } = await api.put(`/rag/evaluation-suites/${id}`, payload)
+  return normalizeEvaluationSuiteDetail(data)
+}
+
+export async function deleteEvaluationSuite(id: string): Promise<void> {
+  await api.delete(`/rag/evaluation-suites/${id}`)
+}
+
+export async function runSavedEvaluationSuite(id: string): Promise<RagEvaluationSuiteRun> {
+  const { data } = await api.post(`/rag/evaluation-suites/${id}/runs`)
+  return normalizeEvaluationSuiteRun(data)
+}
+
+export async function listEvaluationSuiteRuns(id: string): Promise<RagEvaluationSuiteRun[]> {
+  const { data } = await api.get(`/rag/evaluation-suites/${id}/runs`)
+  return (data || []).map(normalizeEvaluationSuiteRun)
+}
+
+export async function updateEvaluationSuiteSchedule(
+  id: string,
+  payload: { scheduled: boolean; intervalHours: number },
+): Promise<RagEvaluationSuiteDetail> {
+  const { data } = await api.patch(`/rag/evaluation-suites/${id}/schedule`, payload)
+  return normalizeEvaluationSuiteDetail(data)
+}
+
 export async function suggestQuestions(materialId: string, chunkId?: string): Promise<string[]> {
   const params = new URLSearchParams({ materialId })
   if (chunkId) params.set('chunkId', chunkId)
@@ -156,7 +258,21 @@ export async function suggestQuestions(materialId: string, chunkId?: string): Pr
 }
 
 export function useChat() {
-  return useMutation({ mutationFn: chat })
+  return useMutation({
+    mutationFn: chat,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['history'] })
+      queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
+    },
+  })
+}
+
+export function useRagUsage() {
+  return useQuery({
+    queryKey: ['rag-usage'],
+    queryFn: getRagUsage,
+  })
 }
 
 export function useHistory() {
@@ -256,5 +372,78 @@ export function useMaterialSummaryHistory(materialId: string | null) {
     queryKey: ['summaries', materialId, 'history'],
     queryFn: () => listMaterialSummaries(materialId!),
     enabled: !!materialId,
+  })
+}
+
+export function useRunEvaluationSuite() {
+  return useMutation({ mutationFn: runEvaluationSuite })
+}
+
+export function useEvaluationSuites() {
+  return useQuery({
+    queryKey: ['rag-evaluation-suites'],
+    queryFn: listEvaluationSuites,
+  })
+}
+
+export function useEvaluationSuiteDetail(id: string | null) {
+  return useQuery({
+    queryKey: ['rag-evaluation-suites', id],
+    queryFn: () => getEvaluationSuite(id!),
+    enabled: !!id,
+  })
+}
+
+export function useEvaluationSuiteRuns(id: string | null) {
+  return useQuery({
+    queryKey: ['rag-evaluation-suites', id, 'runs'],
+    queryFn: () => listEvaluationSuiteRuns(id!),
+    enabled: !!id,
+  })
+}
+
+export function useSaveEvaluationSuite() {
+  return useMutation({
+    mutationFn: saveEvaluationSuite,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] }),
+  })
+}
+
+export function useUpdateEvaluationSuite() {
+  return useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: RagEvaluationSuiteSavePayload }) => updateEvaluationSuite(id, payload),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] })
+      queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', variables.id] })
+    },
+  })
+}
+
+export function useDeleteEvaluationSuite() {
+  return useMutation({
+    mutationFn: deleteEvaluationSuite,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] }),
+  })
+}
+
+export function useRunSavedEvaluationSuite() {
+  return useMutation({
+    mutationFn: runSavedEvaluationSuite,
+    onSuccess: (_data, id) => {
+      queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] })
+      queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', id] })
+      queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', id, 'runs'] })
+    },
+  })
+}
+
+export function useUpdateEvaluationSuiteSchedule() {
+  return useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: { scheduled: boolean; intervalHours: number } }) =>
+      updateEvaluationSuiteSchedule(id, payload),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] })
+      queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', variables.id] })
+    },
   })
 }

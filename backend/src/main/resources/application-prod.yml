@@ -51,6 +51,7 @@ app:
     base-url: ${LLM_BASE_URL:}
     api-key: ${LLM_API_KEY:}
     model: ${LLM_MODEL:}
+    api-format: ${LLM_API_FORMAT:chat-completions}
     timeout: ${LLM_TIMEOUT:30s}
   embedding:
     enabled: ${EMBEDDING_ENABLED:false}

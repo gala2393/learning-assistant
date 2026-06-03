@@ -1,6 +1,7 @@
 package com.mytext.learningassistant.material;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -16,6 +17,8 @@ import jakarta.persistence.Table;
 @Entity
 @Table(name = "learning_material")
 public class LearningMaterialEntity {
+
+    private static final ZoneId BEIJING_ZONE = ZoneId.of("Asia/Shanghai");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -47,6 +50,15 @@ public class LearningMaterialEntity {
     @Column(name = "parse_status", nullable = false, length = 20)
     private MaterialParseStatus parseStatus;
 
+    @Column(name = "parse_progress_percent", nullable = false)
+    private Integer parseProgressPercent;
+
+    @Column(name = "parse_stage", length = 80)
+    private String parseStage;
+
+    @Column(name = "parse_message", length = 255)
+    private String parseMessage;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "summary_status", nullable = false, length = 20)
     private MaterialSummaryStatus summaryStatus;
@@ -72,13 +84,19 @@ public class LearningMaterialEntity {
 
     @PrePersist
     void onCreate() {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(BEIJING_ZONE);
         if (createdAt == null) {
             createdAt = now;
         }
         updatedAt = now;
         if (parseStatus == null) {
             parseStatus = MaterialParseStatus.PENDING;
+        }
+        if (parseProgressPercent == null) {
+            parseProgressPercent = 0;
+        }
+        if (parseStage == null) {
+            parseStage = "等待解析";
         }
         if (summaryStatus == null) {
             summaryStatus = MaterialSummaryStatus.PENDING;
@@ -93,7 +111,7 @@ public class LearningMaterialEntity {
 
     @PreUpdate
     void onUpdate() {
-        updatedAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now(BEIJING_ZONE);
     }
 
     public Long getId() {
@@ -166,6 +184,30 @@ public class LearningMaterialEntity {
 
     public void setParseStatus(MaterialParseStatus parseStatus) {
         this.parseStatus = parseStatus;
+    }
+
+    public Integer getParseProgressPercent() {
+        return parseProgressPercent;
+    }
+
+    public void setParseProgressPercent(Integer parseProgressPercent) {
+        this.parseProgressPercent = parseProgressPercent;
+    }
+
+    public String getParseStage() {
+        return parseStage;
+    }
+
+    public void setParseStage(String parseStage) {
+        this.parseStage = parseStage;
+    }
+
+    public String getParseMessage() {
+        return parseMessage;
+    }
+
+    public void setParseMessage(String parseMessage) {
+        this.parseMessage = parseMessage;
     }
 
     public MaterialSummaryStatus getSummaryStatus() {

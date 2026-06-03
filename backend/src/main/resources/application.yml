@@ -7,11 +7,16 @@ spring:
     password: ${MYSQL_PASSWORD:}
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: ${JPA_DDL_AUTO:validate}
     open-in-view: false
     properties:
       hibernate:
         format_sql: true
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    baseline-on-migrate: ${FLYWAY_BASELINE_ON_MIGRATE:true}
+    validate-on-migrate: true
   servlet:
     multipart:
       max-file-size: 500MB
@@ -85,6 +90,7 @@ app:
     base-url: ${LLM_BASE_URL:}
     api-key: ${LLM_API_KEY:}
     model: ${LLM_MODEL:}
+    api-format: ${LLM_API_FORMAT:chat-completions}
     timeout: ${LLM_TIMEOUT:20s}
   embedding:
     enabled: ${EMBEDDING_ENABLED:false}
@@ -94,3 +100,29 @@ app:
     timeout: ${EMBEDDING_TIMEOUT:20s}
     top-k: ${EMBEDDING_TOP_K:5}
     score-threshold: ${EMBEDDING_SCORE_THRESHOLD:0.55}
+  reranker:
+    enabled: ${RERANKER_ENABLED:true}
+    provider: ${RERANKER_PROVIDER:local}
+    base-url: ${RERANKER_BASE_URL:}
+    api-key: ${RERANKER_API_KEY:}
+    model: ${RERANKER_MODEL:bge-reranker-v2-m3}
+    timeout: ${RERANKER_TIMEOUT:10s}
+    candidates: ${RERANKER_CANDIDATES:30}
+    retrieval-weight: ${RERANKER_RETRIEVAL_WEIGHT:0.55}
+    lexical-weight: ${RERANKER_LEXICAL_WEIGHT:0.45}
+  vector-store:
+    enabled: ${VECTOR_STORE_ENABLED:false}
+    provider: ${VECTOR_STORE_PROVIDER:qdrant}
+    base-url: ${VECTOR_STORE_BASE_URL:}
+    api-key: ${VECTOR_STORE_API_KEY:}
+    collection: ${VECTOR_STORE_COLLECTION:learning_assistant_chunks}
+    timeout: ${VECTOR_STORE_TIMEOUT:10s}
+  query-expansion:
+    enabled: ${QUERY_EXPANSION_ENABLED:true}
+    max-queries: ${QUERY_EXPANSION_MAX_QUERIES:4}
+    local-fallback: ${QUERY_EXPANSION_LOCAL_FALLBACK:true}
+    hyde-enabled: ${QUERY_EXPANSION_HYDE_ENABLED:true}
+    hyde-weight: ${QUERY_EXPANSION_HYDE_WEIGHT:0.72}
+  rag-evaluation-scheduler:
+    enabled: ${RAG_EVALUATION_SCHEDULER_ENABLED:true}
+    scan-interval: ${RAG_EVALUATION_SCHEDULER_SCAN_INTERVAL:30m}

@@ -119,7 +119,11 @@ class MaterialApiTest {
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.data[0].chunkText").value("Semantic retrieval for study materials."));
+            .andExpect(jsonPath("$.data[0].chunkText").value("Semantic retrieval for study materials."))
+            .andExpect(jsonPath("$.data[0].hierarchyPath").value("Embedding TXT > 第1切片 > 切片1"))
+            .andExpect(jsonPath("$.data[0].summary").value("Semantic retrieval for study materials."))
+            .andExpect(jsonPath("$.data[0].keywords").value(org.hamcrest.Matchers.containsString("semantic")))
+            .andExpect(jsonPath("$.data[0].keywords").value(org.hamcrest.Matchers.containsString("retrieval")));
 
         String embeddingJson = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(materialId).get(0).getEmbeddingJson();
         org.junit.jupiter.api.Assertions.assertEquals("[0.11,0.22,0.33]", embeddingJson);

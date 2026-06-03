@@ -3,12 +3,12 @@ import { useNavigate } from 'react-router-dom'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { chatStream, suggestQuestions } from '@/api/rag'
+import { chatStream, suggestQuestions, useRagUsage } from '@/api/rag'
 import { ChatThread, type ChatMessage } from './ChatThread'
 import { Send, Bot, ArrowRight, MousePointer, Sparkles, Trash2 } from 'lucide-react'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
-import { truncate } from '@/lib/utils'
+import { queryClient } from '@/lib/query-client'
+import { cn, truncate } from '@/lib/utils'
 import type { Material, MaterialChunk, RagSource } from '@/types'
 
 interface ReaderAskProps {
@@ -18,6 +18,7 @@ interface ReaderAskProps {
   currentPageNo?: number | null
   currentPageChunkIds?: Array<string | number>
   onNavigateToChunk?: (chunkIndex: number) => void
+  className?: string
 }
 
 type ReaderMessage = ChatMessage
@@ -36,6 +37,7 @@ export function ReaderAsk({
   currentPageNo,
   currentPageChunkIds,
   onNavigateToChunk,
+  className,
 }: ReaderAskProps) {
   const navigate = useNavigate()
   const questionRef = useRef<HTMLTextAreaElement>(null)
@@ -50,7 +52,14 @@ export function ReaderAsk({
   const [messages, setMessages] = useState<ReaderMessage[]>([])
   const [sourcesByMessageId, setSourcesByMessageId] = useState<Record<string, RagSource[]>>({})
   const [errorByMessageId, setErrorByMessageId] = useState<Record<string, string>>({})
-  const canAsk = question.trim().length > 0 && !loading && !!material
+  const { data: ragUsage } = useRagUsage()
+  const usageLabel = ragUsage
+    ? ragUsage.unlimited
+      ? '今日问答：不限'
+      : `今日剩余：${ragUsage.remainingToday ?? 0}/${ragUsage.dailyLimit}`
+    : ''
+  const usageExhausted = !!ragUsage && !ragUsage.unlimited && (ragUsage.remainingToday ?? 0) <= 0
+  const canAsk = question.trim().length > 0 && !loading && !!material && !usageExhausted
 
   const contextLabel = useMemo(
     () => buildContextLabel(selectedText, currentPageNo),
@@ -134,6 +143,16 @@ export function ReaderAsk({
         history,
       },
       {
+        onStatus: (status) => {
+          if (answerBufferRef.current.trim()) return
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantId
+                ? { ...msg, text: streamStatusText(status), thinking: false }
+                : msg,
+            ),
+          )
+        },
         onChunk: (delta) => {
           answerBufferRef.current += delta
           setMessages((prev) =>
@@ -162,6 +181,8 @@ export function ReaderAsk({
             ),
           )
           setLoading(false)
+          queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
+          queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
         },
         onError: (msg) => {
           setErrorByMessageId((prev) => ({ ...prev, [assistantId]: msg }))
@@ -173,10 +194,12 @@ export function ReaderAsk({
             ),
           )
           setLoading(false)
+          queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
+          queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
         },
       },
     )
-  }, [chunk?.id, currentPageChunkIds, currentPageNo, loading, material, messages, sourcesByMessageId])
+  }, [chunk?.id, currentPageChunkIds, currentPageNo, loading, material, messages])
 
   const handleSubmit = () => {
     const selection = selectionRef.current ?? selectedText
@@ -193,11 +216,18 @@ export function ReaderAsk({
   }
 
   return (
-    <div className="flex h-full min-h-0 w-[30rem] flex-col overflow-hidden border-l bg-muted/10">
-      <div className="p-3 border-b space-y-2">
-        <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
-          <Bot className="h-3.5 w-3.5" /> AI 问答
-        </p>
+    <div className={cn('flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-t bg-muted/10 lg:border-l lg:border-t-0', className)}>
+      <div className="space-y-2 border-b p-3">
+        <div className="flex items-center justify-between gap-2">
+          <p className="flex items-center gap-1 text-xs font-semibold text-muted-foreground">
+            <Bot className="h-3.5 w-3.5" /> AI 问答
+          </p>
+          {usageLabel && (
+            <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-[10px] font-medium">
+              {usageLabel}
+            </Badge>
+          )}
+        </div>
         {contextLabel && (
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
             <Badge variant="secondary" className="text-[10px]">
@@ -208,19 +238,19 @@ export function ReaderAsk({
       </div>
 
       {chunk && (
-        <div className="px-3 py-2 border-b">
-          <Badge variant="outline" className="text-[10px] mb-1">当前上下文</Badge>
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
+        <div className="border-b px-3 py-2">
+          <Badge variant="outline" className="mb-1 text-[10px]">当前上下文</Badge>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
             {truncate(chunk.chunkText, 70)}
           </p>
         </div>
       )}
 
       {selectedText && (
-        <div className="px-3 py-2 border-b bg-primary/5 space-y-2">
+        <div className="space-y-2 border-b bg-primary/5 px-3 py-2">
           <div className="flex items-center justify-between gap-2">
             <Badge variant="secondary" className="text-[10px]">
-              <MousePointer className="h-3 w-3 mr-0.5" /> 选中文本
+              <MousePointer className="mr-0.5 h-3 w-3" /> 选中文本
             </Badge>
             <button
               className="text-[10px] text-muted-foreground hover:text-foreground"
@@ -232,13 +262,13 @@ export function ReaderAsk({
               清除
             </button>
           </div>
-          <p className="rounded-md bg-background/70 px-2 py-1.5 text-[11px] leading-relaxed text-foreground/80 line-clamp-2">
+          <p className="line-clamp-2 rounded-md bg-background/70 px-2 py-1.5 text-[11px] leading-relaxed text-foreground/80">
             {truncate(selectedText, 90)}
           </p>
           <Button
             variant="outline"
             size="sm"
-            className="w-full text-xs h-7"
+            className="h-7 w-full text-xs"
             onClick={() => questionRef.current?.focus()}
           >
             在下方提问
@@ -260,12 +290,12 @@ export function ReaderAsk({
       {!messages.length && !loading && (
         <div className="px-3 pb-2">
           {suggestedQuestions.length > 0 && (
-            <div className="space-y-1.5 mb-3">
-              <p className="text-[10px] text-muted-foreground font-medium">推荐问题</p>
+            <div className="mb-3 space-y-1.5">
+              <p className="text-[10px] font-medium text-muted-foreground">推荐问题</p>
               {suggestedQuestions.map((q, i) => (
                 <button
                   key={i}
-                  className="block w-full text-left text-xs text-muted-foreground hover:text-foreground p-2 rounded bg-muted/50 hover:bg-muted transition-colors"
+                  className="block w-full rounded bg-muted/50 p-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   onClick={() => submitQuestion(q, selectedText)}
                 >
                   {q}
@@ -283,10 +313,12 @@ export function ReaderAsk({
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={material
-            ? (selectedText ? '围绕选中文本继续追问...' : '针对当前资料继续提问...')
+            ? usageExhausted
+              ? '今日问答次数已用完'
+              : (selectedText ? '围绕选中文本继续追问...' : '针对当前资料继续提问...')
             : '请先选择一份资料'}
           className="min-h-[64px] resize-none text-sm"
-          disabled={!material}
+          disabled={!material || usageExhausted}
         />
         <div className="flex items-center gap-2">
           <Button
@@ -297,7 +329,7 @@ export function ReaderAsk({
           >
             {loading ? '思考中...' : (
               <>
-                <Send className="h-3.5 w-3.5 mr-1" /> 提问
+                <Send className="mr-1 h-3.5 w-3.5" /> 提问
               </>
             )}
           </Button>
@@ -305,16 +337,16 @@ export function ReaderAsk({
             variant="outline"
             size="sm"
             onClick={() => {
-            setMessages([])
-            setSourcesByMessageId({})
-            setErrorByMessageId({})
-            sourcesRef.current = {}
-            setSelectedText(null)
-            selectionRef.current = null
-          }}
+              setMessages([])
+              setSourcesByMessageId({})
+              setErrorByMessageId({})
+              sourcesRef.current = {}
+              setSelectedText(null)
+              selectionRef.current = null
+            }}
             disabled={messages.length === 0 && !selectedText}
           >
-            <Trash2 className="h-3.5 w-3.5 mr-1" /> 清空
+            <Trash2 className="mr-1 h-3.5 w-3.5" /> 清空
           </Button>
         </div>
         <Button
@@ -328,9 +360,16 @@ export function ReaderAsk({
             navigate(`/workspace/chat?${params.toString()}`)
           }}
         >
-          在聊天中继续 <ArrowRight className="h-3.5 w-3.5 ml-1" />
+          在聊天中继续 <ArrowRight className="ml-1 h-3.5 w-3.5" />
         </Button>
       </div>
     </div>
   )
+}
+
+function streamStatusText(status: { stage?: string; message?: string }) {
+  if (status.message?.trim()) return status.message.trim()
+  if (status.stage === 'searching') return '正在检索相关资料...'
+  if (status.stage === 'thinking') return '正在准备回答...'
+  return '正在准备回答...'
 }

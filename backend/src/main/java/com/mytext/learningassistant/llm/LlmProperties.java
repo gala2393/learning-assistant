@@ -10,6 +10,7 @@ public record LlmProperties(
     String baseUrl,
     String apiKey,
     String model,
+    String apiFormat,
     Duration timeout
 ) {
 
@@ -17,6 +18,7 @@ public record LlmProperties(
         baseUrl = baseUrl == null ? "" : baseUrl.trim();
         apiKey = apiKey == null ? "" : apiKey.trim();
         model = model == null ? "" : model.trim();
+        apiFormat = apiFormat == null || apiFormat.isBlank() ? "chat-completions" : apiFormat.trim();
         timeout = timeout == null ? Duration.ofSeconds(15) : timeout;
     }
 
@@ -25,5 +27,9 @@ public record LlmProperties(
             && !baseUrl.isBlank()
             && !apiKey.isBlank()
             && !model.isBlank();
+    }
+
+    public boolean responsesApi() {
+        return "responses".equalsIgnoreCase(apiFormat);
     }
 }

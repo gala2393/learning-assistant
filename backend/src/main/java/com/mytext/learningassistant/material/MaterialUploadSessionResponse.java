@@ -14,6 +14,9 @@ public record MaterialUploadSessionResponse(
     Integer uploadedChunks,
     String status,
     String errorMessage,
+    Integer parseProgressPercent,
+    String parseStage,
+    String parseMessage,
     String createdAt,
     String updatedAt
 ) {

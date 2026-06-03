@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { cn, sanitizeAiText } from '@/lib/utils'
 import { SourceCard } from './SourceCard'
-import { AlertCircle } from 'lucide-react'
+import { Activity, AlertCircle, Layers3 } from 'lucide-react'
 import { useAuth } from '@/context/AuthContext'
 import { UserAvatar } from '@/components/layout/UserAvatar'
 import type { RagSource } from '@/types'
@@ -16,6 +16,7 @@ export interface ChatMessage {
   thinking?: boolean
   error?: string
   sources?: RagSource[]
+  images?: Array<{ dataUrl: string; mediaType: string }>
 }
 
 interface ChatThreadProps {
@@ -38,60 +39,245 @@ function ThinkingDots() {
   )
 }
 
-function AssistantAvatarFallback() {
+function InlineFormattedText({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean)
   return (
-    <div
-      className="relative mt-1 flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[radial-gradient(circle_at_36%_24%,#ffffff_0%,#eff9ff_35%,#eaf3ff_72%,#fdf0fb_100%)] shadow-[0_12px_28px_rgba(56,189,248,0.22),0_0_24px_rgba(244,114,182,0.18)] ring-1 ring-cyan-200/80 dark:bg-[radial-gradient(circle_at_36%_24%,#243244_0%,#172033_68%,#2b1f35_100%)] dark:ring-cyan-300/25"
-      title="AI 助手"
-      aria-label="AI 助手头像"
-    >
-      <div className="absolute inset-0 rounded-full bg-[conic-gradient(from_210deg,rgba(56,189,248,0.28),rgba(244,114,182,0.28),rgba(255,255,255,0.45),rgba(56,189,248,0.28))] blur-[1px]" />
-      <div className="relative h-9 w-9 overflow-hidden rounded-full border border-white/80 bg-[#fff7fb] shadow-inner dark:border-white/15 dark:bg-slate-900">
-        <div className="absolute -left-1 top-0 h-8 w-5 rounded-br-[18px] rounded-tr-[18px] bg-gradient-to-b from-[#6fdcff] via-[#a5d8ff] to-[#f7c5ee]" />
-        <div className="absolute -right-1 top-0 h-8 w-5 rounded-bl-[18px] rounded-tl-[18px] bg-gradient-to-b from-[#ffe9fb] via-[#f7a9dc] to-[#7dd3fc]" />
-        <div className="absolute left-1/2 top-0 h-5 w-5 -translate-x-1/2 rounded-b-[18px] bg-gradient-to-b from-white via-[#cde9ff] to-[#ffc8ea]" />
-        <div className="absolute left-1/2 top-[11px] h-[19px] w-[25px] -translate-x-1/2 rounded-[45%] bg-[#ffe8de]" />
-        <div className="absolute left-[10px] top-[18px] h-[5px] w-[5px] rounded-full bg-[#2563eb] shadow-[0_0_0_2px_rgba(125,211,252,0.42),0_0_8px_rgba(56,189,248,0.65)]" />
-        <div className="absolute right-[10px] top-[18px] h-[5px] w-[5px] rounded-full bg-[#2563eb] shadow-[0_0_0_2px_rgba(244,114,182,0.32),0_0_8px_rgba(244,114,182,0.6)]" />
-        <div className="absolute left-1/2 top-[25px] h-1.5 w-3 -translate-x-1/2 rounded-b-full border-b-2 border-[#64748b]" />
-        <div className="absolute left-[2px] top-[15px] h-3.5 w-1.5 rounded-full bg-cyan-300 shadow-[0_0_9px_rgba(34,211,238,0.75)]" />
-        <div className="absolute right-[2px] top-[15px] h-3.5 w-1.5 rounded-full bg-pink-300 shadow-[0_0_9px_rgba(244,114,182,0.75)]" />
-      </div>
-      <div className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-cyan-400 ring-2 ring-white shadow-[0_0_10px_rgba(34,211,238,0.8)] dark:ring-slate-900" />
-    </div>
+    <>
+      {parts.map((part, index) => {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          return <strong key={index} className="font-semibold text-slate-950 dark:text-white">{part.slice(2, -2)}</strong>
+        }
+        return <span key={index}>{part}</span>
+      })}
+    </>
   )
 }
 
-function AssistantAvatar() {
-  const [imageFailed, setImageFailed] = useState(false)
-  if (imageFailed) {
-    return <AssistantAvatarFallback />
+type AssistantBlock =
+  | { type: 'hr' }
+  | { type: 'heading'; level: number; content: string }
+  | { type: 'list'; ordered: boolean; items: string[] }
+  | { type: 'table'; headers: string[]; rows: string[][] }
+  | { type: 'paragraph'; lines: string[] }
+
+function isHrLine(line: string) {
+  return /^\s*([-_*])(?:\s*\1){2,}\s*$/.test(line)
+}
+
+function isTableSeparator(line: string) {
+  if (!line.includes('|')) return false
+  const cells = splitTableRow(line)
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, '')))
+}
+
+function splitTableRow(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim())
+}
+
+function isTableRow(line: string) {
+  return line.includes('|') && splitTableRow(line).length >= 2
+}
+
+function parseAssistantBlocks(text: string): AssistantBlock[] {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const blocks: AssistantBlock[] = []
+  let index = 0
+
+  while (index < lines.length) {
+    const line = lines[index].trim()
+    if (!line) {
+      index += 1
+      continue
+    }
+
+    const nextLine = lines[index + 1]?.trim() || ''
+    if (isTableRow(line) && isTableSeparator(nextLine)) {
+      const headers = splitTableRow(line)
+      const rows: string[][] = []
+      index += 2
+      while (index < lines.length && isTableRow(lines[index])) {
+        rows.push(splitTableRow(lines[index]))
+        index += 1
+      }
+      blocks.push({ type: 'table', headers, rows })
+      continue
+    }
+
+    if (isHrLine(line)) {
+      blocks.push({ type: 'hr' })
+      index += 1
+      continue
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+)$/)
+    if (heading) {
+      blocks.push({ type: 'heading', level: heading[1].length, content: heading[2] })
+      index += 1
+      continue
+    }
+
+    if (/^\d+[.、]\s+/.test(line) || /^[-•]\s+/.test(line)) {
+      const ordered = /^\d+[.、]\s+/.test(line)
+      const items: string[] = []
+      while (index < lines.length) {
+        const itemLine = lines[index].trim()
+        if (ordered && /^\d+[.、]\s+/.test(itemLine)) {
+          items.push(itemLine.replace(/^\d+[.、]\s+/, ''))
+          index += 1
+          continue
+        }
+        if (!ordered && /^[-•]\s+/.test(itemLine)) {
+          items.push(itemLine.replace(/^[-•]\s+/, ''))
+          index += 1
+          continue
+        }
+        break
+      }
+      blocks.push({ type: 'list', ordered, items })
+      continue
+    }
+
+    const paragraphLines: string[] = []
+    while (index < lines.length) {
+      const paragraphLine = lines[index].trim()
+      const paragraphNextLine = lines[index + 1]?.trim() || ''
+      if (!paragraphLine) break
+      if (paragraphLines.length > 0 && (
+        isHrLine(paragraphLine)
+        || /^(#{1,4})\s+/.test(paragraphLine)
+        || /^\d+[.、]\s+/.test(paragraphLine)
+        || /^[-•]\s+/.test(paragraphLine)
+        || (isTableRow(paragraphLine) && isTableSeparator(paragraphNextLine))
+      )) {
+        break
+      }
+      paragraphLines.push(paragraphLine.replace(/^#{1,4}\s+/, ''))
+      index += 1
+    }
+    blocks.push({ type: 'paragraph', lines: paragraphLines })
   }
+
+  return blocks
+}
+
+function AssistantContent({ text }: { text: string }) {
+  const clean = sanitizeAiText(text).trim()
+  if (!clean) return null
+
+  const blocks = parseAssistantBlocks(clean)
   return (
-    <div
-      className="relative mt-1 h-12 w-12 shrink-0 overflow-hidden rounded-full bg-gradient-to-br from-cyan-50 via-white to-pink-50 p-[2px] shadow-[0_12px_28px_rgba(56,189,248,0.2),0_0_24px_rgba(244,114,182,0.18)] ring-1 ring-cyan-200/80 dark:from-cyan-300/10 dark:via-slate-900 dark:to-pink-300/10 dark:ring-cyan-300/25"
-      title="AI 助手"
-      aria-label="AI 助手头像"
-    >
-      <img
-        src="/ai-avatar.png"
-        alt="AI 助手头像"
-        className="h-full w-full rounded-full object-cover object-[50%_30%]"
-        draggable={false}
-        onError={() => setImageFailed(true)}
-      />
-      <div className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-white/70 dark:ring-white/10" />
+    <div className="space-y-5 text-[15px] leading-8 text-slate-950 dark:text-slate-100 md:text-base md:leading-8">
+      {blocks.map((block, blockIndex) => {
+        if (block.type === 'hr') {
+          return <hr key={blockIndex} className="my-7 border-t border-slate-200 dark:border-slate-800" />
+        }
+
+        if (block.type === 'heading') {
+          const HeadingTag = block.level <= 2 ? 'h2' : 'h3'
+          return (
+            <HeadingTag
+              key={blockIndex}
+              className={cn(
+                'pt-1 font-bold text-slate-950 dark:text-white',
+                block.level <= 2 ? 'text-2xl leading-9' : 'text-xl leading-8',
+              )}
+            >
+              <InlineFormattedText text={block.content} />
+            </HeadingTag>
+          )
+        }
+
+        if (block.type === 'list') {
+          const ListTag = block.ordered ? 'ol' : 'ul'
+          return (
+            <ListTag key={blockIndex} className={cn('space-y-2 pl-6', block.ordered ? 'list-decimal' : 'list-disc')}>
+              {block.items.map((item, index) => (
+                <li key={index} className="pl-1"><InlineFormattedText text={item} /></li>
+              ))}
+            </ListTag>
+          )
+        }
+
+        if (block.type === 'table') {
+          return (
+            <div key={blockIndex} className="my-6 overflow-x-auto border-y border-slate-200 py-3 dark:border-slate-800">
+              <table className="w-full min-w-[560px] border-collapse text-left text-sm md:text-[15px]">
+                <thead>
+                  <tr className="border-b border-slate-200 dark:border-slate-800">
+                    {block.headers.map((header, index) => (
+                      <th key={index} className="px-4 py-3 font-medium text-slate-700 dark:text-slate-200">
+                        <InlineFormattedText text={header} />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex} className="border-b border-slate-100 last:border-b-0 dark:border-slate-800/80">
+                      {block.headers.map((_, cellIndex) => (
+                        <td key={cellIndex} className="px-4 py-3 align-top text-slate-950 dark:text-slate-100">
+                          <InlineFormattedText text={row[cellIndex] || ''} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        }
+
+        return (
+          <div key={blockIndex} className="space-y-2">
+            {block.lines.map((line, index) => (
+              <p key={index}><InlineFormattedText text={line} /></p>
+            ))}
+          </div>
+        )
+      })}
     </div>
   )
 }
 
-function splitAssistantParagraphs(text: string) {
-  const clean = sanitizeAiText(text).trim()
-  if (!clean) return []
-  return clean
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean)
+function RetrievalTrace({ sources, onOpenSource }: { sources: RagSource[]; onOpenSource?: (source: RagSource) => void }) {
+  const maxScore = Math.max(...sources.map((source) => Number(source.score || 0)), 0)
+  const pageCount = new Set(sources.map((source) => source.pageNo).filter(Boolean)).size
+
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-slate-200/80 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/40">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="outline" className="gap-1 text-[10px]">
+          <Activity className="h-3 w-3" />
+          Retrieval trace
+        </Badge>
+        <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300">
+          {sources.length} chunks · top score {Math.round(maxScore * 100)}%
+        </span>
+        {pageCount > 0 && (
+          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+            <Layers3 className="h-3 w-3" />
+            {pageCount} pages
+          </span>
+        )}
+      </div>
+      <div className="space-y-2">
+        {sources.map((source, index) => (
+          <SourceCard
+            key={`${source.materialId}-${source.chunkId}-${index}`}
+            source={source}
+            rank={index + 1}
+            maxScore={maxScore}
+            onOpen={onOpenSource}
+          />
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
@@ -103,8 +289,8 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
   }, [messages])
 
   return (
-    <ScrollArea className="h-full min-h-0 w-full overflow-hidden px-4">
-      <div className="mx-auto max-w-3xl space-y-4 py-4">
+    <ScrollArea className="h-full min-h-0 w-full overflow-hidden px-2 md:px-4">
+      <div className="mx-auto max-w-5xl space-y-5 py-4 md:space-y-7 md:py-6">
         {messages.length === 0 && <div className="h-8" />}
         {messages.map((msg) => (
           <motion.div
@@ -112,16 +298,9 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.2 }}
-            className={cn('flex gap-3', msg.role === 'user' ? 'justify-end' : 'justify-start')}
+            className={cn('flex gap-2 md:gap-3', msg.role === 'user' ? 'justify-end' : 'justify-start')}
           >
-            {msg.role === 'assistant' && <AssistantAvatar />}
-            <div className={cn('max-w-[75%] min-w-0', msg.role === 'assistant' && 'space-y-2')}>
-              {msg.role === 'assistant' && (
-                <div className="inline-flex items-center rounded-full border border-cyan-200/70 bg-gradient-to-r from-[#eefaff] to-[#fff0fb] px-2.5 py-0.5 text-[11px] font-semibold text-[#2f6f8f] shadow-sm dark:border-cyan-300/20 dark:from-cyan-300/10 dark:to-pink-300/10 dark:text-cyan-100">
-                  AI 助手
-                </div>
-              )}
-
+            <div className={cn('min-w-0', msg.role === 'user' ? 'max-w-[88%] md:max-w-[75%]' : 'w-full max-w-[940px]')}>
               {msg.role === 'user' ? (
                 <div className="rounded-2xl border border-slate-200/70 bg-slate-100/90 px-4 py-3 text-sm text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-slate-700/60 dark:bg-slate-800/80 dark:text-slate-100">
                   {msg.thinking ? (
@@ -132,17 +311,32 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
                       <span>{msg.error}</span>
                     </div>
                   ) : (
-                    <div className="whitespace-pre-wrap leading-relaxed">{msg.text}</div>
+                    <div className="space-y-2">
+                      {msg.images && msg.images.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {msg.images.map((image, index) => (
+                            <img
+                              key={`${msg.id}-image-${index}`}
+                              src={image.dataUrl}
+                              alt={`上传图片 ${index + 1}`}
+                              className="h-20 w-20 rounded-lg border border-slate-200 object-cover dark:border-slate-700"
+                              draggable={false}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      <div className="whitespace-pre-wrap leading-relaxed">{msg.text}</div>
+                    </div>
                   )}
                 </div>
               ) : (
                 <div className="space-y-2">
                   {msg.thinking ? (
-                    <div className="rounded-2xl border border-cyan-100/80 bg-gradient-to-r from-white to-[#f8fdff] px-4 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-cyan-300/20 dark:from-slate-900 dark:to-slate-800">
+                    <div className="px-1 py-3">
                       <ThinkingDots />
                     </div>
                   ) : msg.error ? (
-                    <div className="rounded-2xl border border-rose-200/60 bg-rose-50/80 px-4 py-3 text-sm text-rose-700 dark:border-rose-900/40 dark:bg-rose-950/30 dark:text-rose-200">
+                    <div className="rounded-lg border border-rose-200/60 bg-rose-50/80 px-4 py-3 text-sm text-rose-700 dark:border-rose-900/40 dark:bg-rose-950/30 dark:text-rose-200">
                       <div className="flex items-center gap-2">
                         <AlertCircle className="h-4 w-4" />
                         <span>{msg.error}</span>
@@ -150,32 +344,12 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
                     </div>
                   ) : (
                     <>
-                      {splitAssistantParagraphs(msg.text).length > 0 ? (
-                        <div className="space-y-2">
-                          {splitAssistantParagraphs(msg.text).map((block, index) => (
-                            <div
-                              key={`${msg.id}-${index}`}
-                              className="rounded-2xl border border-cyan-100/80 bg-gradient-to-r from-white to-[#fbfdff] px-4 py-3 text-sm leading-relaxed text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_8px_24px_rgba(56,189,248,0.06)] dark:border-cyan-300/20 dark:from-slate-900 dark:to-slate-800 dark:text-slate-100"
-                            >
-                              {block}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="rounded-2xl border border-cyan-100/80 bg-gradient-to-r from-white to-[#fbfdff] px-4 py-3 text-sm leading-relaxed text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_8px_24px_rgba(56,189,248,0.06)] dark:border-cyan-300/20 dark:from-slate-900 dark:to-slate-800 dark:text-slate-100">
-                          {sanitizeAiText(msg.text)}
-                        </div>
-                      )}
+                      <article className="px-1 py-1 md:px-2">
+                        <AssistantContent text={msg.text} />
+                      </article>
 
                       {msg.sources && msg.sources.length > 0 && (
-                        <div className="mt-2 space-y-2">
-                          <Badge variant="outline" className="text-[10px]">
-                            参考来源({msg.sources.length})
-                          </Badge>
-                          {msg.sources.map((s, i) => (
-                            <SourceCard key={i} source={s} onOpen={onOpenSource} />
-                          ))}
-                        </div>
+                        <RetrievalTrace sources={msg.sources} onOpenSource={onOpenSource} />
                       )}
                     </>
                   )}

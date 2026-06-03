@@ -13,10 +13,12 @@ import { ReaderPage } from '@/components/workspace/ReaderPage'
 import { HistoryPage } from '@/components/workspace/HistoryPage'
 import { FavoritesPage } from '@/components/workspace/FavoritesPage'
 import { SummaryPage } from '@/components/workspace/SummaryPage'
+import { EvaluationPage } from '@/components/workspace/EvaluationPage'
 import { DashboardPage } from '@/components/admin/DashboardPage'
 import { UsersPage } from '@/components/admin/UsersPage'
 import { MaterialsAdminPage } from '@/components/admin/MaterialsAdminPage'
 import { LogsPage } from '@/components/admin/LogsPage'
+import { UsageRecordsPage } from '@/components/admin/UsageRecordsPage'
 
 export const router = createBrowserRouter([
   {
@@ -61,6 +63,8 @@ export const router = createBrowserRouter([
               { path: 'dashboard', element: <DashboardPage /> },
               { path: 'users', element: <UsersPage /> },
               { path: 'materials', element: <MaterialsAdminPage /> },
+              { path: 'evaluation', element: <EvaluationPage /> },
+              { path: 'usage-records', element: <UsageRecordsPage /> },
               { path: 'logs', element: <LogsPage /> },
             ],
           },

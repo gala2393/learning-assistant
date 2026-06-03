@@ -57,6 +57,14 @@
     font-family: 'Inter', 'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    width: 100%;
   }
 }
 

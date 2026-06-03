@@ -39,6 +39,13 @@ export function MaterialUploadForm({ onSubmit, loading, progress }: MaterialUplo
   const selectedFile = fileWatch?.[0] as File | undefined
   const fileTooLarge = !!selectedFile && selectedFile.size > MAX_UPLOAD_BYTES
   const canUpload = !!selectedFile && !fileTooLarge && !loading
+  const progressPercent = progress ? Math.max(0, Math.min(100, Math.round(progress.percent))) : 0
+  const progressTitle = progress?.phase === 'uploading'
+    ? `上传中 ${progressPercent}%`
+    : `后台解析中 ${progressPercent}%`
+  const progressDetail = progress?.phase === 'uploading'
+    ? `${progress.uploadedChunks}/${progress.totalChunks} 个分片已上传`
+    : progress?.stage || '正在解析文件'
 
   const handleFormSubmit = (values: UploadFormValues) => {
     const file = values.file?.[0] as File | undefined
@@ -98,21 +105,21 @@ export function MaterialUploadForm({ onSubmit, loading, progress }: MaterialUplo
           {errors.file && <p className="text-xs text-destructive">{errors.file.message as string}</p>}
 
           {progress && (
-            <div className="space-y-2 rounded-2xl border border-[#e6ebf2] bg-white/80 px-3 py-3 shadow-sm dark:border-slate-800 dark:bg-[#171d26] dark:shadow-none">
-              <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-                <span>{progress.phase === 'uploading' ? '上传中' : '解析中'}</span>
-                <span>
-                  {progress.phase === 'uploading'
-                    ? `${progress.uploadedChunks}/${progress.totalChunks}`
-                    : '后台处理中'}
-                </span>
+            <div className="space-y-2 rounded-xl border border-[#d9e2ec] bg-white px-3 py-3 shadow-sm dark:border-slate-800 dark:bg-[#171d26] dark:shadow-none">
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <span className="font-medium text-slate-700 dark:text-slate-200">{progressTitle}</span>
+                <span className="shrink-0 tabular-nums text-slate-500 dark:text-slate-400">{progressPercent}%</span>
               </div>
-              <div className="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+              <div className="h-2.5 overflow-hidden rounded-full bg-slate-100 ring-1 ring-slate-200/70 dark:bg-slate-800 dark:ring-slate-700">
                 <div
-                  className="h-full rounded-full bg-gradient-to-r from-[#6b7280] to-[#9ca3af] transition-all dark:from-[#4b5563] dark:to-[#9ca3af]"
-                  style={{ width: `${progress.percent}%` }}
+                  className="h-full rounded-full bg-gradient-to-r from-[#2563eb] via-[#0f766e] to-[#65a30d] transition-all duration-500"
+                  style={{ width: `${progressPercent}%` }}
                 />
               </div>
+              <p className="line-clamp-2 text-xs text-slate-500 dark:text-slate-400">
+                {progressDetail}
+                {progress.message ? `：${progress.message}` : ''}
+              </p>
             </div>
           )}
 

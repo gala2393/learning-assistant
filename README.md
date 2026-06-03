@@ -72,7 +72,7 @@ start-frontend.cmd
 - `MYSQL_URL`、`MYSQL_USERNAME`、`MYSQL_PASSWORD`
 - `APP_STORAGE_DIR`
 - `APP_CORS_ALLOWED_ORIGINS`
-- `LLM_ENABLED`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`
+- `LLM_ENABLED`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`、`LLM_API_FORMAT`
 - `OCR_ENABLED`、`OCR_COMMAND`
 - `DOCUMENT_PREVIEW_CONVERTER_COMMAND`
 
@@ -108,6 +108,61 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\prepare-upload.ps1
 ```
 
 生成结果会排除本地密钥、缓存、构建产物、日志和临时文件。
+
+## Docker 服务器更新
+
+服务器目录约定：
+
+```text
+/opt/learning-assistant
+├── docker-compose.yml
+├── .env
+├── repo
+│   ├── backend
+│   └── frontend
+├── frontend-dist
+├── mysql-data
+├── app-data
+└── nginx
+```
+
+更新已有 Docker 部署时，先在本地构建前端：
+
+```bat
+cd /d C:\Users\23931\Desktop\learning-assistant\frontend
+npm run build
+```
+
+然后通过 MobaXterm SFTP 上传：
+
+- `upload-package/backend` 内容到 `/opt/learning-assistant/repo/backend`
+- `upload-package/frontend` 内容到 `/opt/learning-assistant/repo/frontend`
+- `frontend/dist` 内容到 `/opt/learning-assistant/frontend-dist`
+
+服务器根目录 `.env` 是 Docker Compose 实际读取的配置文件，LLM 使用 Codex2API Responses API 时配置示例：
+
+```env
+LLM_ENABLED=true
+LLM_BASE_URL=https://www.codex2api.com
+LLM_API_KEY=<your-codex2api-token>
+LLM_MODEL=gpt-5.5
+LLM_API_FORMAT=responses
+```
+
+重新构建并启动：
+
+```bash
+cd /opt/learning-assistant
+docker compose up -d --build backend
+docker compose up -d nginx
+docker compose ps
+```
+
+验证：
+
+```bash
+curl http://127.0.0.1/api/health
+```
 
 ## 说明
 

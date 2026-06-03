@@ -48,6 +48,15 @@ public class AdminController {
         return ApiResponse.ok(adminService.updateUserRole(currentUserId, id, request.role()));
     }
 
+    @PatchMapping("/users/{id}/status")
+    public ApiResponse<AdminUserResponse> updateUserStatus(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("id") long id,
+        @RequestBody AdminUserStatusRequest request
+    ) {
+        return ApiResponse.ok(adminService.updateUserStatus(currentUserId, id, request.status()));
+    }
+
     @GetMapping("/materials")
     public ApiResponse<PageResponse<AdminMaterialResponse>> materials(
         @RequestAttribute("currentUserId") long currentUserId,
@@ -80,5 +89,15 @@ public class AdminController {
         @RequestParam(value = "size", defaultValue = "20") int size
     ) {
         return ApiResponse.ok(adminService.logs(currentUserId, keyword, page, size));
+    }
+
+    @GetMapping("/usage-records")
+    public ApiResponse<PageResponse<UsageRecordResponse>> usageRecords(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @RequestParam(value = "keyword", required = false) String keyword,
+        @RequestParam(value = "page", defaultValue = "0") int page,
+        @RequestParam(value = "size", defaultValue = "20") int size
+    ) {
+        return ApiResponse.ok(adminService.usageRecords(currentUserId, keyword, page, size));
     }
 }

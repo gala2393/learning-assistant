@@ -30,17 +30,24 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mytext.learningassistant.admin.UsageRecordEntity;
+import com.mytext.learningassistant.admin.UsageRecordRepository;
 import com.mytext.learningassistant.common.BusinessException;
 import com.mytext.learningassistant.embedding.EmbeddingClient;
 import com.mytext.learningassistant.rag.MaterialSummaryRepository;
 import com.mytext.learningassistant.rag.RagQuestionSourceRepository;
+import com.mytext.learningassistant.vector.VectorStoreClient;
 
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.cos.COSName;
@@ -69,7 +76,7 @@ public class MaterialService {
     private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final int CHUNK_MIN_SIZE = 300;
     private static final int CHUNK_MAX_SIZE = 800;
-    private static final int CHUNK_OVERLAP = 100;
+    private static final int CHUNK_OVERLAP = 120;
     private static final long MAX_MATERIAL_BYTES = 500L * 1024L * 1024L;
     private static final long MAX_WEB_BYTES = MAX_MATERIAL_BYTES;
     private static final Duration WEB_REQUEST_TIMEOUT = Duration.ofSeconds(10);
@@ -84,14 +91,23 @@ public class MaterialService {
     private static final int DEFAULT_INLINE_PDF_OCR_MAX_PAGES = 200;
     private static final long DEFAULT_PDF_COMPRESSION_MIN_BYTES = 64L * 1024L * 1024L;
     private static final int DEFAULT_PDF_COMPRESSION_TARGET_DPI = 144;
+    private static final int EMBEDDING_CACHE_MAX_ENTRIES = 2_048;
+    private static final Pattern KEYWORD_PATTERN = Pattern.compile("[\\p{IsHan}A-Za-z0-9+#./-]{2,}");
+    private static final List<String> KEYWORD_STOP_WORDS = List.of(
+        "the", "and", "for", "with", "that", "this", "from", "into", "are", "was", "were", "has", "have",
+        "what", "how", "why", "where", "which", "does", "do", "did", "can", "could", "would", "should",
+        "什么", "怎么", "为什么", "哪里", "哪个", "哪些", "一个", "这个", "那个", "以及", "如果", "因为"
+    );
 
     private final LearningMaterialRepository learningMaterialRepository;
     private final MaterialChunkRepository materialChunkRepository;
     private final MaterialSummaryRepository materialSummaryRepository;
     private final RagQuestionSourceRepository ragQuestionSourceRepository;
     private final MaterialUploadSessionRepository materialUploadSessionRepository;
+    private final UsageRecordRepository usageRecordRepository;
     private final ObjectMapper objectMapper;
     private final EmbeddingClient embeddingClient;
+    private final VectorStoreClient vectorStoreClient;
     private final HttpClient httpClient;
     private final Path storageRoot;
     private final boolean ocrEnabled;
@@ -113,6 +129,7 @@ public class MaterialService {
     private final int pdfCompressionTargetDpi;
     private final ExecutorService uploadExecutor = Executors.newFixedThreadPool(2);
     private final Semaphore renderSemaphore = new Semaphore(2);
+    private final ConcurrentMap<String, String> embeddingJsonCache = new ConcurrentHashMap<>();
 
     public MaterialService(
         LearningMaterialRepository learningMaterialRepository,
@@ -120,8 +137,10 @@ public class MaterialService {
         MaterialSummaryRepository materialSummaryRepository,
         RagQuestionSourceRepository ragQuestionSourceRepository,
         MaterialUploadSessionRepository materialUploadSessionRepository,
+        UsageRecordRepository usageRecordRepository,
         ObjectMapper objectMapper,
         EmbeddingClient embeddingClient,
+        VectorStoreClient vectorStoreClient,
         @Value("${app.storage-dir:${user.dir}/target/learning-assistant-files}") String storageDir,
         @Value("${app.ocr.enabled:false}") boolean ocrEnabled,
         @Value("${app.ocr.lang:eng+chi_sim}") String ocrLang,
@@ -146,8 +165,10 @@ public class MaterialService {
         this.materialSummaryRepository = materialSummaryRepository;
         this.ragQuestionSourceRepository = ragQuestionSourceRepository;
         this.materialUploadSessionRepository = materialUploadSessionRepository;
+        this.usageRecordRepository = usageRecordRepository;
         this.objectMapper = objectMapper;
         this.embeddingClient = embeddingClient;
+        this.vectorStoreClient = vectorStoreClient;
         this.storageRoot = Path.of(storageDir).toAbsolutePath().normalize();
         this.ocrEnabled = ocrEnabled;
         this.ocrLang = ocrLang == null || ocrLang.isBlank() ? "eng+chi_sim" : ocrLang.trim();
@@ -259,6 +280,9 @@ public class MaterialService {
         material.setSourceUrl(sourceUrl);
         material.setFileSize(fileSize);
         material.setParseStatus(MaterialParseStatus.PENDING);
+        material.setParseProgressPercent(0);
+        material.setParseStage("等待上传");
+        material.setParseMessage("文件上传完成后开始后台解析");
         material.setSummaryStatus(MaterialSummaryStatus.PENDING);
         material.setChunkCount(0);
         LearningMaterialEntity savedMaterial = learningMaterialRepository.save(material);
@@ -280,6 +304,7 @@ public class MaterialService {
         session.setStatus(MaterialUploadSessionStatus.UPLOADING);
         session.setMaterialId(savedMaterial.getId());
         materialUploadSessionRepository.save(session);
+        recordMaterialLog(ownerId, "CREATE_UPLOAD_SESSION", savedMaterial.getId(), savedMaterial.getTitle(), savedMaterial.getOriginalName(), savedMaterial.getFileSize());
         ensureUploadPartsDir(session);
         return toUploadSessionResponse(session);
     }
@@ -491,23 +516,35 @@ public class MaterialService {
         }
 
         material.setParseStatus(MaterialParseStatus.PARSING);
+        material.setParseProgressPercent(10);
+        material.setParseStage("读取原文件");
+        material.setParseMessage("正在准备重新解析");
         learningMaterialRepository.saveAndFlush(material);
 
         ParsedMaterial parsed = parseMaterial(material.getSourceType(), sourcePath);
         if (parsed.isBlank()) {
             material.setParseStatus(MaterialParseStatus.FAILED);
+            material.setParseStage("解析失败");
+            material.setParseMessage("未提取到有效文本");
             learningMaterialRepository.save(material);
             throw new BusinessException(400, "material parsing failed");
         }
 
+        updateMaterialParseProgress(material.getId(), material.getOwnerId(), 45, "切分文本", "正在按段落和页码生成知识片段");
         List<ChunkDraft> chunks = chunkMaterial(parsed);
+        updateMaterialParseProgress(material.getId(), material.getOwnerId(), 65, "重建索引", "正在删除旧索引并写入新片段");
         materialSummaryRepository.deleteByMaterialIdAndUserId(materialId, ownerId);
         ragQuestionSourceRepository.deleteByMaterialId(materialId);
+        vectorStoreClient.deleteMaterial(ownerId, materialId);
         materialChunkRepository.deleteByMaterialId(materialId);
-        saveChunks(materialId, chunks);
+        saveChunks(material, chunks, true);
 
+        updateMaterialParseProgress(material.getId(), material.getOwnerId(), 92, "生成预览", "正在生成阅读预览信息");
         applyPreviewMetadata(material, sourcePath, material.getSourceType());
         material.setParseStatus(MaterialParseStatus.SUCCESS);
+        material.setParseProgressPercent(100);
+        material.setParseStage("解析完成");
+        material.setParseMessage("资料已经可以用于阅读和问答");
         material.setSummaryStatus(MaterialSummaryStatus.PENDING);
         material.setChunkCount(chunks.size());
         return toDetailResponse(learningMaterialRepository.save(material));
@@ -519,6 +556,7 @@ public class MaterialService {
             .orElseThrow(() -> new BusinessException(404, "Material not found"));
         materialSummaryRepository.deleteByMaterialIdAndUserId(materialId, ownerId);
         ragQuestionSourceRepository.deleteByMaterialId(materialId);
+        vectorStoreClient.deleteMaterial(ownerId, materialId);
         materialChunkRepository.deleteByMaterialId(materialId);
         learningMaterialRepository.delete(material);
         deleteStoredAssets(material.getStoragePath());
@@ -546,6 +584,9 @@ public class MaterialService {
         learningMaterialRepository.findByIdAndOwnerId(session.getMaterialId(), session.getOwnerId())
             .ifPresent(material -> {
                 material.setParseStatus(MaterialParseStatus.PARSING);
+                material.setParseProgressPercent(5);
+                material.setParseStage("等待解析");
+                material.setParseMessage("文件上传完成，后台解析即将开始");
                 material.setPreviewStatus(MaterialPreviewStatus.NONE);
                 material.setPreviewError(null);
                 learningMaterialRepository.save(material);
@@ -566,13 +607,17 @@ public class MaterialService {
         try {
             Path finalPath = resolveStoredPath(session.getStoragePath());
             Files.createDirectories(finalPath.getParent());
+            updateMaterialParseProgress(session, 10, "合并文件", "正在合并上传分片");
             assembleUploadedFile(session, finalPath);
+            updateMaterialParseProgress(session, 18, "校验文件", "正在校验文件完整性");
             validateUploadedFileChecksum(session, finalPath);
             MaterialSourceType sourceType = session.getSourceType();
+            updateMaterialParseProgress(session, 30, "提取文本", "正在从文件中提取可检索文本");
             ParsedMaterial parsed = parseMaterial(sourceType, finalPath);
             if (parsed.isBlank()) {
                 throw new BusinessException(400, "material parsing failed");
             }
+            updateMaterialParseProgress(session, 52, "切分文本", "正在按段落和页码生成知识片段");
             LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(session.getMaterialId(), session.getOwnerId())
                 .orElseThrow(() -> new BusinessException(404, "Material not found"));
             material.setTitle(session.getTitle());
@@ -581,20 +626,33 @@ public class MaterialService {
             material.setStoragePath(storagePathValue(finalPath));
             material.setSourceUrl(session.getSourceUrl());
             material.setFileSize(session.getFileSize());
-            material.setParseStatus(MaterialParseStatus.SUCCESS);
+            material.setParseStatus(MaterialParseStatus.PARSING);
+            material.setParseProgressPercent(60);
+            material.setParseStage("生成索引");
+            material.setParseMessage("正在生成知识片段和向量索引");
             material.setSummaryStatus(MaterialSummaryStatus.PENDING);
             List<ChunkDraft> chunks = chunkMaterial(parsed);
+            updateMaterialParseProgress(material.getId(), material.getOwnerId(), 72, "生成预览", "正在生成阅读预览信息");
             applyPreviewMetadata(material, finalPath, sourceType);
             material.setChunkCount(chunks.size());
             learningMaterialRepository.save(material);
+            updateMaterialParseProgress(material.getId(), material.getOwnerId(), 82, "写入向量库", "正在保存知识片段和向量");
+            vectorStoreClient.deleteMaterial(material.getOwnerId(), material.getId());
             materialChunkRepository.deleteByMaterialId(material.getId());
-            saveChunks(material.getId(), chunks);
+            saveChunks(material, chunks, true);
+            updateMaterialParseProgress(material.getId(), material.getOwnerId(), 96, "收尾处理", "正在更新导入状态");
+            material.setParseStatus(MaterialParseStatus.SUCCESS);
+            material.setParseProgressPercent(100);
+            material.setParseStage("解析完成");
+            material.setParseMessage("资料已经可以用于阅读和问答");
+            learningMaterialRepository.save(material);
             session.setUploadedChunks(session.getTotalChunks());
-            session.setStatus(MaterialUploadSessionStatus.SUCCESS);
-            session.setMaterialId(material.getId());
-            session.setErrorMessage(null);
-            materialUploadSessionRepository.save(session);
-            cleanupPartDir(session);
+              session.setStatus(MaterialUploadSessionStatus.SUCCESS);
+              session.setMaterialId(material.getId());
+              session.setErrorMessage(null);
+              materialUploadSessionRepository.save(session);
+              recordMaterialLog(material.getOwnerId(), "UPLOAD_MATERIAL", material.getId(), material.getTitle(), material.getOriginalName(), material.getFileSize());
+              cleanupPartDir(session);
         } catch (Exception exception) {
             log.error("Upload session processing failed: sessionId={}, materialId={}", sessionId, session.getMaterialId(), exception);
             MaterialUploadSessionEntity failedSession = materialUploadSessionRepository.findById(sessionId).orElse(null);
@@ -606,6 +664,8 @@ public class MaterialService {
                     learningMaterialRepository.findByIdAndOwnerId(failedSession.getMaterialId(), failedSession.getOwnerId())
                         .ifPresent(material -> {
                             material.setParseStatus(MaterialParseStatus.FAILED);
+                            material.setParseStage("解析失败");
+                            material.setParseMessage(failedSession.getErrorMessage());
                             learningMaterialRepository.save(material);
                         });
                 }
@@ -699,29 +759,105 @@ public class MaterialService {
         material.setSourceUrl(normalizeOptionalText(sourceUrl));
         material.setFileSize(fileSize);
         material.setParseStatus(MaterialParseStatus.SUCCESS);
+        material.setParseProgressPercent(100);
+        material.setParseStage("解析完成");
+        material.setParseMessage("资料已经可以用于阅读和问答");
         material.setSummaryStatus(MaterialSummaryStatus.PENDING);
         applyPreviewMetadata(material, storagePath, sourceType);
         material.setChunkCount(chunks.size());
         LearningMaterialEntity saved = learningMaterialRepository.save(material);
-        saveChunks(saved.getId(), chunks);
+        saveChunks(saved, chunks, false);
+        recordMaterialLog(ownerId, "UPLOAD_MATERIAL", saved.getId(), saved.getTitle(), saved.getOriginalName(), saved.getFileSize());
         return toResponse(saved);
     }
 
-    private void saveChunks(long materialId, List<ChunkDraft> chunks) {
+    private void recordMaterialLog(long userId, String action, Long materialId, String title, String originalName, Long fileSize) {
+        UsageRecordEntity record = new UsageRecordEntity();
+        record.setUserId(userId);
+        record.setAction(action);
+        record.setTargetType("MATERIAL");
+        record.setTargetId(materialId);
+        record.setDetail("title=" + safeText(title)
+            + ", originalName=" + safeText(originalName)
+            + ", fileSize=" + (fileSize == null ? 0 : fileSize));
+        usageRecordRepository.save(record);
+    }
+
+    private String safeText(String value) {
+        return value == null ? "" : value.replace(',', ' ').trim();
+    }
+
+    private void saveChunks(LearningMaterialEntity material, List<ChunkDraft> chunks, boolean updateProgress) {
+        List<MaterialChunkEntity> savedChunks = new ArrayList<>();
+        Map<Long, List<Double>> embeddingsByChunkId = new LinkedHashMap<>();
         for (int index = 0; index < chunks.size(); index++) {
             ChunkDraft draft = chunks.get(index);
             MaterialChunkEntity chunk = new MaterialChunkEntity();
-            chunk.setMaterialId(materialId);
+            chunk.setMaterialId(material.getId());
             chunk.setChunkIndex(index);
             chunk.setChunkText(draft.text());
             chunk.setPageNo(draft.pageNo());
             chunk.setSectionTitle(draft.sectionTitle() == null || draft.sectionTitle().isBlank()
                 ? "第" + (index + 1) + "切片"
                 : draft.sectionTitle());
-            chunk.setEmbeddingJson(toEmbeddingJson(draft.text()));
+            chunk.setHierarchyPath(buildHierarchyPath(material, chunk, index));
+            chunk.setSummary(buildChunkSummary(draft.text()));
+            chunk.setKeywords(buildChunkKeywords(draft.text()));
+            String embeddingJson = toEmbeddingJson(draft.text());
+            chunk.setEmbeddingJson(embeddingJson);
             chunk.setCreatedAt(java.time.LocalDateTime.now());
-            materialChunkRepository.save(chunk);
+            MaterialChunkEntity saved = materialChunkRepository.save(chunk);
+            savedChunks.add(saved);
+            List<Double> embedding = parseEmbeddingJson(embeddingJson);
+            if (embedding != null && saved.getId() != null) {
+                embeddingsByChunkId.put(saved.getId(), embedding);
+            }
+            if (updateProgress && chunks.size() > 0 && (index == chunks.size() - 1 || index % 5 == 0)) {
+                int percent = 82 + (int) Math.floor(((index + 1) * 10.0) / chunks.size());
+                updateMaterialParseProgress(material.getId(), material.getOwnerId(), Math.min(percent, 92), "写入向量库",
+                    "正在保存知识片段 " + (index + 1) + "/" + chunks.size());
+            }
         }
+        vectorStoreClient.upsertChunks(material.getOwnerId(), material, savedChunks, embeddingsByChunkId);
+    }
+
+    private void updateMaterialParseProgress(MaterialUploadSessionEntity session, int percent, String stage, String message) {
+        if (session == null || session.getMaterialId() == null) {
+            return;
+        }
+        updateMaterialParseProgress(session.getMaterialId(), session.getOwnerId(), percent, stage, message);
+    }
+
+    private void updateMaterialParseProgress(Long materialId, Long ownerId, int percent, String stage, String message) {
+        if (materialId == null || ownerId == null) {
+            return;
+        }
+        learningMaterialRepository.findByIdAndOwnerId(materialId, ownerId)
+            .ifPresent(material -> {
+                material.setParseProgressPercent(clampProgress(percent));
+                material.setParseStage(stage);
+                material.setParseMessage(message);
+                learningMaterialRepository.save(material);
+            });
+    }
+
+    private int clampProgress(int percent) {
+        return Math.max(0, Math.min(100, percent));
+    }
+
+    private String buildHierarchyPath(LearningMaterialEntity material, MaterialChunkEntity chunk, int zeroBasedIndex) {
+        List<String> parts = new ArrayList<>();
+        if (material.getTitle() != null && !material.getTitle().isBlank()) {
+            parts.add(material.getTitle().trim());
+        }
+        if (chunk.getSectionTitle() != null && !chunk.getSectionTitle().isBlank()) {
+            parts.add(chunk.getSectionTitle().trim());
+        } else if (chunk.getPageNo() != null) {
+            parts.add("第" + chunk.getPageNo() + "页");
+        }
+        parts.add("切片" + (zeroBasedIndex + 1));
+        String path = String.join(" > ", parts);
+        return path.length() <= 500 ? path : path.substring(0, 500);
     }
 
     private MaterialResponse toResponse(LearningMaterialEntity material) {
@@ -733,6 +869,9 @@ public class MaterialService {
             material.getSourceUrl(),
             material.getFileSize(),
             material.getParseStatus().name(),
+            material.getParseProgressPercent(),
+            material.getParseStage(),
+            material.getParseMessage(),
             material.getSummaryStatus().name(),
             material.getPreviewStatus() == null ? MaterialPreviewStatus.NONE.name() : material.getPreviewStatus().name(),
             material.getPreviewError(),
@@ -752,6 +891,9 @@ public class MaterialService {
             material.getSourceUrl(),
             material.getFileSize(),
             material.getParseStatus().name(),
+            material.getParseProgressPercent(),
+            material.getParseStage(),
+            material.getParseMessage(),
             material.getSummaryStatus().name(),
             material.getPreviewStatus() == null ? MaterialPreviewStatus.NONE.name() : material.getPreviewStatus().name(),
             material.getPreviewError(),
@@ -770,6 +912,9 @@ public class MaterialService {
             chunk.getChunkText(),
             chunk.getPageNo(),
             chunk.getSectionTitle(),
+            chunk.getHierarchyPath(),
+            chunk.getSummary(),
+            chunk.getKeywords(),
             excerpt(chunk.getChunkText()),
             chunk.getCreatedAt() == null ? null : chunk.getCreatedAt().format(DATETIME_FORMATTER)
         );
@@ -777,6 +922,9 @@ public class MaterialService {
 
     private MaterialUploadSessionResponse toUploadSessionResponse(MaterialUploadSessionEntity session) {
         int uploadedChunks = session.getUploadedChunks() == null ? countUploadedParts(session) : session.getUploadedChunks();
+        LearningMaterialEntity material = session.getMaterialId() == null
+            ? null
+            : learningMaterialRepository.findByIdAndOwnerId(session.getMaterialId(), session.getOwnerId()).orElse(null);
         return new MaterialUploadSessionResponse(
             session.getSessionId(),
             session.getClientUploadId(),
@@ -791,6 +939,9 @@ public class MaterialService {
             uploadedChunks,
             session.getStatus() == null ? null : session.getStatus().name(),
             session.getErrorMessage(),
+            material == null ? null : material.getParseProgressPercent(),
+            material == null ? null : material.getParseStage(),
+            material == null ? null : material.getParseMessage(),
             session.getCreatedAt() == null ? null : session.getCreatedAt().format(DATETIME_FORMATTER),
             session.getUpdatedAt() == null ? null : session.getUpdatedAt().format(DATETIME_FORMATTER)
         );
@@ -1542,14 +1693,13 @@ public class MaterialService {
 
     private List<String> splitParagraphs(String text) {
         List<String> paragraphs = new ArrayList<>();
-        String[] parts = text.split("\\n\\n+");
+        String[] parts = text.split("\\n\\s*\\n+");
         for (String part : parts) {
-            String[] lines = part.split("\\n");
-            for (String line : lines) {
-                String trimmed = line.trim();
-                if (!trimmed.isEmpty()) {
-                    paragraphs.add(trimmed);
-                }
+            String paragraph = part.trim()
+                .replaceAll("[ \\t]*\\n[ \\t]*", "\n")
+                .replaceAll("[ \\t]{2,}", " ");
+            if (!paragraph.isEmpty()) {
+                paragraphs.add(paragraph);
             }
         }
         return paragraphs;
@@ -1564,6 +1714,14 @@ public class MaterialService {
         while (matcher.find()) {
             String sentence = matcher.group().trim();
             if (sentence.isEmpty()) {
+                continue;
+            }
+            if (sentence.length() > CHUNK_MAX_SIZE) {
+                if (!buffer.isEmpty()) {
+                    addChunk(sentences, buffer.toString().trim());
+                    buffer.setLength(0);
+                }
+                sentences.addAll(splitLongSentence(sentence));
                 continue;
             }
             if (buffer.length() + sentence.length() + 1 > CHUNK_MAX_SIZE && !buffer.isEmpty()) {
@@ -1581,6 +1739,34 @@ public class MaterialService {
         return sentences;
     }
 
+    private List<String> splitLongSentence(String sentence) {
+        List<String> chunks = new ArrayList<>();
+        int start = 0;
+        while (start < sentence.length()) {
+            int end = Math.min(sentence.length(), start + CHUNK_MAX_SIZE);
+            if (end < sentence.length()) {
+                int boundary = findSoftBoundary(sentence, start, end);
+                if (boundary > start + CHUNK_MIN_SIZE) {
+                    end = boundary;
+                }
+            }
+            addChunk(chunks, sentence.substring(start, end).trim());
+            start = end;
+        }
+        return chunks;
+    }
+
+    private int findSoftBoundary(String text, int start, int end) {
+        int min = Math.min(end, start + CHUNK_MIN_SIZE);
+        for (int index = end - 1; index > min; index--) {
+            char ch = text.charAt(index);
+            if (ch == '，' || ch == ',' || ch == '、' || ch == ';' || ch == '；' || Character.isWhitespace(ch)) {
+                return index + 1;
+            }
+        }
+        return end;
+    }
+
     private void addChunk(List<String> chunks, String text) {
         if (!text.isBlank()) {
             chunks.add(text);
@@ -1595,12 +1781,27 @@ public class MaterialService {
         result.add(chunks.get(0));
         for (int i = 1; i < chunks.size(); i++) {
             String prev = chunks.get(i - 1);
-            String overlap = prev.length() <= CHUNK_OVERLAP
-                ? prev
-                : prev.substring(prev.length() - CHUNK_OVERLAP);
+            String overlap = tailOverlap(prev);
             result.add(overlap + " " + chunks.get(i));
         }
         return result;
+    }
+
+    private String tailOverlap(String text) {
+        if (text.length() <= CHUNK_OVERLAP) {
+            return text;
+        }
+        int start = text.length() - CHUNK_OVERLAP;
+        for (int index = start; index < text.length(); index++) {
+            char ch = text.charAt(index);
+            if (ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?') {
+                int boundary = index + 1;
+                if (text.length() - boundary >= CHUNK_OVERLAP / 2) {
+                    return text.substring(boundary).trim();
+                }
+            }
+        }
+        return text.substring(start).trim();
     }
 
     private List<String> chunkTextWithImageMarkers(String content) {
@@ -1905,8 +2106,17 @@ public class MaterialService {
     }
 
     private String toEmbeddingJson(String text) {
+        String cleanedText = cleanEmbeddingText(text);
+        if (cleanedText.isBlank()) {
+            return null;
+        }
+        String cacheKey = sha256(cleanedText.getBytes(StandardCharsets.UTF_8));
+        String cached = embeddingJsonCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
         try {
-            return embeddingClient.embed(cleanEmbeddingText(text))
+            String embeddingJson = embeddingClient.embed(cleanedText)
                 .filter(embedding -> !embedding.isEmpty())
                 .map(embedding -> {
                     try {
@@ -1916,6 +2126,35 @@ public class MaterialService {
                     }
                 })
                 .orElse(null);
+            if (embeddingJson != null) {
+                if (embeddingJsonCache.size() >= EMBEDDING_CACHE_MAX_ENTRIES) {
+                    embeddingJsonCache.clear();
+                }
+                embeddingJsonCache.putIfAbsent(cacheKey, embeddingJson);
+            }
+            return embeddingJson;
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private List<Double> parseEmbeddingJson(String embeddingJson) {
+        if (embeddingJson == null || embeddingJson.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(embeddingJson);
+            if (!root.isArray() || root.isEmpty()) {
+                return null;
+            }
+            List<Double> embedding = new ArrayList<>(root.size());
+            for (JsonNode value : root) {
+                if (!value.isNumber()) {
+                    return null;
+                }
+                embedding.add(value.asDouble());
+            }
+            return embedding.isEmpty() ? null : embedding;
         } catch (Exception exception) {
             return null;
         }
@@ -1930,6 +2169,75 @@ public class MaterialService {
             .replaceAll("\\[image ocr:[^\\]]*\\]\\s*", " ")
             .replaceAll("\\s+", " ")
             .trim();
+    }
+
+    private String buildChunkSummary(String text) {
+        String cleaned = cleanEmbeddingText(text);
+        if (cleaned.isBlank()) {
+            return null;
+        }
+        int sentenceEnd = firstSentenceEnd(cleaned);
+        int end = sentenceEnd > 0 ? sentenceEnd : Math.min(cleaned.length(), 180);
+        String summary = cleaned.substring(0, end).trim();
+        if (summary.length() > 180) {
+            summary = summary.substring(0, 180).trim();
+        }
+        return summary.isBlank() ? null : summary;
+    }
+
+    private int firstSentenceEnd(String text) {
+        int limit = Math.min(text.length(), 220);
+        for (int index = 0; index < limit; index++) {
+            char c = text.charAt(index);
+            if (c == '。' || c == '！' || c == '？' || c == '.' || c == '!' || c == '?') {
+                return index + 1;
+            }
+        }
+        return -1;
+    }
+
+    private String buildChunkKeywords(String text) {
+        String cleaned = cleanEmbeddingText(text);
+        if (cleaned.isBlank()) {
+            return null;
+        }
+        Map<String, Integer> frequencies = new LinkedHashMap<>();
+        Matcher matcher = KEYWORD_PATTERN.matcher(cleaned);
+        while (matcher.find()) {
+            String keyword = normalizeKeyword(matcher.group());
+            if (keyword == null) {
+                continue;
+            }
+            frequencies.merge(keyword, 1, Integer::sum);
+        }
+        String keywords = frequencies.entrySet().stream()
+            .sorted((left, right) -> {
+                int byFrequency = Integer.compare(right.getValue(), left.getValue());
+                if (byFrequency != 0) {
+                    return byFrequency;
+                }
+                return Integer.compare(right.getKey().length(), left.getKey().length());
+            })
+            .map(Map.Entry::getKey)
+            .limit(8)
+            .collect(java.util.stream.Collectors.joining(", "));
+        return keywords.isBlank() ? null : keywords;
+    }
+
+    private String normalizeKeyword(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String keyword = raw.trim()
+            .replaceAll("^[\\p{Punct}\\s]+|[\\p{Punct}\\s]+$", "");
+        if (keyword.length() < 2) {
+            return null;
+        }
+        String lower = keyword.toLowerCase(Locale.ROOT);
+        if (KEYWORD_STOP_WORDS.contains(lower)) {
+            return null;
+        }
+        return lower.matches("[a-z0-9+#./-]+") ? lower : keyword;
     }
 
     private String normalizeTitle(String title, String originalName) {

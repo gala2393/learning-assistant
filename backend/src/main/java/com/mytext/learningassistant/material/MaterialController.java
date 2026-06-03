@@ -8,6 +8,7 @@ import com.mytext.learningassistant.common.ApiResponse;
 import jakarta.validation.Valid;
 
 import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.UrlResource;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -29,9 +30,11 @@ import org.springframework.web.multipart.MultipartFile;
 public class MaterialController {
 
     private final MaterialService materialService;
+    private final MaterialFileTicketService fileTicketService;
 
-    public MaterialController(MaterialService materialService) {
+    public MaterialController(MaterialService materialService, MaterialFileTicketService fileTicketService) {
         this.materialService = materialService;
+        this.fileTicketService = fileTicketService;
     }
 
     @PostMapping
@@ -111,19 +114,32 @@ public class MaterialController {
     }
 
     @GetMapping("/{id}/file")
-    public ResponseEntity<InputStreamResource> file(
-        @RequestAttribute("currentUserId") long currentUserId,
-        @PathVariable("id") long id
+    public ResponseEntity<UrlResource> file(
+        @RequestAttribute(value = "currentUserId", required = false) Long currentUserId,
+        @PathVariable("id") long id,
+        @RequestParam(value = "ticket", required = false) String ticket
     ) throws IOException {
-        MaterialFileResource file = materialService.file(currentUserId, id);
+        long ownerId = currentUserId != null ? currentUserId : requireTicketOwner(ticket, id);
+        MaterialFileResource file = materialService.file(ownerId, id);
         return ResponseEntity.ok()
             .contentType(MediaType.parseMediaType(file.contentType()))
             .contentLength(file.contentLength())
+            .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+            .header(HttpHeaders.CACHE_CONTROL, "private, max-age=300")
             .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.inline()
                 .filename(file.fileName(), java.nio.charset.StandardCharsets.UTF_8)
                 .build()
                 .toString())
-            .body(new InputStreamResource(java.nio.file.Files.newInputStream(file.path())));
+            .body(new UrlResource(file.path().toUri()));
+    }
+
+    @PostMapping("/{id}/file-ticket")
+    public ApiResponse<MaterialFileTicketResponse> fileTicket(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("id") long id
+    ) {
+        materialService.detail(currentUserId, id);
+        return ApiResponse.ok(fileTicketService.create(currentUserId, id));
     }
 
     @GetMapping("/{id}/images/{fileName}")
@@ -167,5 +183,13 @@ public class MaterialController {
     ) {
         materialService.delete(currentUserId, id);
         return ApiResponse.ok(null);
+    }
+
+    private long requireTicketOwner(String ticket, long materialId) {
+        Long ownerId = fileTicketService.consume(ticket, materialId);
+        if (ownerId == null) {
+            throw new com.mytext.learningassistant.common.BusinessException(401, "Invalid or expired file ticket");
+        }
+        return ownerId;
     }
 }

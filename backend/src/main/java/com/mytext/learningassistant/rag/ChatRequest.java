@@ -15,6 +15,7 @@ public record ChatRequest(
     Integer currentPageNo,
     List<Long> currentPageChunkIds,
     String selectedText,
+    List<ChatImage> images,
     String answerStyle,
     List<ChatMessage> history,
     Long conversationId

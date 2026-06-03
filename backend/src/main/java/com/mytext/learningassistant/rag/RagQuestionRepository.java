@@ -1,5 +1,6 @@
 package com.mytext.learningassistant.rag;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -12,6 +13,8 @@ public interface RagQuestionRepository extends JpaRepository<RagQuestionEntity, 
     List<RagQuestionEntity> findByUserIdAndConversationIdOrderByCreatedAtAsc(Long userId, Long conversationId);
 
     Optional<RagQuestionEntity> findByIdAndUserId(Long id, Long userId);
+
+    long countByUserIdAndCreatedAtGreaterThanEqual(Long userId, LocalDateTime createdAt);
 
     void deleteByUserId(Long userId);
 }
