@@ -38,8 +38,7 @@ learning-assistant/
 ├── frontend/             # React 前端
 ├── 开发教程/             # 项目开发与部署教程
 ├── upload-package/       # 本地生成的服务器上传包，已被 git 忽略
-├── frontend-dist-upload/ # 本地生成的前端上传包，已被 git 忽略
-└── prepare-upload.ps1    # 生成上传包脚本
+└── frontend-dist-upload/ # 本地生成的前端上传包，已被 git 忽略
 ```
 
 ## 页面路由
@@ -163,20 +162,15 @@ cd /d C:\Users\23931\Desktop\learning-assistant\backend
 .\mvnw "-Dtest=OpenAiCompatibleLlmClientTest,ThirdPartyLlmClientTest,RagStreamControllerTest" test
 ```
 
-## 生成上传包
+## 上传与构建产物
 
-生成适合上传服务器的目录：
-
-```bat
-cd /d C:\Users\23931\Desktop\learning-assistant
-powershell -NoProfile -ExecutionPolicy Bypass -File .\prepare-upload.ps1
-```
-
-上传包和构建产物不会提交到 Git：
+服务器更新使用本地目录：
 
 - `upload-package/`
 - `frontend-dist-upload/`
 - `frontend/dist/`
+
+这些目录用于 MobaXterm 手动上传，不提交到 Git。前端上线文件以 `frontend/dist` 为准。
 
 ## Docker 部署结构
 
