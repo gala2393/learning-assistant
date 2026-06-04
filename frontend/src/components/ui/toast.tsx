@@ -1,3 +1,4 @@
+// 消息提示组件 - 轻量级的 Toast 通知，包含 ToastProvider 和 useToast 钩子
 import { createContext, useContext, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X } from 'lucide-react'

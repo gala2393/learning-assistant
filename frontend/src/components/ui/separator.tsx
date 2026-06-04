@@ -1,3 +1,4 @@
+// 分隔符组件 - 水平或垂直的视觉分隔线
 import * as React from 'react'
 import * as SeparatorPrimitive from '@radix-ui/react-separator'
 import { cn } from '@/lib/utils'

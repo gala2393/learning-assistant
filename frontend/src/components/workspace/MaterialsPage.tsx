@@ -1,3 +1,20 @@
+/**
+ * MaterialsPage - 资料管理页面
+ *
+ * 功能说明：
+ * - 展示所有学习资料的列表（网格布局）
+ * - 支持文件上传导入（分片上传，带进度条）
+ * - 支持关键词搜索、按类型/状态过滤
+ * - 支持资料的编辑、删除、重新解析操作
+ * - 支持"继续阅读"跳转到阅读器、"原文件"打开原始文档
+ * - 底部显示当前选中资料的摘要信息栏
+ *
+ * 数据流：
+ * 1. useMaterials() 获取资料列表
+ * 2. 搜索使用 useDebounce 300ms 防抖
+ * 3. 上传使用 uploadMaterialInChunks() 分片上传，通过回调更新进度
+ * 4. 上传/编辑/删除/重新解析均通过对应的 mutation 执行
+ */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
@@ -31,24 +48,28 @@ import type { UploadProgress } from '@/api/materials'
 export function MaterialsPage() {
   const navigate = useNavigate()
   const { showToast } = useToast()
+  // 获取资料列表和各种 mutation
   const { data: materials = [], isLoading } = useMaterials()
   const deleteMutation = useDeleteMaterial()
   const updateMutation = useUpdateMaterial()
   const reparseMutation = useReparseMaterial()
 
-  const [keyword, setKeyword] = useState('')
-  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>('ALL')
-  const [statusFilter, setStatusFilter] = useState<string>('ALL')
-  const [selected, setSelected] = useState<Material | null>(null)
-  const [editTarget, setEditTarget] = useState<Material | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Material | null>(null)
-  const [editTitle, setEditTitle] = useState('')
-  const [uploading, setUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)
-  const [uploadOpen, setUploadOpen] = useState(false)
+  // ---- 状态管理 ----
+  const [keyword, setKeyword] = useState('')                    // 搜索关键词
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>('ALL')  // 资料类型过滤
+  const [statusFilter, setStatusFilter] = useState<string>('ALL')          // 解析状态过滤
+  const [selected, setSelected] = useState<Material | null>(null)          // 当前选中的资料
+  const [editTarget, setEditTarget] = useState<Material | null>(null)      // 编辑弹窗目标
+  const [deleteTarget, setDeleteTarget] = useState<Material | null>(null)  // 删除弹窗目标
+  const [editTitle, setEditTitle] = useState('')                           // 编辑中的标题
+  const [uploading, setUploading] = useState(false)                        // 是否正在上传
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)  // 上传进度
+  const [uploadOpen, setUploadOpen] = useState(false)                      // 移动端上传表单展开状态
 
+  // 搜索关键词防抖
   const debouncedKeyword = useDebounce(keyword, 300)
 
+  // 综合过滤：类型 + 状态 + 关键词
   const filtered = materials.filter((material) => {
     if (sourceTypeFilter !== 'ALL' && material.sourceType !== sourceTypeFilter) return false
     if (statusFilter !== 'ALL' && material.parseStatus !== statusFilter) return false
@@ -59,6 +80,14 @@ export function MaterialsPage() {
     return true
   })
 
+  // ---- 上传处理 ----
+
+  /**
+   * 处理文件上传：使用分片上传策略
+   * 1. 调用 uploadMaterialInChunks 进行分片上传
+   * 2. 上传过程中通过 setUploadProgress 回调更新进度
+   * 3. 上传成功后刷新资料列表并关闭弹窗
+   */
   const handleUpload = async (data: { title?: string; file?: File }) => {
     if (!data.file) return
     setUploading(true)
@@ -67,9 +96,9 @@ export function MaterialsPage() {
       await uploadMaterialInChunks({
         file: data.file,
         title: data.title,
-        sourceType: inferSourceType(data.file.name),
+        sourceType: inferSourceType(data.file.name),  // 根据文件扩展名推断类型
       }, setUploadProgress)
-      await queryClient.invalidateQueries({ queryKey: ['materials'] })
+      await queryClient.invalidateQueries({ queryKey: ['materials'] })  // 刷新列表
       setUploadOpen(false)
       showToast('资料上传成功')
     } catch (error) {
@@ -81,11 +110,15 @@ export function MaterialsPage() {
     }
   }
 
+  // ---- 编辑处理 ----
+
+  /** 打开编辑弹窗，初始化标题输入 */
   const handleEdit = (material: Material) => {
     setEditTarget(material)
     setEditTitle(material.title)
   }
 
+  /** 保存编辑结果 */
   const handleEditSave = () => {
     if (editTarget && editTitle.trim()) {
       updateMutation.mutate({ id: editTarget.id, payload: { title: editTitle.trim() } }, {
@@ -98,15 +131,20 @@ export function MaterialsPage() {
     }
   }
 
+  // ---- 删除处理 ----
+
+  /** 打开删除确认弹窗 */
   const handleDelete = (material: Material) => {
     setDeleteTarget(material)
   }
 
+  /** 确认删除资料 */
   const handleDeleteConfirm = () => {
     if (deleteTarget) {
       deleteMutation.mutate(deleteTarget.id, {
         onSuccess: () => {
           setDeleteTarget(null)
+          // 如果正在查看被删除的资料，清除选中状态
           if (selected?.id === deleteTarget.id) setSelected(null)
           showToast('资料已删除')
         },
@@ -115,10 +153,17 @@ export function MaterialsPage() {
     }
   }
 
+  // ---- 阅读和原文件 ----
+
+  /** 跳转到阅读器页面，继续阅读指定资料 */
   const handleContinueReading = (material: Material) => {
     navigate(`/workspace/reader?materialId=${encodeURIComponent(material.id)}`)
   }
 
+  /**
+   * 打开资料原文件
+   * 通过后端接口获取临时访问链接（ticket），然后在新窗口打开
+   */
   const handleOpenFile = async (material: Material) => {
     const opened = window.open('', '_blank')
     try {
@@ -134,9 +179,11 @@ export function MaterialsPage() {
     }
   }
 
+  /** 触发资料重新解析 */
   const handleReparse = (material: Material) => {
     reparseMutation.mutate(material.id, {
       onSuccess: (updated) => {
+        // 如果正在查看该资料，更新选中状态为最新数据
         setSelected((current) => current?.id === updated.id ? updated : current)
         showToast('资料已重新解析')
       },
@@ -144,6 +191,7 @@ export function MaterialsPage() {
     })
   }
 
+  // 是否处于忙碌状态（上传中）
   const isBusy = uploading
 
   return (
@@ -153,12 +201,14 @@ export function MaterialsPage() {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
     >
+      {/* 页面标题栏 */}
       <div className="flex items-center justify-between gap-3 px-1 pb-2 pt-1 md:px-6 md:pt-4">
         <h2 className="flex min-w-0 items-center gap-2 truncate text-base font-semibold md:text-lg">
           <BookOpen className="h-5 w-5 shrink-0" /> 资料管理
         </h2>
         <div className="flex shrink-0 items-center gap-2">
           <span className="text-sm text-muted-foreground">共 {filtered.length} 份</span>
+          {/* 移动端的导入按钮（切换上传表单的显示/隐藏） */}
           <Button
             type="button"
             size="sm"
@@ -172,12 +222,16 @@ export function MaterialsPage() {
         </div>
       </div>
 
+      {/* 主体内容区：左侧上传表单 + 右侧资料列表 */}
       <div className="flex flex-1 flex-col gap-3 overflow-hidden px-1 pb-2 md:flex-row md:gap-4 md:px-6 md:pb-4">
+        {/* 上传表单（移动端可折叠，默认隐藏） */}
         <div className={cn('shrink-0 overflow-auto md:block md:max-h-none md:w-72', uploadOpen || uploading ? 'max-h-[52dvh]' : 'hidden')}>
           <MaterialUploadForm onSubmit={handleUpload} loading={isBusy} progress={uploadProgress} />
         </div>
 
+        {/* 资料列表区域 */}
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {/* 搜索和过滤栏 */}
           <div className="mb-2 flex flex-wrap items-center gap-2 md:mb-3">
             <div className="relative min-w-full flex-1 sm:min-w-[180px]">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -188,6 +242,7 @@ export function MaterialsPage() {
                 onChange={(event) => setKeyword(event.target.value)}
               />
             </div>
+            {/* 资料类型下拉筛选 */}
             <Select value={sourceTypeFilter} onValueChange={setSourceTypeFilter}>
               <SelectTrigger className="h-9 w-[calc(50vw-1rem)] sm:w-[120px]">
                 <SelectValue placeholder="类型" />
@@ -199,6 +254,7 @@ export function MaterialsPage() {
                 ))}
               </SelectContent>
             </Select>
+            {/* 解析状态下拉筛选 */}
             <Select value={statusFilter} onValueChange={setStatusFilter}>
               <SelectTrigger className="h-9 w-[calc(50vw-1rem)] sm:w-[120px]">
                 <SelectValue placeholder="状态" />
@@ -212,6 +268,7 @@ export function MaterialsPage() {
             </Select>
           </div>
 
+          {/* 资料卡片网格 */}
           <div className="min-h-0 flex-1 overflow-auto pb-2">
             {isLoading ? (
               <div className="flex items-center justify-center py-12">
@@ -232,6 +289,7 @@ export function MaterialsPage() {
             )}
           </div>
 
+          {/* 选中资料的摘要信息栏（底部固定） */}
           {selected && (
             <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border bg-muted/30 p-2 md:mt-3 md:p-3">
               <div className="flex min-w-0 items-center gap-3">
@@ -258,6 +316,7 @@ export function MaterialsPage() {
         </div>
       </div>
 
+      {/* 编辑资料弹窗 */}
       <Dialog open={!!editTarget} onOpenChange={(open) => !open && setEditTarget(null)}>
         <DialogContent>
           <DialogHeader>
@@ -274,12 +333,13 @@ export function MaterialsPage() {
         </DialogContent>
       </Dialog>
 
+      {/* 删除确认弹窗 */}
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>确认删除</DialogTitle>
             <DialogDescription>
-              确定要删除资料“{deleteTarget?.title || deleteTarget?.originalName}”吗？此操作不可撤销。
+              确定要删除资料"{deleteTarget?.title || deleteTarget?.originalName}"吗？此操作不可撤销。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

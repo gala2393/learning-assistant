@@ -1,4 +1,18 @@
-﻿import { useState } from 'react'
+/**
+ * FavoritesPage - 我的收藏页面
+ *
+ * 功能说明：
+ * - 展示用户收藏的问答记录列表
+ * - 支持关键词搜索（带 300ms 防抖）
+ * - 支持查看收藏详情（弹窗展示问题、回答和会话记录）
+ * - 支持取消收藏（二次确认弹窗）
+ *
+ * 数据流：
+ * 1. 通过 useFavorites() 从后端获取收藏列表
+ * 2. 用户输入关键词后，useDebounce 延迟 300ms 触发过滤
+ * 3. 删除操作通过 useDeleteFavorite() 发送到后端
+ */
+import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { useFavorites, useDeleteFavorite } from '@/api/favorites'
 import { useDebounce } from '@/hooks/useDebounce'
@@ -15,15 +29,22 @@ import { Search, Star, Trash2, Eye } from 'lucide-react'
 import type { FavoriteItem } from '@/types'
 
 export function FavoritesPage() {
+  // 获取收藏列表数据和加载状态
   const { data: items = [], isLoading } = useFavorites()
+  // 删除收藏的 mutation，调用 mutate(id) 即可触发
   const deleteMutation = useDeleteFavorite()
 
+  // 搜索关键词
   const [keyword, setKeyword] = useState('')
+  // 当前正在查看的收藏项（控制详情弹窗显示）
   const [viewTarget, setViewTarget] = useState<FavoriteItem | null>(null)
+  // 待删除的收藏 ID（控制删除确认弹窗显示）
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
+  // 对搜索关键词做 300ms 防抖处理，避免每次输入都触发过滤
   const debouncedKeyword = useDebounce(keyword, 300)
 
+  // 根据关键词过滤收藏列表：同时匹配问题和回答内容
   const filtered = debouncedKeyword
     ? items.filter((f) =>
         f.question.toLowerCase().includes(debouncedKeyword.toLowerCase()) ||
@@ -31,10 +52,11 @@ export function FavoritesPage() {
       )
     : items
 
+  // 确认删除收藏的回调
   const handleDeleteConfirm = () => {
     if (deleteTarget) {
       deleteMutation.mutate(deleteTarget, {
-        onSuccess: () => setDeleteTarget(null),
+        onSuccess: () => setDeleteTarget(null), // 删除成功后关闭弹窗
       })
     }
   }
@@ -46,6 +68,7 @@ export function FavoritesPage() {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
     >
+      {/* 页面标题和统计 */}
       <div className="flex items-center justify-between px-6 pt-4 pb-2">
         <h2 className="text-lg font-semibold flex items-center gap-2">
           <Star className="h-5 w-5" /> 我的收藏
@@ -53,6 +76,7 @@ export function FavoritesPage() {
         <span className="text-sm text-muted-foreground">共 {filtered.length} 条</span>
       </div>
 
+      {/* 搜索栏 */}
       <div className="px-6 pb-3">
         <div className="relative max-w-md">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -65,19 +89,24 @@ export function FavoritesPage() {
         </div>
       </div>
 
+      {/* 收藏列表 - 双列网格布局 */}
       <ScrollArea className="flex-1 px-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pb-4">
+          {/* 空状态提示 */}
           {filtered.length === 0 && (
             <p className="text-center text-muted-foreground py-12 col-span-full">暂无收藏</p>
           )}
+          {/* 遍历渲染每条收藏卡片 */}
           {filtered.map((item) => (
             <Card key={item.id} className="hover:shadow-sm transition-shadow">
               <CardContent className="py-3 px-4 space-y-2">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <Star className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                    {/* 问题标题，超长截断 */}
                     <p className="text-sm font-medium truncate">{item.question}</p>
                   </div>
+                  {/* 操作按钮：查看详情、取消收藏 */}
                   <div className="flex items-center gap-1 shrink-0">
                     <Button variant="ghost" size="icon" className="h-6 w-6"
                       onClick={() => setViewTarget(item)}>
@@ -89,9 +118,11 @@ export function FavoritesPage() {
                     </Button>
                   </div>
                 </div>
+                {/* 回答预览，最多显示 3 行 */}
                 <p className="text-xs text-muted-foreground line-clamp-3 leading-relaxed">
                   {truncate(item.answer, 120)}
                 </p>
+                {/* 收藏时间 */}
                 <p className="text-[10px] text-muted-foreground">{formatDate(item.createdAt)}</p>
               </CardContent>
             </Card>
@@ -99,6 +130,7 @@ export function FavoritesPage() {
         </div>
       </ScrollArea>
 
+      {/* 收藏详情弹窗 - 展示完整的问题、回答和会话记录 */}
       <Dialog open={!!viewTarget} onOpenChange={(v) => !v && setViewTarget(null)}>
         <DialogContent className="max-w-lg max-h-[80vh] overflow-auto">
           <DialogHeader>
@@ -114,6 +146,7 @@ export function FavoritesPage() {
                 <Badge variant="outline" className="text-[10px] mb-1">回答</Badge>
                 <p className="text-sm whitespace-pre-wrap leading-relaxed">{viewTarget.answer}</p>
               </div>
+              {/* 如果有会话记录，展示完整对话 */}
               {viewTarget.messages && viewTarget.messages.length > 0 && (
                 <div className="space-y-2">
                   <Badge variant="outline" className="text-[10px] mb-1">会话记录</Badge>
@@ -133,6 +166,7 @@ export function FavoritesPage() {
         </DialogContent>
       </Dialog>
 
+      {/* 删除确认弹窗 */}
       <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
         <DialogContent>
           <DialogHeader>

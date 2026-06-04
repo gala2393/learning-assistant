@@ -28,6 +28,24 @@ import {
 } from '@/lib/chat-session'
 import type { HistoryItem, RagSource, UserLlmConfig } from '@/types'
 
+/**
+ * ChatPage — 聊天主页，项目最核心的页面组件。
+ *
+ * 路由：/workspace/chat
+ *
+ * 功能：
+ * 1. 两种问答模式：通用模式（智能问答）和资料模式（资料问答）
+ * 2. 空状态：居中 hero 布局，显示大标题 + 资料选择器 + 输入框
+ * 3. 有消息时：上方消息列表 + 下方输入框
+ * 4. 模型切换弹窗：支持系统默认模型和用户自定义 LLM 配置
+ * 5. 通过 useSyncExternalStore 订阅 chat-session 的全局状态
+ * 6. URL 参数同步：materialId、chunkId、historyId、new
+ * 7. 快捷提示词芯片
+ * 8. 使用量提示（今日剩余次数）
+ *
+ * 状态管理：使用 External Store 模式（chat-session.ts），
+ * 而非 React useState，因为流式输出时需要高频更新（每秒 10+ 次）。
+ */
 export function ChatPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()

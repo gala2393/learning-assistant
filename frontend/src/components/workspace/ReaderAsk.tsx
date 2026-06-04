@@ -1,3 +1,22 @@
+/**
+ * ReaderAsk - 边读边问 AI 问答面板
+ *
+ * 功能说明：
+ * - 在阅读器页面的右侧/底部展示 AI 问答功能
+ * - 支持针对当前资料片段进行提问，AI 基于 RAG 检索回答
+ * - 支持选中文本后围绕选中内容追问
+ * - 支持流式回答（SSE），实时逐字展示 AI 回复
+ * - 展示推荐问题（当没有对话记录时）
+ * - 支持查看回答的检索来源，点击来源跳转到对应片段
+ * - 支持查看今日使用额度
+ * - 提供"在聊天中继续"按钮，跳转到独立聊天页面
+ *
+ * 数据流：
+ * 1. suggestQuestions() 获取推荐问题
+ * 2. chatStream() 发起流式问答，通过回调逐步更新消息
+ * 3. useRagUsage() 获取今日使用额度
+ * 4. 回答完成后刷新使用记录缓存
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Textarea } from '@/components/ui/textarea'
@@ -12,17 +31,21 @@ import { cn, truncate } from '@/lib/utils'
 import type { Material, MaterialChunk, RagSource } from '@/types'
 
 interface ReaderAskProps {
-  material: Material | null
-  chunk: MaterialChunk | null
-  chunks?: MaterialChunk[]
-  currentPageNo?: number | null
-  currentPageChunkIds?: Array<string | number>
-  onNavigateToChunk?: (chunkIndex: number) => void
+  material: Material | null                     // 当前选中的资料
+  chunk: MaterialChunk | null                   // 当前正在阅读的片段
+  chunks?: MaterialChunk[]                      // 所有片段列表（用于来源跳转）
+  currentPageNo?: number | null                 // 当前页码
+  currentPageChunkIds?: Array<string | number>  // 当前页包含的片段 ID 列表
+  onNavigateToChunk?: (chunkIndex: number) => void  // 跳转到指定片段的回调
   className?: string
 }
 
 type ReaderMessage = ChatMessage
 
+/**
+ * 构建上下文标签文字
+ * 用于在问答面板顶部显示当前上下文信息（选中文本、当前页码等）
+ */
 function buildContextLabel(selectedText?: string | null, currentPageNo?: number | null) {
   const labels: string[] = []
   if (selectedText?.trim()) labels.push('已选中文本')
@@ -40,18 +63,26 @@ export function ReaderAsk({
   className,
 }: ReaderAskProps) {
   const navigate = useNavigate()
+  // 输入框引用（用于聚焦控制）
   const questionRef = useRef<HTMLTextAreaElement>(null)
+  // 用于取消当前流式请求
   const abortRef = useRef<AbortController | null>(null)
+  // 流式回答的缓冲区（逐步累积 delta 文本）
   const answerBufferRef = useRef('')
+  // 用户选中文本的引用（不触发渲染的版本）
   const selectionRef = useRef<string | null>(null)
+  // 各消息的检索来源缓存
   const sourcesRef = useRef<Record<string, RagSource[]>>({})
-  const [question, setQuestion] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [selectedText, setSelectedText] = useState<string | null>(null)
-  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([])
-  const [messages, setMessages] = useState<ReaderMessage[]>([])
-  const [sourcesByMessageId, setSourcesByMessageId] = useState<Record<string, RagSource[]>>({})
-  const [errorByMessageId, setErrorByMessageId] = useState<Record<string, string>>({})
+
+  const [question, setQuestion] = useState('')       // 用户输入的问题
+  const [loading, setLoading] = useState(false)       // AI 是否正在回答
+  const [selectedText, setSelectedText] = useState<string | null>(null)  // 用户选中的文本
+  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([])  // 推荐问题列表
+  const [messages, setMessages] = useState<ReaderMessage[]>([])  // 对话消息列表
+  const [sourcesByMessageId, setSourcesByMessageId] = useState<Record<string, RagSource[]>>({})  // 来源映射
+  const [errorByMessageId, setErrorByMessageId] = useState<Record<string, string>>({})  // 错误映射
+
+  // 获取今日使用额度
   const { data: ragUsage } = useRagUsage()
   const usageLabel = ragUsage
     ? ragUsage.unlimited
@@ -59,13 +90,16 @@ export function ReaderAsk({
       : `今日剩余：${ragUsage.remainingToday ?? 0}/${ragUsage.dailyLimit}`
     : ''
   const usageExhausted = !!ragUsage && !ragUsage.unlimited && (ragUsage.remainingToday ?? 0) <= 0
+  // 是否可以提问
   const canAsk = question.trim().length > 0 && !loading && !!material && !usageExhausted
 
+  // 构建上下文标签
   const contextLabel = useMemo(
     () => buildContextLabel(selectedText, currentPageNo),
     [selectedText, currentPageNo],
   )
 
+  // 监听鼠标松开事件，捕获用户选中的文本（长度 5~500 字符才生效）
   useEffect(() => {
     const handleMouseUp = () => {
       const sel = window.getSelection()
@@ -79,10 +113,12 @@ export function ReaderAsk({
     return () => document.removeEventListener('mouseup', handleMouseUp)
   }, [])
 
+  // 组件卸载时取消未完成的流式请求
   useEffect(() => {
     return () => abortRef.current?.abort()
   }, [])
 
+  // 当资料或片段变化时，请求推荐问题
   useEffect(() => {
     if (!material || !chunk) {
       setSuggestedQuestions([])
@@ -93,6 +129,7 @@ export function ReaderAsk({
       .catch(() => setSuggestedQuestions([]))
   }, [material?.id, chunk?.id])
 
+  /** 点击检索来源时，跳转到对应的片段 */
   const openSource = useCallback(
     (source: RagSource) => {
       const idx = chunks?.findIndex((c) => c.id === source.chunkId)
@@ -103,12 +140,22 @@ export function ReaderAsk({
     [chunks, onNavigateToChunk],
   )
 
+  /**
+   * 提交问题的核心逻辑：
+   * 1. 创建用户消息和空的 AI 消息
+   * 2. 调用 chatStream() 发起 SSE 流式请求
+   * 3. 通过 onStatus/onChunk/onSources/onDone/onError 回调逐步更新消息
+   * 4. 完成后刷新使用额度和管理员使用记录缓存
+   */
   const submitQuestion = useCallback((rawQuestion: string, selection?: string | null) => {
     const q = rawQuestion.trim()
     if (!q || loading || !material) return
 
+    // 生成唯一的消息 ID
     const userId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const assistantId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+    // 构建对话历史（最近 8 轮，排除错误和思考中的消息）
     const history = messages
       .filter((msg) => !msg.thinking && !msg.error)
       .slice(-8)
@@ -119,6 +166,7 @@ export function ReaderAsk({
 
     setLoading(true)
     setQuestion('')
+    // 添加用户消息和 AI 思考中占位消息
     setMessages((prev) => [
       ...prev,
       { id: userId, role: 'user', text: q },
@@ -128,8 +176,9 @@ export function ReaderAsk({
     setSourcesByMessageId((prev) => ({ ...prev, [assistantId]: [] }))
     setErrorByMessageId((prev) => ({ ...prev, [assistantId]: '' }))
     answerBufferRef.current = ''
-    abortRef.current?.abort()
+    abortRef.current?.abort()  // 取消之前的请求
 
+    // 发起流式请求
     abortRef.current = chatStream(
       {
         question: q,
@@ -143,8 +192,9 @@ export function ReaderAsk({
         history,
       },
       {
+        // 收到状态更新（如"正在检索"）
         onStatus: (status) => {
-          if (answerBufferRef.current.trim()) return
+          if (answerBufferRef.current.trim()) return  // 已有内容时忽略状态消息
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantId
@@ -153,6 +203,7 @@ export function ReaderAsk({
             ),
           )
         },
+        // 收到流式文本片段
         onChunk: (delta) => {
           answerBufferRef.current += delta
           setMessages((prev) =>
@@ -163,10 +214,12 @@ export function ReaderAsk({
             ),
           )
         },
+        // 收到检索来源
         onSources: (sources) => {
           sourcesRef.current = { ...sourcesRef.current, [assistantId]: sources }
           setSourcesByMessageId((prev) => ({ ...prev, [assistantId]: sources }))
         },
+        // 流式回答完成
         onDone: (result) => {
           setMessages((prev) =>
             prev.map((msg) =>
@@ -184,6 +237,7 @@ export function ReaderAsk({
           queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
           queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
         },
+        // 请求出错
         onError: (msg) => {
           setErrorByMessageId((prev) => ({ ...prev, [assistantId]: msg }))
           setMessages((prev) =>
@@ -201,6 +255,7 @@ export function ReaderAsk({
     )
   }, [chunk?.id, currentPageChunkIds, currentPageNo, loading, material, messages])
 
+  /** 提交问题（组合选中文本） */
   const handleSubmit = () => {
     const selection = selectionRef.current ?? selectedText
     submitQuestion(question, selection)
@@ -208,6 +263,7 @@ export function ReaderAsk({
     selectionRef.current = null
   }
 
+  /** 键盘快捷键：Enter 提交（Shift+Enter 换行） */
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -217,6 +273,7 @@ export function ReaderAsk({
 
   return (
     <div className={cn('flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-t bg-muted/10 lg:border-l lg:border-t-0', className)}>
+      {/* 面板头部：标题 + 使用额度 */}
       <div className="space-y-2 border-b p-3">
         <div className="flex items-center justify-between gap-2">
           <p className="flex items-center gap-1 text-xs font-semibold text-muted-foreground">
@@ -228,6 +285,7 @@ export function ReaderAsk({
             </Badge>
           )}
         </div>
+        {/* 上下文标签（选中文本/当前页） */}
         {contextLabel && (
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
             <Badge variant="secondary" className="text-[10px]">
@@ -237,6 +295,7 @@ export function ReaderAsk({
         )}
       </div>
 
+      {/* 当前片段上下文预览 */}
       {chunk && (
         <div className="border-b px-3 py-2">
           <Badge variant="outline" className="mb-1 text-[10px]">当前上下文</Badge>
@@ -246,6 +305,7 @@ export function ReaderAsk({
         </div>
       )}
 
+      {/* 选中文本面板（选中文本后显示） */}
       {selectedText && (
         <div className="space-y-2 border-b bg-primary/5 px-3 py-2">
           <div className="flex items-center justify-between gap-2">
@@ -276,6 +336,7 @@ export function ReaderAsk({
         </div>
       )}
 
+      {/* 对话消息流 */}
       <div className="min-h-0 flex-1 overflow-hidden">
         <ChatThread
           messages={messages.map((msg) => ({
@@ -287,6 +348,7 @@ export function ReaderAsk({
         />
       </div>
 
+      {/* 推荐问题（仅在无对话记录时显示） */}
       {!messages.length && !loading && (
         <div className="px-3 pb-2">
           {suggestedQuestions.length > 0 && (
@@ -306,6 +368,7 @@ export function ReaderAsk({
         </div>
       )}
 
+      {/* 底部输入区域 */}
       <div className="shrink-0 space-y-2 border-t p-3">
         <Textarea
           ref={questionRef}
@@ -320,6 +383,7 @@ export function ReaderAsk({
           className="min-h-[64px] resize-none text-sm"
           disabled={!material || usageExhausted}
         />
+        {/* 提交和清空按钮 */}
         <div className="flex items-center gap-2">
           <Button
             size="sm"
@@ -349,6 +413,7 @@ export function ReaderAsk({
             <Trash2 className="mr-1 h-3.5 w-3.5" /> 清空
           </Button>
         </div>
+        {/* 跳转到独立聊天页面的按钮 */}
         <Button
           variant="outline"
           size="sm"
@@ -367,6 +432,7 @@ export function ReaderAsk({
   )
 }
 
+/** 将流式请求的状态阶段转换为中文提示文字 */
 function streamStatusText(status: { stage?: string; message?: string }) {
   if (status.message?.trim()) return status.message.trim()
   if (status.stage === 'searching') return '正在检索相关资料...'

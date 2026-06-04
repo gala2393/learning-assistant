@@ -1,3 +1,4 @@
+// 对话框组件 - 模态弹窗，包含遮罩层、内容区、头部、底部、标题、描述等子组件
 import * as React from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { X } from 'lucide-react'

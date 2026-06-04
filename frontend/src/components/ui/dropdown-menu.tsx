@@ -1,3 +1,4 @@
+// 下拉菜单组件 - 点击触发的浮动菜单，支持子菜单、分组、单选组等
 import * as React from 'react'
 import * as DropdownMenuPrimitive from '@radix-ui/react-dropdown-menu'
 import { Check, ChevronRight, Circle } from 'lucide-react'

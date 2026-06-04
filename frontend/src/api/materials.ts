@@ -3,62 +3,85 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
 import type { Material, MaterialChunk, MaterialPage, PageResult } from '@/types'
 
-const LARGE_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024
-export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024
-const PROCESSING_POLL_INTERVAL_MS = 1500
-const PROCESSING_TIMEOUT_MS = 15 * 60 * 1000
-const CHUNK_UPLOAD_RETRY_COUNT = 3
+/**
+ * 资料管理 API 模块 — 处理学习资料的上传、查询、分片上传、删除等操作。
+ *
+ * 核心功能：
+ * 1. 普通上传（小文件）— 一次性 POST 文件
+ * 2. 分片上传（大文件）— 5MB 一片，逐片上传，支持断点续传
+ * 3. 上传后轮询状态 — 每 1.5 秒检查后端解析进度
+ * 4. 资料 CRUD — 查询列表、详情、分块、更新标题、删除
+ */
 
+// ===== 常量 =====
+const LARGE_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024       // 每片 5MB
+export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024      // 最大 500MB
+const PROCESSING_POLL_INTERVAL_MS = 1500               // 轮询间隔 1.5 秒
+const PROCESSING_TIMEOUT_MS = 15 * 60 * 1000           // 最长等待 15 分钟
+const CHUNK_UPLOAD_RETRY_COUNT = 3                     // 每片最多重试 3 次
+
+/**
+ * 上传会话 — 大文件分片上传的会话对象。
+ * 后端在创建会话时返回，记录上传进度和解析状态。
+ */
 export interface UploadSession {
-  sessionId: string
-  clientUploadId: string
-  materialId: string | null
-  title: string
-  originalName: string
-  sourceType: string
-  sourceUrl: string | null
-  fileSize: number
-  chunkSize: number
-  totalChunks: number
-  uploadedChunks: number
+  sessionId: string           // 会话 ID
+  clientUploadId: string      // 客户端生成的上传 ID（防重复提交）
+  materialId: string | null   // 关联的资料 ID（解析完成后赋值）
+  title: string               // 资料标题
+  originalName: string        // 原始文件名
+  sourceType: string          // 文件类型（PDF/DOCX/PPTX 等）
+  sourceUrl: string | null    // 来源 URL（网页导入时）
+  fileSize: number            // 文件总大小（字节）
+  chunkSize: number           // 每片大小（5MB）
+  totalChunks: number         // 总片数
+  uploadedChunks: number      // 已上传片数
   status: 'UPLOADING' | 'PROCESSING' | 'SUCCESS' | 'FAILED'
   errorMessage: string | null
-  parseProgressPercent?: number | null
-  parseStage?: string | null
-  parseMessage?: string | null
+  parseProgressPercent?: number | null  // 解析进度百分比
+  parseStage?: string | null            // 当前解析阶段
+  parseMessage?: string | null          // 解析阶段附加信息
   createdAt: string
   updatedAt: string
 }
 
+/** 上传进度回调数据 — 用于显示进度条 */
 export interface UploadProgress {
-  phase: 'uploading' | 'processing'
-  percent: number
+  phase: 'uploading' | 'processing'  // 上传阶段 / 解析阶段
+  percent: number                     // 百分比
   uploadedChunks: number
   totalChunks: number
-  stage?: string | null
-  message?: string | null
+  stage?: string | null               // 解析阶段描述
+  message?: string | null             // 附加信息
 }
 
+// ===== 纯 API 函数 =====
+
+/** 获取当前用户的资料列表 */
 export async function listMaterials(): Promise<Material[]> {
   const { data } = await api.get('/materials')
   return (data || []).map(normalizeMaterial)
 }
 
+/** 获取单个资料详情 */
 export async function getMaterial(id: string): Promise<Material> {
   const { data } = await api.get(`/materials/${id}`)
   return normalizeMaterial(data)
 }
 
+/** 获取资料的所有文本分块（用于阅读器） */
 export async function getMaterialChunks(id: string): Promise<MaterialChunk[]> {
   const { data } = await api.get(`/materials/${id}/chunks`)
   return (data || []).map(normalizeChunk)
 }
 
+/** 获取资料的页面列表（PDF/DOCX 预览用） */
 export async function getMaterialPages(id: string): Promise<MaterialPage[]> {
   const { data } = await api.get(`/materials/${id}/pages`)
   return data
 }
 
+/** 获取资料原始文件（二进制 Blob，用于 PDF 预览等） */
 export async function getMaterialFile(id: string) {
   const response = await api.get(`/materials/${id}/file`, { responseType: 'blob' })
   return {
@@ -68,11 +91,13 @@ export async function getMaterialFile(id: string) {
   }
 }
 
+/** 创建文件访问临时票据（用于安全打开原文件） */
 export async function createMaterialFileTicket(id: string): Promise<{ ticket: string; url: string; expiresAt: number }> {
   const { data } = await api.post(`/materials/${id}/file-ticket`)
   return data
 }
 
+/** 普通上传（小文件）— 一次性 POST FormData */
 export async function uploadMaterial(params: { file: File; title?: string; sourceType?: string; sourceUrl?: string }): Promise<Material> {
   const formData = new FormData()
   formData.append('file', params.file)
@@ -83,24 +108,19 @@ export async function uploadMaterial(params: { file: File; title?: string; sourc
   return normalizeMaterial(data)
 }
 
+/** 网页导入 — 输入 URL，后端抓取网页内容并创建资料 */
 export async function importWebMaterial(params: { title?: string; sourceUrl: string }): Promise<Material> {
   const { data } = await api.post('/materials/web', params)
   return normalizeMaterial(data)
 }
 
-export async function createUploadSession(payload: {
-  clientUploadId: string
-  title: string
-  originalName: string
-  fileSize: number
-  chunkSize: number
-  sourceType: string
-  sourceUrl?: string
-}) {
+/** 创建分片上传会话 */
+export async function createUploadSession(payload: { clientUploadId: string; title: string; originalName: string; fileSize: number; chunkSize: number; sourceType: string; sourceUrl?: string }) {
   const { data } = await api.post('/materials/upload-sessions', payload)
   return normalizeUploadSession(data)
 }
 
+/** 上传单个分片 */
 export async function uploadChunk(sessionId: string, params: { chunk: Blob; chunkIndex: number; totalChunks: number; checksumSha256?: string }) {
   const formData = new FormData()
   formData.append('chunk', params.chunk)
@@ -111,10 +131,8 @@ export async function uploadChunk(sessionId: string, params: { chunk: Blob; chun
   return normalizeUploadSession(data)
 }
 
-async function uploadChunkWithRetry(
-  sessionId: string,
-  params: { chunk: Blob; chunkIndex: number; totalChunks: number; checksumSha256?: string },
-) {
+/** 带重试的分片上传 — 每片最多重试 3 次，间隔递增（600ms×次数） */
+async function uploadChunkWithRetry(sessionId: string, params: { chunk: Blob; chunkIndex: number; totalChunks: number; checksumSha256?: string }) {
   let lastError: unknown = null
   for (let attempt = 0; attempt < CHUNK_UPLOAD_RETRY_COUNT; attempt += 1) {
     try {
@@ -122,18 +140,31 @@ async function uploadChunkWithRetry(
     } catch (error) {
       lastError = error
       if (attempt < CHUNK_UPLOAD_RETRY_COUNT - 1) {
-        await sleep(600 * (attempt + 1))
+        await sleep(600 * (attempt + 1))  // 等待 600ms、1200ms
       }
     }
   }
   throw lastError instanceof Error ? lastError : new Error('分片上传失败，请检查网络后重试')
 }
 
+/** 查询上传会话状态（用于轮询解析进度） */
 export async function getUploadSession(sessionId: string) {
   const { data } = await api.get(`/materials/upload-sessions/${sessionId}`)
   return normalizeUploadSession(data)
 }
 
+/**
+ * 分片上传完整流程 — 这是大文件上传的主函数。
+ *
+ * 流程：
+ * 1. 创建上传会话
+ * 2. 将文件按 5MB 切片，逐片上传（带重试）
+ * 3. 所有片上传完成后，等待后端解析（轮询状态）
+ * 4. 返回最终的 UploadSession
+ *
+ * @param params     文件和元数据
+ * @param onProgress 进度回调（用于前端显示进度条）
+ */
 export async function uploadMaterialInChunks(
   params: { file: File; title?: string; sourceType: string; sourceUrl?: string },
   onProgress?: (progress: UploadProgress) => void,
@@ -143,6 +174,7 @@ export async function uploadMaterialInChunks(
   }
   const chunkSize = LARGE_UPLOAD_CHUNK_SIZE
   const totalChunks = Math.max(1, Math.ceil(params.file.size / chunkSize))
+  // 创建会话
   const session = await createUploadSession({
     clientUploadId: buildClientUploadId(params.file),
     title: params.title?.trim() || params.file.name,
@@ -152,196 +184,78 @@ export async function uploadMaterialInChunks(
     fileSize: params.file.size,
     chunkSize,
   })
-
+  // 逐片上传（从断点继续）
   let latest = session as UploadSession
   for (let index = latest.uploadedChunks || 0; index < totalChunks; index++) {
     const start = index * chunkSize
     const end = Math.min(params.file.size, start + chunkSize)
     latest = await uploadChunkWithRetry(latest.sessionId, {
-      chunk: params.file.slice(start, end),
-      chunkIndex: index,
-      totalChunks,
+      chunk: params.file.slice(start, end), chunkIndex: index, totalChunks,
     }) as UploadSession
-    onProgress?.({
-      phase: 'uploading',
-      percent: Math.round(((index + 1) / totalChunks) * 100),
-      uploadedChunks: index + 1,
-      totalChunks,
-    })
+    onProgress?.({ phase: 'uploading', percent: Math.round(((index + 1) / totalChunks) * 100), uploadedChunks: index + 1, totalChunks })
   }
-
-  if (latest.status === 'FAILED') {
-    throw new Error(latest.errorMessage || '上传处理失败')
-  }
+  if (latest.status === 'FAILED') throw new Error(latest.errorMessage || '上传处理失败')
+  // 等待后端解析完成
   return waitForUploadProcessing(latest.sessionId, totalChunks, onProgress)
 }
 
-async function waitForUploadProcessing(
-  sessionId: string,
-  totalChunks: number,
-  onProgress?: (progress: UploadProgress) => void,
-): Promise<UploadSession> {
+/** 轮询等待后端解析完成 — 每 1.5 秒检查一次，最长等 15 分钟 */
+async function waitForUploadProcessing(sessionId: string, totalChunks: number, onProgress?: (progress: UploadProgress) => void) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < PROCESSING_TIMEOUT_MS) {
-    const session = await getUploadSession(sessionId) as UploadSession
+    const session = await getUploadSession(sessionId)
     if (session.status === 'SUCCESS') {
-      onProgress?.({
-        phase: 'processing',
-        percent: 100,
-        uploadedChunks: totalChunks,
-        totalChunks,
-        stage: session.parseStage || '解析完成',
-        message: session.parseMessage || '资料已经可以使用',
-      })
+      onProgress?.({ phase: 'processing', percent: 100, uploadedChunks: totalChunks, totalChunks, stage: session.parseStage || '解析完成', message: session.parseMessage || '资料已经可以使用' })
       return session
     }
-    if (session.status === 'FAILED') {
-      throw new Error(session.errorMessage || '资料解析失败')
-    }
-    onProgress?.({
-      phase: 'processing',
-      percent: normalizeProcessingPercent(session.parseProgressPercent),
-      uploadedChunks: totalChunks,
-      totalChunks,
-      stage: session.parseStage || '后台解析中',
-      message: session.parseMessage,
-    })
+    if (session.status === 'FAILED') throw new Error(session.errorMessage || '资料解析失败')
+    onProgress?.({ phase: 'processing', percent: normalizeProcessingPercent(session.parseProgressPercent), uploadedChunks: totalChunks, totalChunks, stage: session.parseStage || '后台解析中', message: session.parseMessage })
     await sleep(PROCESSING_POLL_INTERVAL_MS)
   }
   throw new Error('资料仍在后台解析，请稍后刷新资料列表查看结果')
 }
 
+/** 生成客户端上传 ID（文件名+大小+最后修改时间的组合，用于防重复上传） */
 function buildClientUploadId(file: File): string {
-  return [
-    'web',
-    file.name,
-    file.size,
-    file.lastModified,
-  ].join('-').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180)
+  return ['web', file.name, file.size, file.lastModified].join('-').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180)
 }
+function sleep(ms: number) { return new Promise((resolve) => window.setTimeout(resolve, ms)) }
+function normalizeProcessingPercent(percent?: number | null) { if (typeof percent !== 'number' || Number.isNaN(percent)) return 5; return Math.max(0, Math.min(99, Math.round(percent))) }
+function normalizeMaterial(material: Material): Material { return { ...material, id: String(material.id), parseProgressPercent: typeof material.parseProgressPercent === 'number' ? material.parseProgressPercent : null } }
+function normalizeChunk(chunk: MaterialChunk): MaterialChunk { return { ...chunk, id: String(chunk.id), materialId: String(chunk.materialId) } }
+function normalizeUploadSession(session: UploadSession): UploadSession { return { ...session, materialId: session.materialId == null ? null : String(session.materialId) } }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-function normalizeProcessingPercent(percent?: number | null): number {
-  if (typeof percent !== 'number' || Number.isNaN(percent)) return 5
-  return Math.max(0, Math.min(99, Math.round(percent)))
-}
-
-function normalizeMaterial(material: Material): Material {
-  return {
-    ...material,
-    id: String(material.id),
-    parseProgressPercent: typeof material.parseProgressPercent === 'number' ? material.parseProgressPercent : null,
-  }
-}
-
-function normalizeChunk(chunk: MaterialChunk): MaterialChunk {
-  return {
-    ...chunk,
-    id: String(chunk.id),
-    materialId: String(chunk.materialId),
-  }
-}
-
-function normalizeUploadSession(session: UploadSession): UploadSession {
-  return {
-    ...session,
-    materialId: session.materialId == null ? null : String(session.materialId),
-  }
-}
-
+/** 更新资料信息（标题、来源 URL） */
 export async function updateMaterial(id: string, payload: { title?: string; sourceUrl?: string }): Promise<Material> {
   const { data } = await api.put(`/materials/${id}`, payload)
   return normalizeMaterial(data)
 }
 
+/** 重新解析资料 */
 export async function reparseMaterial(id: string): Promise<Material> {
   const { data } = await api.post(`/materials/${id}/reparse`)
   return normalizeMaterial(data)
 }
 
+/** 删除资料（同时删除分块和文件） */
 export async function deleteMaterial(id: string): Promise<void> {
   await api.delete(`/materials/${id}`)
 }
 
+// ===== React Hooks =====
+
+/** 资料列表 query — 有资料在解析中时每 1.5 秒自动刷新（显示实时进度） */
 export function useMaterials() {
-  return useQuery({
-    queryKey: ['materials'],
-    queryFn: listMaterials,
-    refetchInterval: (query) => {
-      const data = query.state.data as Material[] | undefined
-      return data?.some(isMaterialParsing) ? 1500 : false
-    },
-  })
+  return useQuery({ queryKey: ['materials'], queryFn: listMaterials,
+    refetchInterval: (query) => { const data = query.state.data as Material[] | undefined; return data?.some(isMaterialParsing) ? 1500 : false } })
 }
+function isMaterialParsing(m: Material) { return ['PENDING', 'PARSING', 'PROCESSING'].includes(m.parseStatus) && (m.parseProgressPercent ?? 0) < 100 }
 
-function isMaterialParsing(material: Material): boolean {
-  return ['PENDING', 'PARSING', 'PROCESSING'].includes(material.parseStatus)
-    && (material.parseProgressPercent ?? 0) < 100
-}
-
-export function useMaterial(id: string | null) {
-  return useQuery({
-    queryKey: ['materials', id],
-    queryFn: () => getMaterial(id!),
-    enabled: !!id,
-  })
-}
-
-export function useMaterialChunks(id: string | null) {
-  return useQuery({
-    queryKey: ['materials', id, 'chunks'],
-    queryFn: () => getMaterialChunks(id!),
-    enabled: !!id,
-  })
-}
-
-export function useMaterialPages(id: string | null) {
-  return useQuery({
-    queryKey: ['materials', id, 'pages'],
-    queryFn: () => getMaterialPages(id!),
-    enabled: !!id,
-  })
-}
-
-export function useUploadMaterial() {
-  return useMutation({
-    mutationFn: uploadMaterial,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }),
-  })
-}
-
-export function useImportWebMaterial() {
-  return useMutation({
-    mutationFn: importWebMaterial,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }),
-  })
-}
-
-export function useUpdateMaterial() {
-  return useMutation({
-    mutationFn: ({ id, payload }: { id: string; payload: { title?: string; sourceUrl?: string } }) => updateMaterial(id, payload),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }),
-  })
-}
-
-export function useReparseMaterial() {
-  return useMutation({
-    mutationFn: reparseMaterial,
-    onSuccess: (_material, id) => {
-      queryClient.invalidateQueries({ queryKey: ['materials'] })
-      queryClient.invalidateQueries({ queryKey: ['materials', id] })
-      queryClient.invalidateQueries({ queryKey: ['materials', id, 'chunks'] })
-      queryClient.invalidateQueries({ queryKey: ['history'] })
-    },
-  })
-}
-
-export function useDeleteMaterial() {
-  return useMutation({
-    mutationFn: deleteMaterial,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }),
-  })
-}
+export function useMaterial(id: string | null) { return useQuery({ queryKey: ['materials', id], queryFn: () => getMaterial(id!), enabled: !!id }) }
+export function useMaterialChunks(id: string | null) { return useQuery({ queryKey: ['materials', id, 'chunks'], queryFn: () => getMaterialChunks(id!), enabled: !!id }) }
+export function useMaterialPages(id: string | null) { return useQuery({ queryKey: ['materials', id, 'pages'], queryFn: () => getMaterialPages(id!), enabled: !!id }) }
+export function useUploadMaterial() { return useMutation({ mutationFn: uploadMaterial, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }
+export function useImportWebMaterial() { return useMutation({ mutationFn: importWebMaterial, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }
+export function useUpdateMaterial() { return useMutation({ mutationFn: ({ id, payload }: { id: string; payload: { title?: string; sourceUrl?: string } }) => updateMaterial(id, payload), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }
+export function useReparseMaterial() { return useMutation({ mutationFn: reparseMaterial, onSuccess: (_m, id) => { queryClient.invalidateQueries({ queryKey: ['materials'] }); queryClient.invalidateQueries({ queryKey: ['materials', id] }); queryClient.invalidateQueries({ queryKey: ['materials', id, 'chunks'] }); queryClient.invalidateQueries({ queryKey: ['history'] }) } }) }
+export function useDeleteMaterial() { return useMutation({ mutationFn: deleteMaterial, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }

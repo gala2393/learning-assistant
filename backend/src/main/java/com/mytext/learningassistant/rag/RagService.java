@@ -61,53 +61,199 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * RAG（检索增强生成）核心业务服务。
+ * <p>
+ * 这是整个学习助手系统最核心的类，负责将用户的提问与上传的学习资料进行智能匹配，
+ * 再借助大语言模型（LLM）生成高质量的回答。
+ * <p>
+ * <h3>核心 RAG 流程概述：</h3>
+ * <ol>
+ *   <li><b>查询理解</b>：分析用户问题意图（定义、对比、功能等），提取关键词</li>
+ *   <li><b>多路检索</b>：同时执行向量语义检索 + BM25 关键词检索 + 摘要种子检索</li>
+ *   <li><b>混合融合与重排</b>：将多路检索结果按权重融合，再通过 Reranker 精排</li>
+ *   <li><b>上下文构建</b>：选出最优片段，组装成 LLM 能理解的上下文</li>
+ *   <li><b>LLM 生成</b>：调用大模型生成回答，支持普通模式和流式模式</li>
+ *   <li><b>后处理</b>：装饰回答（添加引用依据）、记录使用日志、保存问答历史</li>
+ * </ol>
+ * <p>
+ * <h3>其他功能：</h3>
+ * <ul>
+ *   <li>通用聊天模式（不依赖资料的自由问答）</li>
+ *   <li>资料摘要生成</li>
+ *   <li>问答历史管理（收藏、置顶、删除）</li>
+ *   <li>RAG 质量评估（忠实度、相关性评分）</li>
+ *   <li>评估套件（批量测试用例 + 定时评估）</li>
+ *   <li>图片多模态支持（从资料中提取图片发送给视觉模型）</li>
+ * </ul>
+ *
+ * @see ThirdPartyLlmClient 大语言模型调用客户端
+ * @see EmbeddingClient 向量嵌入客户端
+ * @see RerankerClient 重排序客户端
+ * @see VectorStoreClient 向量存储客户端
+ */
 @Service
 public class RagService {
 
+    // ========== 常量定义 ==========
+
+    /** 日期时间格式化器，用于将 LocalDateTime 格式化为 "yyyy-MM-dd HH:mm:ss" */
     private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    /** JSON 序列化/反序列化工具，用于解析嵌入向量、评估结果等 JSON 数据 */
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    /** 上下文片段的最大字符数限制（约 1 万字符），防止发送给 LLM 的上下文过长 */
     private static final int MAX_CONTEXT_CHARS = 10_000;
+
+    /** BM25 索引缓存的最大条目数，避免内存无限增长 */
     private static final int BM25_CACHE_MAX_ENTRIES = 64;
+
+    /** 检索结果缓存的最大条目数，对相同查询复用检索结果以提高响应速度 */
     private static final int RETRIEVAL_CACHE_MAX_ENTRIES = 128;
+
+    /** 普通用户每天的聊天次数上限（管理员和自定义模型用户不受此限制） */
     private static final int USER_DAILY_CHAT_LIMIT = 100;
+
+    /** 每次请求用户最多上传的图片数量 */
     private static final int MAX_USER_IMAGES_PER_REQUEST = 4;
+
+    /** 单张用户图片 Base64 编码的最大字符数（约 2MB 图片大小） */
     private static final int MAX_USER_IMAGE_BASE64_CHARS = 2_800_000;
+    // ========== 正则匹配模式：用于问题意图识别 ==========
+
+    /**
+     * "局部上下文问题"的正则匹配模式。
+     * 用于判断用户是否在问"这一页讲什么"、"当前内容"、"本章"等与当前阅读位置相关的问题。
+     * 匹配时会优先使用当前页/章节的片段，而不是全局检索。
+     */
     private static final Pattern LOCAL_CONTEXT_QUESTION_PATTERN = Pattern.compile(
         "(?i)(this|current|page|chapter|section|paragraph|chunk|slide|这里|这页|这一页|本页|当前页|这个页面|这章|这一章|本章|当前章节|这一节|本节|当前内容|这段|这一段|这部分|这里面|讲什么|说什么|主要内容|总结一下|概括)"
     );
+    /**
+     * "资料概览问题"的正则匹配模式。
+     * 用于判断用户是否在问"这是什么书"、"介绍一下"、"概括"等关于整份资料的问题。
+     * 匹配时会返回资料的前几个片段作为概览上下文。
+     */
     private static final Pattern MATERIAL_OVERVIEW_QUESTION_PATTERN = Pattern.compile(
         "(?i)(what\\s+(?:is|does).*?(?:book|document|material)|summari[sz]e|overview|introduce|about|"
             + "\\u8fd9(?:\\u662f)?\\u4ec0\\u4e48(?:\\u4e66|\\u8d44\\u6599|\\u6587\\u6863|\\u6587\\u4ef6)|"
             + "\\u8fd9\\u672c\\u4e66|\\u8fd9\\u4efd(?:\\u8d44\\u6599|\\u6587\\u6863|\\u6587\\u4ef6)|"
             + "\\u8bb2\\u4ec0\\u4e48|\\u4ecb\\u7ecd\\u4e00\\u4e0b|\\u7b80\\u4ecb|\\u6982\\u62ec|\\u4e3b\\u8981\\u5185\\u5bb9)"
     );
+    /**
+     * "术语定义问题"的正则匹配模式。
+     * 用于提取"什么是 XXX"、"定义 XXX"、"what is XXX"等定义类问题中的核心术语。
+     * 通过捕获组(1)提取术语名称，用于后续精确的关键词检索。
+     */
     private static final Pattern TERM_DEFINITION_PATTERN = Pattern.compile(
         "(?i)(?:什么是|何为|解释一下|解释|定义|含义|概念|define|definition of|what is|what are)\\s*[\"“'‘]?([^\"”'’？?，,。；;：:\\n]{2,80})[\"”'’]?"
     );
 
+    // ========== 依赖注入：数据访问层 ==========
+
+    /** 学习资料仓库，用于查询用户上传的资料信息 */
     private final LearningMaterialRepository learningMaterialRepository;
+
+    /** 资料片段仓库，用于查询被切分后的资料块（chunk） */
     private final MaterialChunkRepository materialChunkRepository;
+
+    /** RAG 问答记录仓库，保存每次问答的问题和回答 */
     private final RagQuestionRepository ragQuestionRepository;
+
+    /** 问答来源仓库，保存每个回答引用的资料片段来源 */
     private final RagQuestionSourceRepository ragQuestionSourceRepository;
+
+    /** 用户反馈仓库，保存用户对回答的评价（点赞/踩） */
     private final RagFeedbackRepository ragFeedbackRepository;
+
+    /** 单条评估仓库，保存单次问答的质量评估结果 */
     private final RagEvaluationRepository ragEvaluationRepository;
+
+    /** 评估套件仓库，管理批量评估测试套件 */
     private final RagEvaluationSuiteRepository ragEvaluationSuiteRepository;
+
+    /** 评估套件用例仓库，保存套件中的测试用例 */
     private final RagEvaluationSuiteCaseRepository ragEvaluationSuiteCaseRepository;
+
+    /** 评估套件运行记录仓库，保存每次套件运行的结果 */
     private final RagEvaluationSuiteRunRepository ragEvaluationSuiteRunRepository;
+
+    /** 用户收藏仓库，管理用户收藏的问答记录 */
     private final UserFavoriteRepository userFavoriteRepository;
+
+    /** 资料摘要仓库，保存资料的自动/手动生成摘要 */
     private final MaterialSummaryRepository materialSummaryRepository;
+
+    /** 用户仓库，用于查询用户角色（判断是否为管理员） */
     private final UserRepository userRepository;
+
+    /** 使用记录仓库，用于记录 Token 消耗等操作日志 */
     private final UsageRecordRepository usageRecordRepository;
+
+    // ========== 依赖注入：AI 能力层 ==========
+
+    /** 第三方大语言模型客户端，负责调用 LLM 生成回答 */
     private final ThirdPartyLlmClient thirdPartyLlmClient;
+
+    /** 向量嵌入客户端，负责将文本转换为向量表示 */
     private final EmbeddingClient embeddingClient;
+
+    /** 向量嵌入配置属性（topK、scoreThreshold 等） */
     private final EmbeddingProperties embeddingProperties;
+
+    /** 重排序客户端，对检索结果进行精排（cross-encoder reranking） */
     private final RerankerClient rerankerClient;
+
+    /** 向量存储客户端，用于外部向量数据库的检索（如 Milvus、Qdrant 等） */
     private final VectorStoreClient vectorStoreClient;
+
+    /** 查询扩展配置属性（是否启用 HyDE、扩展查询数量等） */
     private final QueryExpansionProperties queryExpansionProperties;
+
+    // ========== 内部状态 ==========
+
+    /** 文件存储根目录，资料文件和资源文件的存放位置 */
     private final Path storageRoot;
+
+    /**
+     * BM25 索引缓存。
+     * key = 用户/资料ID + 资料元数据摘要，value = 预构建的 BM25 评分器。
+     * 避免每次查询都重建倒排索引。
+     */
     private final ConcurrentMap<String, Bm25IndexCacheEntry> bm25IndexCache = new ConcurrentHashMap<>();
+
+    /**
+     * 检索结果缓存。
+     * key = 用户/资料ID + 问题哈希 + 资料元数据，value = 上次检索的排序结果。
+     * 当用户短时间内重复提问相似问题时可直接复用。
+     */
     private final ConcurrentMap<String, RetrievalCacheEntry> retrievalResultCache = new ConcurrentHashMap<>();
 
+    /**
+     * 构造函数，通过 Spring 依赖注入初始化所有必要的组件。
+     *
+     * @param learningMaterialRepository 学习资料仓库
+     * @param materialChunkRepository    资料片段仓库
+     * @param ragQuestionRepository      问答记录仓库
+     * @param ragQuestionSourceRepository 问答来源仓库
+     * @param ragFeedbackRepository      用户反馈仓库
+     * @param ragEvaluationRepository    评估结果仓库
+     * @param ragEvaluationSuiteRepository 评估套件仓库
+     * @param ragEvaluationSuiteCaseRepository 评估用例仓库
+     * @param ragEvaluationSuiteRunRepository 评估运行记录仓库
+     * @param userFavoriteRepository     用户收藏仓库
+     * @param materialSummaryRepository  资料摘要仓库
+     * @param userRepository             用户仓库
+     * @param usageRecordRepository      使用记录仓库
+     * @param thirdPartyLlmClient        大语言模型客户端
+     * @param embeddingClient            向量嵌入客户端
+     * @param embeddingProperties        嵌入配置属性
+     * @param rerankerClient             重排序客户端
+     * @param vectorStoreClient          向量存储客户端
+     * @param queryExpansionProperties   查询扩展配置
+     * @param storageDir                 文件存储目录路径（从配置文件读取）
+     */
     public RagService(
         LearningMaterialRepository learningMaterialRepository,
         MaterialChunkRepository materialChunkRepository,
@@ -152,19 +298,46 @@ public class RagService {
         this.storageRoot = Path.of(storageDir).toAbsolutePath().normalize();
     }
 
+    // ========== 核心 RAG 问答接口 ==========
+
+    /**
+     * RAG 普通问答（非流式）——核心入口方法。
+     * <p>
+     * 完整的 RAG 流程：
+     * <ol>
+     *   <li>检查用户今日问答次数是否超限</li>
+     *   <li>判断聊天模式（通用/资料/模型身份）</li>
+     *   <li>从学习资料中检索最相关的片段（检索阶段）</li>
+     *   <li>收集相关图片（多模态支持）</li>
+     *   <li>构建上下文并调用 LLM 生成回答（生成阶段）</li>
+     *   <li>装饰回答、保存问答记录、记录使用日志</li>
+     * </ol>
+     *
+     * @param userId  当前登录用户的 ID
+     * @param request 问答请求，包含问题文本、资料ID、聊天模式、对话历史等
+     * @return 问答响应，包含回答文本、来源引用、对话 ID 等
+     */
     @Transactional
     public RagChatResponse chat(long userId, ChatRequest request) {
+        // 第一步：检查用户今日问答次数是否已用完
         ensureChatUsageAvailable(userId);
         boolean generalChat = isGeneralChat(request);
+        // 如果用户问的是"你是什么模型"，走专门的身份回答逻辑
         if (thirdPartyLlmClient.isModelIdentityQuestion(request.question())) {
             return chatModelIdentity(userId, request);
         }
+        // 如果是资料模式的问答，验证资料是否存在且已解析成功
         if (isMaterialChat(request) || (!generalChat && request.materialId() != null)) {
             validateCurrentMaterialForChat(userId, request.materialId());
         }
+
+        // ===== 检索阶段：从资料中检索与问题最相关的片段 =====
         List<ScoredChunk> selectedChunks = selectContextChunks(userId, request, generalChat);
 
+        // ===== 上下文构建阶段：将检索到的片段组装为 LLM 可理解的上下文文本 =====
         List<String> excerpts = buildExcerpts(request, selectedChunks);
+
+        // ===== 图片收集阶段：收集用户上传的图片 + 资料中的嵌入图片 =====
         List<LlmImage> images = new ArrayList<>(userImages(request));
         images.addAll(selectedChunks.stream()
             .flatMap(chunk -> loadChunkImages(chunk.material(), chunk.chunk()).stream())
@@ -174,20 +347,24 @@ public class RagService {
             .limit(MAX_IMAGES_PER_REQUEST)
             .toList());
 
+        // 如果用户正在阅读某个具体片段，也加载该片段的图片
         if (request.chunkId() != null && images.size() < MAX_IMAGES_PER_REQUEST) {
             for (ScoredChunk currentChunk : findChunksById(userId, request)) {
                 appendImages(images, loadChunkImages(currentChunk.material(), currentChunk.chunk()));
             }
         }
 
+        // 如果图片数量还不够，从资料的其他片段中补充图片
         if (images.size() < MAX_IMAGES_PER_REQUEST && !generalChat) {
             collectImagesFromMaterialChunks(userId, request.materialId(), selectedChunks, images);
         }
 
+        // ===== 生成阶段：调用 LLM 生成回答 =====
         String questionWithContext = buildQuestionWithHistory(request.question(), request.history(), generalChat);
         String llmQuestion = thirdPartyLlmClient.isModelIdentityQuestion(request.question())
             ? request.question()
             : questionWithContext;
+        // 调用第三方 LLM 生成回答；如果调用失败则使用本地兜底回答
         LlmCompletion rawCompletion = answerWithThirdParty(userId, llmQuestion, excerpts, images, generalChat, request.answerStyle())
             .orElseGet(() -> new LlmCompletion(
                 generalChat
@@ -195,7 +372,9 @@ public class RagService {
                     : buildCleanAnswer(request.question(), selectedChunks, request.answerStyle()),
                 "local-rag-demo"
             ));
+        // 计算 Token 消耗量（优先使用模型返回的实际值，否则估算）
         TokenUsage usage = completionUsage(rawCompletion, llmQuestion, rawCompletion.content());
+        // ===== 后处理阶段：装饰回答（添加引用依据等） =====
         LlmCompletion completion = new LlmCompletion(
             generalChat
                 ? decorateGeneralAnswer(rawCompletion.content())
@@ -207,6 +386,7 @@ public class RagService {
             rawCompletion.customModel()
         );
 
+        // ===== 持久化阶段：保存问答记录和来源信息 =====
         RagQuestionEntity question = new RagQuestionEntity();
         question.setUserId(userId);
         question.setConversationId(resolveConversationId(userId, request.conversationId()));
@@ -222,9 +402,12 @@ public class RagService {
         RagQuestionEntity savedQuestion = ragQuestionRepository.save(question);
         savedQuestion = ensureConversationId(savedQuestion);
 
+        // 保存本次回答引用的来源片段
         List<RagQuestionSourceEntity> sourceEntities = saveSources(savedQuestion.getId(), selectedChunks);
+        // 记录使用日志（用于 Token 消耗统计和审计）
         recordUsageLog(userId, "RAG_CHAT", savedQuestion.getId(), request, completion);
 
+        // 构建并返回响应
         return new RagChatResponse(
             savedQuestion.getId(),
             savedQuestion.getConversationId(),
@@ -235,6 +418,14 @@ public class RagService {
         );
     }
 
+    /**
+     * 处理"你是什么模型"类的身份查询问题。
+     * 直接调用 LLM 客户端获取当前模型信息，不走 RAG 检索流程。
+     *
+     * @param userId  用户 ID
+     * @param request 问答请求
+     * @return 包含模型身份信息的问答响应
+     */
     private RagChatResponse chatModelIdentity(long userId, ChatRequest request) {
         LlmCompletion completion = thirdPartyLlmClient.currentModelCompletion(userId);
         TokenUsage usage = estimateUsage(request.question(), completion.content());
@@ -272,6 +463,20 @@ public class RagService {
         );
     }
 
+    /**
+     * 调用第三方大语言模型生成回答。
+     * <p>
+     * 优先使用用户自定义模型配置；否则使用系统默认模型。
+     * 对于作业模式（HOMEWORK）的回答风格，会传递额外参数。
+     *
+     * @param userId      用户 ID（用于查找自定义模型配置）
+     * @param question    带有历史上下文的完整问题文本
+     * @param excerpts    从资料中检索到的上下文片段列表
+     * @param images      用户上传和资料中提取的图片列表
+     * @param generalChat 是否为通用聊天模式
+     * @param answerStyle 回答风格（如 "STUDY"、"HOMEWORK"）
+     * @return LLM 生成结果，调用失败时返回 empty
+     */
     private java.util.Optional<LlmCompletion> answerWithThirdParty(
         long userId,
         String question,
@@ -295,6 +500,26 @@ public class RagService {
         return completion == null ? java.util.Optional.empty() : completion;
     }
 
+    // ========== 流式问答接口 ==========
+
+    /**
+     * RAG 流式问答——核心入口方法（SSE/流式输出版本）。
+     * <p>
+     * 与 {@link #chat} 流程基本一致，但 LLM 的回答会以流式方式逐段推送给前端，
+     * 提供更好的用户交互体验（边生成边显示）。
+     * <p>
+     * 额外处理：
+     * <ul>
+     *   <li>如果没有检索到片段且有资料ID，会构造一个提示让 LLM 基于资料标题回答</li>
+     *   <li>使用 trackedChunk 包装回调，跟踪是否实际推送了流式数据</li>
+     *   <li>如果流式推送没有实际数据（例如 LLM 返回了完整文本），会手动拆分成小块推送</li>
+     * </ul>
+     *
+     * @param userId  用户 ID
+     * @param request 问答请求
+     * @param onChunk 流式回调，每收到一段 LLM 生成的文本就会调用此回调推送给前端
+     * @return 流式问答结果，包含问答ID、最终回答、来源引用
+     */
     @Transactional
     public RagStreamResult chatStream(long userId, ChatRequest request, java.util.function.Consumer<String> onChunk) {
         ensureChatUsageAvailable(userId);
@@ -379,6 +604,10 @@ public class RagService {
         return new RagStreamResult(savedQuestion.getId(), savedQuestion.getConversationId(), decoratedAnswer, sources);
     }
 
+    /**
+     * 流式处理模型身份查询问题。
+     * 直接将模型身份信息通过回调推送给前端。
+     */
     private RagStreamResult streamModelIdentity(
         long userId,
         ChatRequest request,
@@ -408,6 +637,14 @@ public class RagService {
         return new RagStreamResult(savedQuestion.getId(), savedQuestion.getConversationId(), completion.content(), List.of());
     }
 
+    /**
+     * 将完整回答文本手动拆分成小块逐段推送，模拟流式输出效果。
+     * 当 LLM 客户端无法真正流式推送时（例如返回了完整文本），使用此方法。
+     * 每块之间间隔 25ms 以模拟实时生成的视觉效果。
+     *
+     * @param answer  完整的回答文本
+     * @param onChunk 流式回调
+     */
     private void streamAnswerInSmallChunks(String answer, java.util.function.Consumer<String> onChunk) {
         String value = answer == null ? "" : answer;
         if (value.isBlank()) {
@@ -438,6 +675,15 @@ public class RagService {
         return maxEnd;
     }
 
+    // ========== 使用次数限制 ==========
+
+    /**
+     * 查询用户今日的聊天使用情况。
+     * 管理员和配置了自定义模型的用户不受次数限制。
+     *
+     * @param userId 用户 ID
+     * @return 使用情况响应，包含每日上限、已用次数、剩余次数
+     */
     @Transactional(readOnly = true)
     public RagUsageResponse usage(long userId) {
         boolean unlimited = isAdminUser(userId) || thirdPartyLlmClient.hasActiveUserConfig(userId);
@@ -446,6 +692,11 @@ public class RagService {
         return new RagUsageResponse(USER_DAILY_CHAT_LIMIT, usedToday, remainingToday, unlimited);
     }
 
+    /**
+     * 检查用户的聊天使用次数是否还有剩余。
+     * 管理员和配置了自定义模型的用户不限制。
+     * 超限时抛出 429 错误。
+     */
     private void ensureChatUsageAvailable(long userId) {
         if (isAdminUser(userId) || thirdPartyLlmClient.hasActiveUserConfig(userId)) {
             return;
@@ -456,16 +707,28 @@ public class RagService {
         }
     }
 
+    /** 统计用户今日已提问的次数 */
     private long countUserQuestionsToday(long userId) {
         return ragQuestionRepository.countByUserIdAndCreatedAtGreaterThanEqual(userId, LocalDateTime.now().toLocalDate().atStartOfDay());
     }
 
+    /** 判断用户是否为管理员角色 */
     private boolean isAdminUser(long userId) {
         return userRepository.findById(userId)
             .map(user -> user.getRole() == UserRole.ADMIN)
             .orElse(false);
     }
 
+    // ========== 图片处理（多模态支持） ==========
+
+    /**
+     * 从用户请求中提取并验证上传的图片。
+     * 限制：最多 4 张图片，每张不超过约 2MB，仅支持 JPG/PNG/WEBP/GIF 格式。
+     *
+     * @param request 问答请求（可能包含图片数据）
+     * @return 验证通过的图片列表
+     * @throws BusinessException 图片数量超限或格式不支持时抛出
+     */
     private List<LlmImage> userImages(ChatRequest request) {
         if (request.images() == null || request.images().isEmpty()) {
             return List.of();
@@ -491,6 +754,7 @@ public class RagService {
         return images;
     }
 
+    /** 标准化图片媒体类型，仅允许 image/jpeg、image/png、image/webp、image/gif */
     private String normalizeImageMediaType(String mediaType) {
         String normalized = mediaType == null ? "" : mediaType.trim().toLowerCase(Locale.ROOT);
         if (normalized.isBlank()) {
@@ -502,6 +766,7 @@ public class RagService {
         return normalized;
     }
 
+    /** 标准化图片 Base64 数据：去除 data URL 前缀，验证格式，去除空白字符 */
     private String normalizeImageBase64(ChatImage image) {
         String value = image.base64Data();
         if ((value == null || value.isBlank()) && image.dataUrl() != null) {
@@ -524,6 +789,26 @@ public class RagService {
         return trimmed.replaceAll("\\s+", "");
     }
 
+    // ========== 检索阶段：上下文片段选择（RAG 核心） ==========
+
+    /**
+     * 上下文片段选择——检索阶段的核心调度方法。
+     * <p>
+     * 根据问题类型和用户当前阅读位置，采用不同的检索策略：
+     * <ol>
+     *   <li><b>通用聊天/选中文本</b>：不检索资料片段，返回空列表</li>
+     *   <li><b>关键词检索优先</b>：先尝试精确关键词匹配（如"什么是XXX"）</li>
+     *   <li><b>当前页片段</b>：如果用户正在阅读某页，优先使用该页的片段</li>
+     *   <li><b>局部上下文问题</b>：对"这页讲什么"类问题，只用当前页片段</li>
+     *   <li><b>向量+BM25 混合检索</b>：对一般性问题，执行多路检索 + 融合 + 重排</li>
+     *   <li><b>资料概览</b>：对"这是什么书"类问题，返回资料前几个片段</li>
+     * </ol>
+     *
+     * @param userId      用户 ID
+     * @param request     问答请求
+     * @param generalChat 是否为通用聊天模式
+     * @return 排序后的相关片段列表（ScoredChunk 包含片段和相关性分数）
+     */
     private List<ScoredChunk> selectContextChunks(long userId, ChatRequest request, boolean generalChat) {
         if (generalChat || (request.selectedText() != null && !request.selectedText().isBlank())) {
             return List.of();
@@ -583,6 +868,27 @@ public class RagService {
         return limitContextChunks(selected);
     }
 
+    /**
+     * 多路混合检索 + 融合 + 重排——检索的核心算法。
+     * <p>
+     * 检索策略：
+     * <ol>
+     *   <li><b>查询扩展</b>：将原始问题扩展为多个变体查询，提高召回率</li>
+     *   <li><b>HyDE 检索</b>：让 LLM 先生成一个假设性回答，用它做向量检索</li>
+     *   <li><b>向量语义检索</b>：将问题转为向量，计算与片段向量的余弦相似度</li>
+     *   <li><b>BM25 关键词检索</b>：基于倒排索引的传统关键词匹配</li>
+     *   <li><b>摘要种子检索</b>：如果资料摘要覆盖了问题关键词，补充前几个片段</li>
+     *   <li><b>混合融合</b>：将三路结果按权重融合（向量 0.48 + BM25 0.30 + 摘要 0.12 + 关键词覆盖 0.10）</li>
+     *   <li><b>Reranker 重排</b>：使用 Cross-Encoder 模型对融合结果精排</li>
+     * </ol>
+     * <p>
+     * 结果会缓存，短时间内相同查询直接返回缓存结果。
+     *
+     * @param userId     用户 ID
+     * @param question   检索用的问题文本（可能已经过改写）
+     * @param materialId 资料 ID（为 null 时搜索用户所有资料）
+     * @return 经过融合和重排的相关片段列表
+     */
     private List<ScoredChunk> selectVectorOrKeywordChunks(long userId, String question, Long materialId) {
         List<LearningMaterialEntity> materials = retrievalScopeMaterials(userId, materialId);
         String cacheKey = retrievalCacheKey(userId, materialId, question, materials);
@@ -593,25 +899,41 @@ public class RagService {
 
         List<ScoredChunk> vectorChunks = new ArrayList<>();
         List<ScoredChunk> bm25Chunks = new ArrayList<>();
+        // 摘要种子检索：如果资料摘要中包含了问题关键词，补充该资料的前几个片段
         List<ScoredChunk> summarySeedChunks = findSummarySeedChunks(userId, question, materialId);
+        // 查询扩展：将原始问题扩展为多个变体（如添加"定义 原理 作用"等补充词）
         List<String> queries = expandedRetrievalQueries(question);
         for (int i = 0; i < queries.size(); i++) {
             String query = queries.get(i);
+            // 主查询权重为 1.0，扩展查询权重递减为 0.82
             double weight = i == 0 ? 1.0 : 0.82;
+            // 向量语义检索：计算问题向量与片段向量的余弦相似度
             vectorChunks.addAll(weightedChunks(findVectorScoredChunks(userId, query, materialId), weight));
+            // BM25 关键词检索：基于倒排索引的词频统计匹配
             bm25Chunks.addAll(weightedChunks(findScoredChunks(userId, query, materialId), weight));
         }
+        // HyDE（假设性文档嵌入）检索：让 LLM 生成假设性回答，用它做向量检索
+        // 原理：假设性回答的向量通常比问题的向量更接近真实答案所在片段的向量
         hydeRetrievalQuery(question).ifPresent(hydeQuery ->
             vectorChunks.addAll(weightedChunks(
                 findVectorScoredChunks(userId, hydeQuery, materialId),
                 queryExpansionProperties.hydeWeight()
             ))
         );
+        // 混合融合：将向量/BM25/摘要三路结果按权重融合，再通过 Reranker 精排
         List<ScoredChunk> selected = selectTopChunks(fuseAndRerankChunks(question, vectorChunks, bm25Chunks, summarySeedChunks));
+        // 缓存检索结果
         rememberRetrievalResult(cacheKey, selected);
         return selected;
     }
 
+    /**
+     * 摘要种子检索：如果资料的自动摘要文本覆盖了问题关键词，
+     * 则将该资料的前几个片段作为"种子"补充到检索结果中。
+     * <p>
+     * 原理：如果摘要中提到了问题相关的关键词，说明该资料整体与问题相关，
+     * 其前面的片段很可能包含背景信息或总述，对回答有辅助价值。
+     */
     private List<ScoredChunk> findSummarySeedChunks(long userId, String question, Long materialId) {
         List<String> queryTerms = significantQueryTerms(question);
         if (queryTerms.isEmpty()) {
@@ -641,6 +963,19 @@ public class RagService {
         return seeds;
     }
 
+    /**
+     * 查询扩展：将原始问题扩展为多个检索查询变体，提高检索召回率。
+     * <p>
+     * 扩展策略（当配置开启时）：
+     * <ul>
+     *   <li>调用 LLM 生成语义等价的改写查询</li>
+     *   <li>如果 LLM 不可用，使用本地规则扩展（如添加"定义 原理 作用"等）</li>
+     *   <li>去重后最多返回 maxQueries 个查询</li>
+     * </ul>
+     *
+     * @param question 原始问题文本
+     * @return 扩展后的查询列表（第一个始终是原始问题）
+     */
     private List<String> expandedRetrievalQueries(String question) {
         String normalizedQuestion = question == null ? "" : question.trim();
         if (normalizedQuestion.isBlank() || !queryExpansionProperties.enabled()) {
@@ -659,6 +994,15 @@ public class RagService {
         return queries;
     }
 
+    /**
+     * HyDE（Hypothetical Document Embedding，假设性文档嵌入）检索查询生成。
+     * <p>
+     * 原理：先让 LLM 根据问题"假装"生成一个回答（假设性文档），
+     * 然后用这个假设性文档的向量去检索——因为假设性文档的语义通常比问题本身
+     * 更接近真正答案所在片段的语义。
+     * <p>
+     * 例如：问题"什么是快排" -> 假设性文档"快速排序是一种分治排序算法..." -> 用此向量检索
+     */
     private Optional<String> hydeRetrievalQuery(String question) {
         if (!queryExpansionProperties.enabled() || !queryExpansionProperties.hydeEnabled()) {
             return Optional.empty();
@@ -763,16 +1107,43 @@ public class RagService {
         ));
     }
 
+    // ========== 检索结果融合与重排 ==========
+
+    /**
+     * 混合融合 + 重排——将多路检索结果合并为统一排序。
+     * <p>
+     * 融合算法：
+     * <ol>
+     *   <li>将同一片段在各路检索中的分数合并到一个 HybridCandidate 中</li>
+     *   <li>对各路分数做归一化（除以该路最高分）</li>
+     *   <li>按权重加权求和：
+     *       <ul>
+     *         <li>向量语义分数：48%（捕捉语义相似性）</li>
+     *         <li>BM25 关键词分数：30%（捕捉精确关键词匹配）</li>
+     *         <li>摘要种子分数：12%（辅助整体相关性判断）</li>
+     *         <li>关键词覆盖率：10%（问题关键术语在片段中的覆盖比例）</li>
+     *       </ul>
+     *   </li>
+     *   <li>调用 Reranker（Cross-Encoder）对融合结果做精排序</li>
+     * </ol>
+     *
+     * @param question           原始问题
+     * @param vectorChunks       向量语义检索结果
+     * @param bm25Chunks         BM25 关键词检索结果
+     * @param summarySeedChunks  摘要种子检索结果
+     * @return 融合并重排后的片段列表
+     */
     private List<ScoredChunk> fuseAndRerankChunks(
         String question,
         List<ScoredChunk> vectorChunks,
         List<ScoredChunk> bm25Chunks,
         List<ScoredChunk> summarySeedChunks
     ) {
+        // 第一步：收集各路检索结果到统一的候选池中（按 chunk ID 去重合并）
         Map<Long, HybridCandidate> candidates = new LinkedHashMap<>();
         for (ScoredChunk chunk : vectorChunks) {
             HybridCandidate candidate = candidates.computeIfAbsent(chunk.chunk().getId(), ignored -> new HybridCandidate(chunk));
-            candidate.vectorScore = Math.max(candidate.vectorScore, chunk.score());
+            candidate.vectorScore = Math.max(candidate.vectorScore, chunk.score()); // 取最高向量分数
             candidate.highlightTerms = chunk.highlightTerms();
         }
         for (ScoredChunk chunk : bm25Chunks) {
@@ -793,26 +1164,42 @@ public class RagService {
             return List.of();
         }
 
+        // 第二步：各路分数归一化（除以该路最高分，缩放到 0-1 范围）
         double maxVector = candidates.values().stream().mapToDouble(candidate -> candidate.vectorScore).max().orElse(0.0);
         double maxBm25 = candidates.values().stream().mapToDouble(candidate -> candidate.bm25Score).max().orElse(0.0);
         double maxSummary = candidates.values().stream().mapToDouble(candidate -> candidate.summaryScore).max().orElse(0.0);
         List<String> queryTerms = significantQueryTerms(question);
 
+        // 第三步：加权融合各路分数
         List<ScoredChunk> fusedChunks = candidates.values().stream()
             .map(candidate -> {
                 double vectorScore = maxVector <= 0.0 ? 0.0 : candidate.vectorScore / maxVector;
                 double bm25Score = maxBm25 <= 0.0 ? 0.0 : candidate.bm25Score / maxBm25;
                 double summaryScore = maxSummary <= 0.0 ? 0.0 : candidate.summaryScore / maxSummary;
+                // 关键词覆盖率：问题中的关键术语在片段文本中的命中比例
                 double termScore = queryTermCoverage(retrievalText(candidate.chunk), queryTerms);
+                // 加权公式：向量48% + BM25的30% + 摘要12% + 关键词覆盖率10%
                 double fusedScore = (0.48 * vectorScore) + (0.30 * bm25Score) + (0.12 * summaryScore) + (0.10 * termScore);
                 return new ScoredChunk(candidate.material, candidate.chunk, fusedScore, candidate.highlightTerms);
             })
             .filter(chunk -> chunk.score() > 0.0)
             .sorted(Comparator.comparingDouble(ScoredChunk::score).reversed())
             .toList();
+        // 第四步：调用 Reranker（Cross-Encoder）对融合结果做精排序
         return rerankChunks(question, fusedChunks);
     }
 
+    /**
+     * Reranker 精排：使用 Cross-Encoder 模型对候选片段重新排序。
+     * <p>
+     * 与向量检索的双塔模型（分别编码问题和片段）不同，
+     * Cross-Encoder 会将问题和片段拼接在一起输入模型，
+     * 因此能捕捉更细致的语义关系，但计算成本更高，只用于精排少量候选。
+     *
+     * @param question 原始问题
+     * @param chunks   融合后的候选片段列表
+     * @return 重排后的片段列表（Reranker 分数优先，未被重排的片段排在最后）
+     */
     private List<ScoredChunk> rerankChunks(String question, List<ScoredChunk> chunks) {
         if (chunks.size() < 2) {
             return chunks;
@@ -849,6 +1236,16 @@ public class RagService {
         return reranked;
     }
 
+    // ========== 查询理解：问题意图分析与关键词提取 ==========
+
+    /**
+     * 计算问题关键词在文本中的覆盖率。
+     * 用于融合阶段的关键词覆盖率评分。
+     *
+     * @param text       待检查的文本
+     * @param queryTerms 问题中提取的关键词列表
+     * @return 覆盖率（0.0-1.0），1.0 表示所有关键词都出现了
+     */
     private double queryTermCoverage(String text, List<String> queryTerms) {
         if (queryTerms.isEmpty()) {
             return 0.0;
@@ -858,6 +1255,17 @@ public class RagService {
         return (double) matches / queryTerms.size();
     }
 
+    /**
+     * 从问题中提取有意义的关键词（用于检索和覆盖率计算）。
+     * <p>
+     * 提取策略：
+     * <ol>
+     *   <li>先尝试用意图解析器提取（更精确）</li>
+     *   <li>如果没有匹配到意图，用正则提取中文和英文的 2+ 字符词</li>
+     *   <li>过滤掉弱查询词（如"什么"、"怎么"、"为什么"等停用词）</li>
+     *   <li>最多返回 6 个关键词</li>
+     * </ol>
+     */
     private List<String> significantQueryTerms(String question) {
         if (question == null || question.isBlank()) {
             return List.of();
@@ -885,6 +1293,10 @@ public class RagService {
         return terms.stream().distinct().limit(6).toList();
     }
 
+    /**
+     * 判断是否为"弱查询词"——即没有实际检索意义的高频词（停用词）。
+     * 如"什么"、"怎么"、"为什么"等疑问词，"this"、"that"等代词。
+     */
     private boolean isWeakQueryTerm(String term) {
         return Set.of(
             "什么", "怎么", "为什么", "哪里", "哪个", "哪些", "一下", "介绍", "解释", "区别",
@@ -892,6 +1304,11 @@ public class RagService {
         ).contains(term);
     }
 
+    // ========== 关键词精确检索 ==========
+
+    /**
+     * 从问题中提取定义类术语并检索（如"什么是快排" -> 检索"快排"）。
+     */
     private List<ScoredChunk> findTermDefinitionChunks(long userId, String question, Long materialId) {
         String term = extractDefinitionTerm(question);
         if (term == null || term.isBlank() || materialId == null) {
@@ -908,6 +1325,17 @@ public class RagService {
         return findKeywordChunks(userId, query, materialId);
     }
 
+    /**
+     * 关键词检索：在指定资料的片段中精确匹配关键词。
+     * <p>
+     * 对每个片段的检索文本（包含正文、层级路径、章节标题、摘要、关键词），
+     * 检查是否包含查询术语，然后按关键词匹配分数排序。
+     *
+     * @param userId     用户 ID
+     * @param query      解析后的关键词查询（包含术语列表和意图类型）
+     * @param materialId 必须指定资料 ID
+     * @return 按匹配分数降序排列的片段列表（最多 5 个）
+     */
     private List<ScoredChunk> findKeywordChunks(long userId, KeywordQuery query, Long materialId) {
         if (query.terms().isEmpty() || materialId == null) {
             return List.of();
@@ -938,6 +1366,23 @@ public class RagService {
             .toList();
     }
 
+    /**
+     * 从问题中提取关键词查询——意图识别的核心方法。
+     * <p>
+     * 按优先级依次尝试匹配以下意图类型：
+     * <ol>
+     *   <li><b>定义类</b>：什么是 XXX / XXX 的定义 / define XXX</li>
+     *   <li><b>对比类</b>：A 和 B 的区别 / A vs B</li>
+     *   <li><b>出现位置类</b>：XXX 在哪里提到 / where is XXX mentioned</li>
+     *   <li><b>功能作用类</b>：XXX 有什么用 / what is XXX used for</li>
+     *   <li><b>方面特征类</b>：XXX 的优缺点 / advantages of XXX</li>
+     *   <li><b>开放式话题类</b>：介绍一下 XXX / how does XXX work</li>
+     *   <li><b>定义术语提取</b>：作为兜底，提取定义类问题中的术语</li>
+     * </ol>
+     *
+     * @param question 问题文本
+     * @return 解析后的关键词查询（含术语和意图），无法解析时返回 null
+     */
     private KeywordQuery extractKeywordQuery(String question) {
         if (question == null || question.isBlank()) {
             return null;
@@ -974,6 +1419,10 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 提取中文定义类查询：如"什么是快排" -> 术语"快排"，意图 DEFINITION。
+     * 同时支持前缀模式（什么是 XXX）和后缀模式（XXX 的定义）。
+     */
     private KeywordQuery extractChineseDefinitionQuery(String question) {
         Matcher prefix = Pattern.compile("(?:\\u4ec0\\u4e48\\u662f|\\u4f55\\u4e3a|\\u89e3\\u91ca\\u4e00\\u4e0b|\\u89e3\\u91ca|\\u5b9a\\u4e49)\\s*(.{2,80}?)(?:[\\uff1f?\\u3002]|$)").matcher(question);
         if (prefix.find()) {
@@ -986,6 +1435,10 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 提取对比类查询：如"A 和 B 有什么区别" -> 术语[A, B]，意图 COMPARISON。
+     * 支持中文（A和B的区别、A和B哪个好）和英文（difference between A and B、A vs B）。
+     */
     private KeywordQuery extractComparisonQuery(String question) {
         Matcher cnBetween = Pattern.compile("(.{2,60}?)\\s*(?:\\u548c|\\u4e0e)\\s*(.{2,60}?)\\s*(?:\\u6709\\u4ec0\\u4e48\\u533a\\u522b|\\u7684\\u533a\\u522b|\\u7684\\u5173\\u7cfb)").matcher(question);
         if (cnBetween.find()) {
@@ -1006,6 +1459,10 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 提取出现位置类查询：如"快排在哪里提到" -> 术语"快排"，意图 OCCURRENCE。
+     * 用于查找某个概念在资料中哪些位置出现过。
+     */
     private KeywordQuery extractOccurrenceQuery(String question) {
         Matcher cnWhere = Pattern.compile("(.{2,80}?)\\s*(?:\\u5728\\u54ea\\u91cc\\u63d0\\u5230|\\u54ea\\u91cc\\u63d0\\u5230|\\u51fa\\u73b0\\u5728\\u54ea\\u91cc|\\u51fa\\u73b0\\u5728\\u54ea|\\u51fa\\u73b0\\u8fc7\\u54ea\\u4e9b)").matcher(question);
         if (cnWhere.find()) {
@@ -1022,6 +1479,10 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 提取功能作用类查询：如"索引有什么用" -> 术语"索引"，意图 FUNCTION。
+     * 支持中文（XXX的作用、XXX用来做什么）和英文（what is XXX used for、role of XXX）。
+     */
     private KeywordQuery extractFunctionQuery(String question) {
         Matcher cnFunction = Pattern.compile("(.{2,80}?)\\s*(?:\\u6709\\u4ec0\\u4e48\\u7528|\\u7684\\u4f5c\\u7528|\\u7684\\u7528\\u9014|\\u4e3b\\u8981\\u4f5c\\u7528|\\u7528\\u6765\\u505a\\u4ec0\\u4e48)").matcher(question);
         if (cnFunction.find()) {
@@ -1038,6 +1499,10 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 提取方面特征类查询：如"TCP 的优缺点" -> 术语"TCP"，意图 FUNCTION。
+     * 匹配优缺点、优点、缺点、特点、特征、优势、劣势、局限、风险等。
+     */
     private KeywordQuery extractAspectQuery(String question) {
         Matcher cnAspect = Pattern.compile("(.{2,80}?)\\s*(?:\\u7684)?(?:\\u4f18\\u7f3a\\u70b9|\\u4f18\\u70b9|\\u7f3a\\u70b9|\\u7279\\u70b9|\\u7279\\u5f81|\\u4f18\\u52bf|\\u52a3\\u52bf|\\u5c40\\u9650|\\u98ce\\u9669)(?:\\u662f\\u4ec0\\u4e48|\\u6709\\u54ea\\u4e9b|\\u5982\\u4f55|\\u600e\\u4e48\\u6837|\\u5462)?(?:[\\uff1f?\\u3002]|$)").matcher(question);
         if (cnAspect.find()) {
@@ -1050,6 +1515,10 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 工厂方法：创建关键词查询对象，自动清理和去重术语。
+     * 最多保留 2 个术语。
+     */
     private KeywordQuery keywordQuery(KeywordIntent intent, String... rawTerms) {
         List<String> terms = new ArrayList<>();
         for (String rawTerm : rawTerms) {
@@ -1062,6 +1531,11 @@ public class RagService {
         return terms.isEmpty() ? null : new KeywordQuery(terms, intent);
     }
 
+    /**
+     * 从定义类问题中提取术语名称。
+     * 例如"什么是快速排序" -> "快速排序"。
+     * 自动去除"一下"、"这个"、"资料里的"等前缀和"是什么"等后缀。
+     */
     private String extractDefinitionTerm(String question) {
         if (question == null || question.isBlank()) {
             return null;
@@ -1118,6 +1592,10 @@ public class RagService {
         return normalizedTerms.stream().anyMatch(normalizedText::contains);
     }
 
+    /**
+     * 获取片段的完整检索文本：拼接正文、层级路径、章节标题、摘要、关键词。
+     * 用于 BM25 检索和关键词匹配时的全字段搜索。
+     */
     private String retrievalText(MaterialChunkEntity chunk) {
         if (chunk == null) {
             return "";
@@ -1141,6 +1619,23 @@ public class RagService {
         builder.append(part.trim());
     }
 
+    /**
+     * 关键词匹配评分：根据关键词在文本中的位置和意图类型计算相关性分数。
+     * <p>
+     * 评分规则：
+     * <ul>
+     *   <li>每个命中的关键词：基础 20 分 + 位置奖励（出现越靠前分越高，最高 +5 分）</li>
+     *   <li>DEFINITION 意图：如果文本包含"定义"、"概念"、"是指"等词，额外 +10 分</li>
+     *   <li>FUNCTION 意图：如果文本包含"作用"、"用途"、"用于"等词，额外 +10 分</li>
+     *   <li>COMPARISON 意图：如果所有术语都出现，额外 +12 分；含"区别"等词再 +10 分</li>
+     *   <li>OCCURRENCE 意图：命中即 +4 分（因为只需要定位位置）</li>
+     * </ul>
+     *
+     * @param text          片段文本
+     * @param normalizedTerms 归一化后的关键词列表
+     * @param intent        问题意图类型
+     * @return 匹配分数（越高表示越相关）
+     */
     private double keywordScore(String text, List<String> normalizedTerms, KeywordIntent intent) {
         String normalizedText = normalizeForTermMatch(text);
         double score = 0.0;
@@ -1179,6 +1674,10 @@ public class RagService {
         return false;
     }
 
+    /**
+     * 文本归一化：转小写，去除所有标点符号和空白字符。
+     * 用于关键词匹配时的标准化比较，避免因标点或空格导致匹配失败。
+     */
     private String normalizeForTermMatch(String value) {
         if (value == null) {
             return "";
@@ -1186,6 +1685,10 @@ public class RagService {
         return value.toLowerCase(Locale.ROOT).replaceAll("[\\s\\p{Punct}，。！？；：“”‘’（）《》、]+", "");
     }
 
+    /**
+     * SHA-256 哈希：用于生成检索缓存的唯一键。
+     * 将问题文本哈希后作为缓存键的一部分，避免存储原始文本占用内存。
+     */
     private String sha256(String value) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
@@ -1199,6 +1702,10 @@ public class RagService {
         }
     }
 
+    /**
+     * 判断是否为"局部上下文问题"——用户在问当前阅读位置的相关内容。
+     * 如"这页讲什么"、"当前内容"、"本章"等。
+     */
     private boolean isLocalContextQuestion(String question) {
         if (question == null || question.isBlank()) {
             return false;
@@ -1206,6 +1713,10 @@ public class RagService {
         return LOCAL_CONTEXT_QUESTION_PATTERN.matcher(question).find();
     }
 
+    /**
+     * 判断是否为"资料概览问题"——用户在问整份资料的内容。
+     * 如"这是什么书"、"介绍一下"、"概括"等。
+     */
     private boolean isMaterialOverviewQuestion(String question) {
         if (question == null || question.isBlank()) {
             return false;
@@ -1213,6 +1724,11 @@ public class RagService {
         return MATERIAL_OVERVIEW_QUESTION_PATTERN.matcher(question).find();
     }
 
+    /**
+     * 获取资料概览片段：返回资料的前 5 个有效片段。
+     * 用于回答"这是什么书"、"介绍一下这份资料"等概览类问题。
+     * 前面的片段分数更高（0.95 递减到 0.75）。
+     */
     private List<ScoredChunk> materialOverviewChunks(long userId, Long materialId) {
         if (materialId == null) {
             return List.of();
@@ -1233,6 +1749,11 @@ public class RagService {
         return selected;
     }
 
+    /**
+     * 获取与当前片段同页的所有片段。
+     * 用于用户在阅读某一页时，自动加载该页的完整上下文。
+     * 当前片段分数为 1.0，同页其他片段分数为 0.95。
+     */
     private List<ScoredChunk> currentPageChunks(ScoredChunk currentChunk) {
         Integer pageNo = currentChunk.chunk().getPageNo();
         if (pageNo == null) {
@@ -1244,6 +1765,11 @@ public class RagService {
             .toList();
     }
 
+    /**
+     * 根据请求中的页面信息查找当前页片段。
+     * 优先使用 currentPageChunkIds（前端传来的具体片段ID列表），
+     * 其次使用 currentPageNo（前端传来的页码）来定位当前页。
+     */
     private List<ScoredChunk> findCurrentPageChunks(long userId, ChatRequest request) {
         if (request.materialId() == null) {
             return List.of();
@@ -1274,6 +1800,11 @@ public class RagService {
             .toList();
     }
 
+    /**
+     * 获取与当前片段同章节的所有片段。
+     * 根据章节标题（sectionTitle）匹配，同一章节的片段具有内容上的连贯性。
+     * 当前片段分数为 1.0，同章节其他片段分数为 0.9。
+     */
     private List<ScoredChunk> currentSectionChunks(ScoredChunk currentChunk) {
         String sectionTitle = currentChunk.chunk().getSectionTitle();
         if (sectionTitle == null || sectionTitle.isBlank()) {
@@ -1293,6 +1824,15 @@ public class RagService {
         }
     }
 
+    // ========== 上下文构建阶段：将片段组装为 LLM 可理解的文本 ==========
+
+    /**
+     * 构建发送给 LLM 的上下文摘录列表。
+     * <p>
+     * 如果用户选中了某段文本，直接以选中内容为上下文；
+     * 如果用户正在阅读某个片段，当前片段标记为"优先依据"，其他为"补充依据"；
+     * 否则直接使用检索到的片段作为上下文。
+     */
     private List<String> buildExcerpts(ChatRequest request, List<ScoredChunk> selectedChunks) {
         if (request.selectedText() != null && !request.selectedText().isBlank()) {
             return List.of("[用户选中内容]\n原文：" + request.selectedText().trim());
@@ -1308,6 +1848,10 @@ public class RagService {
         return excerpts;
     }
 
+    /**
+     * 保存流式问答的结果到数据库。
+     * 包括问答记录和来源引用，保存失败时返回一个空的兜底对象。
+     */
     private RagQuestionEntity saveStreamResult(
         long userId,
         ChatRequest request,
@@ -1342,6 +1886,12 @@ public class RagService {
           }
       }
 
+    // ========== Token 使用量计算 ==========
+
+    /**
+     * 获取 LLM 完成结果的 Token 使用量。
+     * 优先使用模型返回的实际 Token 数，如果模型没有返回则估算。
+     */
     private TokenUsage completionUsage(LlmCompletion completion, String prompt, String answer) {
         if (completion.totalTokens() != null || completion.promptTokens() != null || completion.completionTokens() != null) {
             return new TokenUsage(completion.promptTokens(), completion.completionTokens(), completion.totalTokens());
@@ -1349,6 +1899,7 @@ public class RagService {
         return estimateUsage(prompt, answer);
     }
 
+    /** 估算 Token 使用量：按文本长度 / 1.8 近似计算（中文平均约 1.8 字符 = 1 token） */
     private TokenUsage estimateUsage(String prompt, String answer) {
         int promptTokens = estimateTokens(prompt);
         int completionTokens = estimateTokens(answer);
@@ -1360,6 +1911,10 @@ public class RagService {
         return Math.max(1, (int) Math.ceil(value.length() / 1.8));
     }
 
+    /**
+     * 记录使用日志：将每次问答的模型信息、Token 消耗、操作模式等写入 usage_record 表。
+     * 用于后续的用量统计和费用审计。
+     */
     private void recordUsageLog(long userId, String action, Long questionId, ChatRequest request, LlmCompletion completion) {
         if (questionId == null || questionId <= 0) {
             return;
@@ -1388,9 +1943,14 @@ public class RagService {
         return value == null ? 0 : value;
     }
 
+    /** Token 使用量记录：promptTokens=输入Token数，completionTokens=输出Token数，totalTokens=总计 */
     private record TokenUsage(Integer promptTokens, Integer completionTokens, Integer totalTokens) {
     }
 
+    /**
+     * 根据 chunkId 查找指定的片段。
+     * 用于用户在阅读某个具体片段时，加载该片段作为上下文。
+     */
     private List<ScoredChunk> findChunksById(long userId, ChatRequest request) {
         if (request.materialId() == null) {
             return List.of();
@@ -1406,6 +1966,21 @@ public class RagService {
             .toList();
     }
 
+    // ========== 对话历史处理 ==========
+
+    /**
+     * 将当前问题和对话历史组装为带上下文的完整问题文本。
+     * <p>
+     * 格式示例：
+     * <pre>
+     * 对话历史：
+     * user：什么是索引？
+     * assistant：索引是数据库中...
+     *
+     * 当前问题：它有什么优缺点？
+     * </pre>
+     * 通用聊天模式最多保留 6 条历史，资料模式最多 10 条。
+     */
     private String buildQuestionWithHistory(String question, List<ChatMessage> history, boolean generalChat) {
         if (history == null || history.isEmpty()) {
             return question;
@@ -1422,6 +1997,13 @@ public class RagService {
         return sb.toString();
     }
 
+    /**
+     * 为检索目的改写问题——处理代词引用和追问。
+     * <p>
+     * 当用户问"它有什么优缺点？"时，原始问题中的"它"无法直接检索。
+     * 此方法会从对话历史中提取最近的主题词（如"索引"），将问题改写为
+     * "索引有什么优缺点？"，从而提高检索准确性。
+     */
     private String rewriteQuestionForRetrieval(String question, List<ChatMessage> history) {
         String current = question == null ? "" : question.trim();
         if (current.isBlank() || history == null || history.isEmpty()) {
@@ -1446,6 +2028,10 @@ public class RagService {
         return current;
     }
 
+    /**
+     * 将追问中的代词替换为具体主题词。
+     * 例如："它有什么优缺点" + 主题"索引" -> "索引有什么优缺点"
+     */
     private String groundFollowUpQuestion(String question, String topic) {
         String grounded = question.trim()
             .replaceFirst("^(?:\\u90a3|\\u90a3\\u4e48|\\u6240\\u4ee5)?(?:\\u5b83|\\u8fd9\\u4e2a|\\u8be5|\\u8fd9|\\u4e0a\\u8ff0|\\u524d\\u9762)(\\u7684)?", Matcher.quoteReplacement(topic) + "$1")
@@ -1453,6 +2039,10 @@ public class RagService {
         return grounded.trim();
     }
 
+    /**
+     * 判断是否为追问（包含代词引用）。
+     * 特征：较短的问题中包含"它"、"这个"、"上述"等代词，或英文中的 "it"、"this"、"that" 等。
+     */
     private boolean isFollowUpQuestion(String question) {
         String normalized = normalizeForTermMatch(question);
         if (normalized.length() <= 18 && containsAny(normalized, "它", "这个", "该", "上述", "前面", "刚才", "优缺点", "作用", "区别", "怎么", "为什么")) {
@@ -1461,6 +2051,10 @@ public class RagService {
         return Pattern.compile("(?i)\\b(it|this|that|they|them|its|those|these)\\b").matcher(question).find();
     }
 
+    /**
+     * 从对话历史中提取最近讨论的主题词。
+     * 优先从用户消息中提取（更准确反映用户意图），如果找不到再从所有消息中提取。
+     */
     private String recentConversationTopic(List<ChatMessage> history) {
         String userTopic = recentConversationTopic(history, true);
         if (userTopic != null && !userTopic.isBlank()) {
@@ -1486,6 +2080,10 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 提取开放式话题查询：如"介绍一下 XXX"、"聊聊 XXX"、"XXX 怎么工作"。
+     * 这些问题没有明确的定义/对比/功能等意图，但仍然需要提取核心术语用于检索。
+     */
     private KeywordQuery extractOpenEndedTopicQuery(String question) {
         Matcher introduce = Pattern.compile("(?:\\u804a\\u804a|\\u4ecb\\u7ecd\\u4e00\\u4e0b|\\u8bb2\\u8bb2|\\u8bf4\\u8bf4|\\u89e3\\u91ca\\u4e00\\u4e0b)\\s*(.{2,80}?)(?:[\\uff1f?\\u3002]|$)").matcher(question);
         if (introduce.find()) {
@@ -1510,6 +2108,10 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 从一段文本中提取对话主题词。
+     * 依次尝试：关键词查询提取 -> 定义术语提取 -> 技术术语正则匹配。
+     */
     private String extractConversationTopic(String text) {
         KeywordQuery keywordQuery = extractKeywordQuery(text);
         if (keywordQuery != null && !keywordQuery.terms().isEmpty()) {
@@ -1533,14 +2135,22 @@ public class RagService {
         return null;
     }
 
+    // ========== 聊天模式判断与资料验证 ==========
+
+    /** 判断是否为通用聊天模式（不基于资料的自由问答） */
     private boolean isGeneralChat(ChatRequest request) {
         return "GENERAL".equalsIgnoreCase(String.valueOf(request.mode()).trim());
     }
 
+    /** 判断是否为资料模式聊天（基于特定学习资料的问答） */
     private boolean isMaterialChat(ChatRequest request) {
         return "MATERIAL".equalsIgnoreCase(String.valueOf(request.mode()).trim());
     }
 
+    /**
+     * 验证当前资料是否可用于聊天。
+     * 检查：资料ID不为空、资料存在、资料属于当前用户、资料已成功解析。
+     */
     private void validateCurrentMaterialForChat(long userId, Long materialId) {
         if (materialId == null) {
             throw new BusinessException(400, "materialId is required for current material chat");
@@ -1552,6 +2162,15 @@ public class RagService {
         }
     }
 
+    // ========== 问答历史管理 ==========
+
+    /**
+     * 获取用户的聊天历史列表。
+     * 按对话分组，每个对话只返回最新的一条问答记录作为代表。
+     *
+     * @param userId 用户 ID
+     * @return 历史记录列表（按置顶和创建时间排序）
+     */
     @Transactional(readOnly = true)
     public List<RagHistoryItemResponse> history(long userId) {
         return latestQuestionsByConversation(userId).stream()
@@ -1559,6 +2178,10 @@ public class RagService {
             .toList();
     }
 
+    /**
+     * 获取某个问答记录的完整对话详情。
+     * 返回该对话中所有问答轮次的消息列表、来源引用、收藏状态等。
+     */
     @Transactional(readOnly = true)
     public RagHistoryDetailResponse historyDetail(long userId, long questionId) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(questionId, userId)
@@ -1571,6 +2194,7 @@ public class RagService {
         return toHistoryDetail(userId, latestQuestion, sources, conversationQuestions);
     }
 
+    /** 重命名历史记录的标题 */
     @Transactional
     public RagHistoryItemResponse renameHistory(long userId, long questionId, String title) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(questionId, userId)
@@ -1579,6 +2203,7 @@ public class RagService {
         return toHistoryItem(userId, ragQuestionRepository.save(question));
     }
 
+    /** 切换历史记录的置顶状态 */
     @Transactional
     public RagHistoryItemResponse togglePinHistory(long userId, long questionId) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(questionId, userId)
@@ -1587,6 +2212,12 @@ public class RagService {
         return toHistoryItem(userId, ragQuestionRepository.save(question));
     }
 
+    // ========== 用户反馈 ==========
+
+    /**
+     * 提交用户对问答结果的反馈（点赞/踩 + 评论）。
+     * 如果已有反馈则更新，否则新建。rating 只能是 1（赞）或 -1（踩）。
+     */
     @Transactional
     public RagFeedbackResponse submitFeedback(long userId, long questionId, RagFeedbackRequest request) {
         ragQuestionRepository.findByIdAndUserId(questionId, userId)
@@ -1603,6 +2234,25 @@ public class RagService {
         return toFeedbackResponse(ragFeedbackRepository.save(feedback));
     }
 
+    // ========== RAG 质量评估 ==========
+
+    /**
+     * 对单次问答进行 RAG 质量评估。
+     * <p>
+     * 评估指标：
+     * <ul>
+     *   <li><b>忠实度（faithfulness）</b>：回答中的关键词是否能在来源上下文中找到支撑（55%权重）</li>
+     *   <li><b>上下文相关性（contextRelevance）</b>：检索到的来源是否与问题相关（45%权重）</li>
+     *   <li><b>综合分数（overall）</b>：以上两项的加权平均</li>
+     * </ul>
+     * <p>
+     * 评定结论：
+     * <ul>
+     *   <li>PASS：综合 >= 0.72 且忠实度 >= 0.65 且相关性 >= 0.55</li>
+     *   <li>WARN：综合 >= 0.42 且忠实度 >= 0.35 且相关性 >= 0.30</li>
+     *   <li>FAIL：低于 WARN 阈值</li>
+     * </ul>
+     */
     @Transactional
     public RagEvaluationResponse evaluateHistory(long userId, long questionId) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(questionId, userId)
@@ -1646,6 +2296,9 @@ public class RagService {
         return toEvaluationResponse(ragEvaluationRepository.save(evaluation));
     }
 
+    /**
+     * 获取最新的评估结果。如果还没有评估过，则自动触发一次评估。
+     */
     @Transactional
     public RagEvaluationResponse latestEvaluation(long userId, long questionId) {
         ragQuestionRepository.findByIdAndUserId(questionId, userId)
@@ -1655,6 +2308,12 @@ public class RagService {
             .orElseGet(() -> evaluateHistory(userId, questionId));
     }
 
+    // ========== 评估套件（批量测试） ==========
+
+    /**
+     * 运行一次性评估套件：对多个测试用例逐个执行 RAG 问答 + 评估。
+     * 每个测试用例包含问题、资料ID、期望的关键词等，用于系统性地测试 RAG 质量。
+     */
     @Transactional
     public RagEvaluationSuiteResponse runEvaluationSuite(long userId, RagEvaluationSuiteRequest request) {
         if (request == null || request.cases() == null || request.cases().isEmpty()) {
@@ -1663,6 +2322,7 @@ public class RagService {
         return runEvaluationCases(userId, request.cases());
     }
 
+    /** 获取用户的评估套件列表 */
     @Transactional(readOnly = true)
     public List<RagEvaluationSuiteSummaryResponse> evaluationSuites(long userId) {
         return ragEvaluationSuiteRepository.findByUserIdOrderByUpdatedAtDesc(userId).stream()
@@ -1673,6 +2333,7 @@ public class RagService {
             .toList();
     }
 
+    /** 获取评估套件详情（包含测试用例列表和最新运行结果） */
     @Transactional(readOnly = true)
     public RagEvaluationSuiteDetailResponse evaluationSuiteDetail(long userId, long suiteId) {
         RagEvaluationSuiteEntity suite = ragEvaluationSuiteRepository.findByIdAndUserId(suiteId, userId)
@@ -1680,6 +2341,7 @@ public class RagService {
         return toSuiteDetailResponse(suite);
     }
 
+    /** 新建评估套件 */
     @Transactional
     public RagEvaluationSuiteDetailResponse saveEvaluationSuite(long userId, RagEvaluationSuiteSaveRequest request) {
         if (request == null || request.cases() == null || request.cases().isEmpty()) {
@@ -1694,6 +2356,7 @@ public class RagService {
         return toSuiteDetailResponse(savedSuite);
     }
 
+    /** 更新评估套件（替换名称、描述和测试用例） */
     @Transactional
     public RagEvaluationSuiteDetailResponse updateEvaluationSuite(long userId, long suiteId, RagEvaluationSuiteSaveRequest request) {
         if (request == null || request.cases() == null || request.cases().isEmpty()) {
@@ -1709,6 +2372,7 @@ public class RagService {
         return toSuiteDetailResponse(savedSuite);
     }
 
+    /** 删除评估套件及其所有用例和运行记录 */
     @Transactional
     public void deleteEvaluationSuite(long userId, long suiteId) {
         RagEvaluationSuiteEntity suite = ragEvaluationSuiteRepository.findByIdAndUserId(suiteId, userId)
@@ -1718,6 +2382,7 @@ public class RagService {
         ragEvaluationSuiteRepository.delete(suite);
     }
 
+    /** 运行已保存的评估套件 */
     @Transactional
     public RagEvaluationSuiteRunResponse runSavedEvaluationSuite(long userId, long suiteId) {
         RagEvaluationSuiteEntity suite = ragEvaluationSuiteRepository.findByIdAndUserId(suiteId, userId)
@@ -1725,6 +2390,7 @@ public class RagService {
         return runEvaluationSuiteEntity(suite, LocalDateTime.now());
     }
 
+    /** 获取评估套件的历史运行记录列表 */
     @Transactional(readOnly = true)
     public List<RagEvaluationSuiteRunResponse> evaluationSuiteRuns(long userId, long suiteId) {
         ragEvaluationSuiteRepository.findByIdAndUserId(suiteId, userId)
@@ -1734,6 +2400,7 @@ public class RagService {
             .toList();
     }
 
+    /** 更新评估套件的定时运行配置（开启/关闭定时、设置间隔时间） */
     @Transactional
     public RagEvaluationSuiteDetailResponse updateEvaluationSuiteSchedule(long userId, long suiteId, RagEvaluationSuiteScheduleRequest request) {
         RagEvaluationSuiteEntity suite = ragEvaluationSuiteRepository.findByIdAndUserId(suiteId, userId)
@@ -1742,11 +2409,13 @@ public class RagService {
         return toSuiteDetailResponse(ragEvaluationSuiteRepository.save(suite));
     }
 
+    /** 查询所有到期需要运行的定时评估套件（由定时任务调度器调用） */
     @Transactional(readOnly = true)
     public List<RagEvaluationSuiteEntity> dueScheduledEvaluationSuites(LocalDateTime now) {
         return ragEvaluationSuiteRepository.findByScheduledTrueAndNextRunAtLessThanEqualOrderByNextRunAtAsc(now);
     }
 
+    /** 运行定时评估套件（由定时任务调度器调用） */
     @Transactional
     public RagEvaluationSuiteRunResponse runScheduledEvaluationSuite(long suiteId, LocalDateTime now) {
         RagEvaluationSuiteEntity suite = ragEvaluationSuiteRepository.findById(suiteId)
@@ -1757,6 +2426,10 @@ public class RagService {
         return runEvaluationSuiteEntity(suite, now == null ? LocalDateTime.now() : now);
     }
 
+    /**
+     * 执行评估套件实体：加载用例、运行评估、保存运行记录、更新套件统计。
+     * 如果套件配置了定时运行，会自动计算下次运行时间。
+     */
     private RagEvaluationSuiteRunResponse runEvaluationSuiteEntity(RagEvaluationSuiteEntity suite, LocalDateTime runAt) {
         List<RagEvaluationCaseRequest> cases = suiteCases(suite.getId());
         if (cases.isEmpty()) {
@@ -1788,6 +2461,17 @@ public class RagService {
         return toSuiteRunResponse(savedRun);
     }
 
+    /**
+     * 运行评估用例列表：对每个测试用例执行 RAG 问答 + 评估 + 关键词覆盖率检查。
+     * <p>
+     * 通过判定逻辑：
+     * <ul>
+     *   <li>如果用例指定了期望关键词：回答和来源的关键词覆盖率都 >= 70% 判定通过</li>
+     *   <li>如果没有指定期望关键词：使用评估的 PASS/WARN/FAIL 结论判定</li>
+     * </ul>
+     *
+     * @return 评估套件的汇总结果（通过率、平均分等）
+     */
     private RagEvaluationSuiteResponse runEvaluationCases(long userId, List<RagEvaluationCaseRequest> cases) {
         List<RagEvaluationCaseResponse> caseResponses = new ArrayList<>();
         for (int i = 0; i < cases.size(); i++) {
@@ -1889,6 +2573,12 @@ public class RagService {
             .toList();
     }
 
+    // ========== 历史记录删除与清理 ==========
+
+    /**
+     * 删除指定问答记录及其所属的整个对话。
+     * 同时删除关联的来源、反馈、评估和收藏数据。
+     */
     @Transactional
     public void deleteHistory(long userId, long questionId) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(questionId, userId)
@@ -1903,6 +2593,7 @@ public class RagService {
         }
     }
 
+    /** 清空用户的所有聊天历史（包括所有关联数据） */
     @Transactional
     public void clearHistory(long userId) {
         List<Long> questionIds = ragQuestionRepository.findByUserIdOrderByPinnedDescCreatedAtDesc(userId).stream()
@@ -1918,6 +2609,18 @@ public class RagService {
         ragQuestionRepository.deleteByUserId(userId);
     }
 
+    // ========== 资料摘要 ==========
+
+    /**
+     * 为学习资料生成摘要。
+     * <p>
+     * 流程：提取资料的前 8 个片段 -> 调用 LLM 生成摘要 -> 保存到数据库。
+     * 如果 LLM 调用失败，使用本地规则生成基础摘要。
+     *
+     * @param userId  用户 ID
+     * @param request 摘要请求（包含资料 ID）
+     * @return 摘要响应（包含摘要文本、来源数量等）
+     */
     @Transactional
     public RagSummaryResponse summarize(long userId, SummarizeRequest request) {
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(request.materialId(), userId)
@@ -1958,6 +2661,7 @@ public class RagService {
         );
     }
 
+    /** 获取资料的最新摘要 */
     @Transactional(readOnly = true)
     public RagSummaryResponse latestSummary(long userId, long materialId) {
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
@@ -1977,6 +2681,7 @@ public class RagService {
         );
     }
 
+    /** 获取资料的摘要历史列表（可能有多次生成的摘要） */
     @Transactional(readOnly = true)
     public List<RagSummaryResponse> summaryHistory(long userId, long materialId) {
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
@@ -1996,6 +2701,12 @@ public class RagService {
             .toList();
     }
 
+    // ========== 收藏管理 ==========
+
+    /**
+     * 添加收藏：将指定问答记录加入用户的收藏夹。
+     * 如果已收藏则更新（幂等操作）。
+     */
     @Transactional
     public FavoriteItemResponse addFavorite(long userId, FavoriteRequest request) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(request.questionId(), userId)
@@ -2019,6 +2730,7 @@ public class RagService {
         );
     }
 
+    /** 取消收藏 */
     @Transactional
     public void deleteFavorite(long userId, long favoriteId) {
         UserFavoriteEntity favorite = userFavoriteRepository.findByIdAndUserId(favoriteId, userId)
@@ -2026,6 +2738,7 @@ public class RagService {
         userFavoriteRepository.delete(favorite);
     }
 
+    /** 获取用户的收藏列表（按收藏时间倒序） */
     @Transactional(readOnly = true)
     public List<FavoriteItemResponse> favorites(long userId) {
         return userFavoriteRepository.findByUserIdOrderByCreatedAtDesc(userId).stream()
@@ -2049,6 +2762,9 @@ public class RagService {
             .toList();
     }
 
+    // ========== 响应转换辅助方法 ==========
+
+    /** 将问答实体转换为历史列表项响应 */
     private RagHistoryItemResponse toHistoryItem(long userId, RagQuestionEntity question) {
         UserFavoriteEntity favorite = userFavoriteRepository.findByUserIdAndQuestionId(userId, question.getId())
             .orElse(null);
@@ -2065,6 +2781,7 @@ public class RagService {
         );
     }
 
+    /** 将问答实体转换为历史详情响应（包含完整对话消息列表） */
     private RagHistoryDetailResponse toHistoryDetail(
         long userId,
         RagQuestionEntity question,
@@ -2088,6 +2805,7 @@ public class RagService {
         );
     }
 
+    /** 将反馈实体转换为响应 */
     private RagFeedbackResponse toFeedbackResponse(RagFeedbackEntity feedback) {
         return new RagFeedbackResponse(
             feedback.getId(),
@@ -2098,6 +2816,7 @@ public class RagService {
         );
     }
 
+    /** 将评估实体转换为评估响应 */
     private RagEvaluationResponse toEvaluationResponse(RagEvaluationEntity evaluation) {
         return new RagEvaluationResponse(
             evaluation.getId(),
@@ -2111,6 +2830,7 @@ public class RagService {
         );
     }
 
+    /** 将评估套件实体转换为摘要响应（不含用例详情） */
     private RagEvaluationSuiteSummaryResponse toSuiteSummaryResponse(RagEvaluationSuiteEntity suite, int caseCount) {
         return new RagEvaluationSuiteSummaryResponse(
             suite.getId(),
@@ -2129,6 +2849,7 @@ public class RagService {
         );
     }
 
+    /** 将评估套件实体转换为详情响应（包含用例列表和最新运行结果） */
     private RagEvaluationSuiteDetailResponse toSuiteDetailResponse(RagEvaluationSuiteEntity suite) {
         return new RagEvaluationSuiteDetailResponse(
             suite.getId(),
@@ -2146,6 +2867,7 @@ public class RagService {
         );
     }
 
+    /** 将评估套件运行记录实体转换为响应 */
     private RagEvaluationSuiteRunResponse toSuiteRunResponse(RagEvaluationSuiteRunEntity run) {
         return new RagEvaluationSuiteRunResponse(
             run.getId(),
@@ -2231,6 +2953,9 @@ public class RagService {
         return value == null ? null : value.format(DATETIME_FORMATTER);
     }
 
+    // ========== 评估辅助方法 ==========
+
+    /** 从文本中提取有意义的关键词用于评估（limit 为最大数量） */
     private List<String> significantEvaluationTerms(String text, int limit) {
         List<String> terms = significantQueryTerms(text);
         if (!terms.isEmpty()) {
@@ -2251,6 +2976,7 @@ public class RagService {
         return fallbackTerms.stream().distinct().limit(limit).toList();
     }
 
+    /** 计算关键词在文本中的覆盖率（用于评估忠实度和相关性） */
     private double scoreTermCoverage(String text, List<String> terms) {
         if (terms.isEmpty()) {
             return 1.0;
@@ -2260,6 +2986,10 @@ public class RagService {
         return (double) matched / terms.size();
     }
 
+    /**
+     * 根据评估分数生成评定结论。
+     * PASS = 合格，WARN = 需要关注，FAIL = 不合格。
+     */
     private String evaluationVerdict(double overallScore, double faithfulnessScore, double contextRelevanceScore) {
         if (overallScore >= 0.72 && faithfulnessScore >= 0.65 && contextRelevanceScore >= 0.55) {
             return "PASS";
@@ -2270,6 +3000,10 @@ public class RagService {
         return "FAIL";
     }
 
+    /**
+     * 构建评估证据文本：记录哪些关键词被来源支持、哪些缺失。
+     * 格式：sources=数量; matchedQuestionTerms=...; supportedAnswerTerms=...; missingAnswerTerms=...
+     */
     private String buildEvaluationEvidence(
         List<String> questionTerms,
         List<String> answerTerms,
@@ -2295,6 +3029,12 @@ public class RagService {
             + "; missingAnswerTerms=" + String.join(",", missingAnswerTerms);
     }
 
+    /**
+     * 计算期望关键词覆盖率：检查期望出现的关键词是否在文本中实际出现。
+     * 用于评估套件中检查回答/来源是否覆盖了期望的关键词。
+     *
+     * @return TermCoverage 包含覆盖率分数和缺失的关键词列表
+     */
     private TermCoverage expectedTermCoverage(String text, List<String> expectedTerms) {
         List<String> terms = expectedTerms == null ? List.of() : expectedTerms.stream()
             .map(term -> term == null ? "" : normalizeForTermMatch(term))
@@ -2338,6 +3078,9 @@ public class RagService {
         return normalized.isBlank() ? null : normalized;
     }
 
+    // ========== 对话管理辅助方法 ==========
+
+    /** 获取用户每个对话的最新一条问答记录（用于历史列表展示） */
     private List<RagQuestionEntity> latestQuestionsByConversation(long userId) {
         Map<Long, RagQuestionEntity> latestByConversation = new LinkedHashMap<>();
         for (RagQuestionEntity question : ragQuestionRepository.findByUserIdOrderByPinnedDescCreatedAtDesc(userId)) {
@@ -2347,6 +3090,7 @@ public class RagService {
         return latestByConversation.values().stream().toList();
     }
 
+    /** 将问答列表转为对话消息列表（交替的 user/assistant 消息） */
     private List<RagHistoryMessageResponse> toConversationMessages(List<RagQuestionEntity> questions) {
         List<RagHistoryMessageResponse> messages = new ArrayList<>();
         for (RagQuestionEntity question : questions) {
@@ -2356,6 +3100,7 @@ public class RagService {
         return messages;
     }
 
+    /** 获取同一对话中的所有问答记录（按创建时间排序） */
     private List<RagQuestionEntity> questionsInConversation(long userId, RagQuestionEntity question) {
         Long conversationId = effectiveConversationId(question);
         List<RagQuestionEntity> conversationQuestions = ragQuestionRepository
@@ -2366,6 +3111,10 @@ public class RagService {
         return conversationQuestions;
     }
 
+    /**
+     * 解析对话 ID：如果用户指定了 conversationId，查找该问答并获取其有效的对话 ID。
+     * 这样新消息会被加入到已有的对话中。
+     */
     private Long resolveConversationId(long userId, Long requestedConversationId) {
         if (requestedConversationId == null || requestedConversationId <= 0) {
             return null;
@@ -2375,6 +3124,10 @@ public class RagService {
             .orElse(null);
     }
 
+    /**
+     * 确保问答记录有有效的对话 ID。
+     * 如果 conversationId 为空（新对话的第一条消息），则用自己的 ID 作为对话 ID。
+     */
     private RagQuestionEntity ensureConversationId(RagQuestionEntity question) {
         if (question.getConversationId() == null) {
             question.setConversationId(question.getId());
@@ -2383,10 +3136,15 @@ public class RagService {
         return question;
     }
 
+    /** 获取有效的对话 ID：如果 conversationId 为空则返回问答记录自己的 ID */
     private Long effectiveConversationId(RagQuestionEntity question) {
         return question.getConversationId() == null ? question.getId() : question.getConversationId();
     }
 
+    /**
+     * 生成对话标题：从问题文本中截取前 28 个字符作为标题。
+     * 超出部分用 "..." 省略。
+     */
     private String buildConversationTitle(String questionText) {
         String normalized = normalizeHistoryTitle(questionText, questionText);
         if (normalized.length() <= 28) {
@@ -2395,6 +3153,7 @@ public class RagService {
         return normalized.substring(0, 28) + "...";
     }
 
+    /** 规范化历史标题：去除多余空白，空标题时使用"未命名会话" */
     private String normalizeHistoryTitle(String title, String fallback) {
         String value = title == null ? "" : title.trim();
         if (value.isBlank()) {
@@ -2407,6 +3166,12 @@ public class RagService {
         return value;
     }
 
+    // ========== 来源引用管理 ==========
+
+    /**
+     * 保存问答引用的来源片段信息。
+     * 记录每个回答使用了哪些资料的哪些片段，方便前端展示来源引用。
+     */
     private List<RagQuestionSourceEntity> saveSources(long questionId, List<ScoredChunk> topChunks) {
         List<RagQuestionSourceEntity> saved = new ArrayList<>();
         for (ScoredChunk chunk : topChunks) {
@@ -2518,6 +3283,19 @@ public class RagService {
         return normalized.substring(0, 500) + "...";
     }
 
+    // ========== 回答后处理：装饰与格式化 ==========
+
+    /**
+     * 装饰资料模式的回答：添加引用依据（资料名称 + 页码）。
+     * <p>
+     * 处理逻辑：
+     * <ul>
+     *   <li>如果用户选中了文本提问，直接返回清理后的回答</li>
+     *   <li>如果没有检索到相关片段且不是闲聊，返回"未找到依据"的提示</li>
+     *   <li>闲聊问题去除无来源提示后直接返回</li>
+     *   <li>正常回答：在末尾添加"资料依据"段落，列出引用的资料名称和页码</li>
+     * </ul>
+     */
     private String decorateAnswer(ChatRequest request, String content, List<ScoredChunk> selectedChunks) {
         String question = request.question();
         String answerStyle = request.answerStyle();
@@ -2570,6 +3348,7 @@ public class RagService {
         return "HOMEWORK".equalsIgnoreCase(String.valueOf(answerStyle).trim());
     }
 
+    /** 装饰通用聊天模式的回答：去除资料相关的提示信息 */
     private String decorateGeneralAnswer(String content) {
         String answer = cleanAnswerText(content);
         if (answer.isBlank()) {
@@ -2615,6 +3394,7 @@ public class RagService {
             .trim();
     }
 
+    /** 判断是否为闲聊问题（你好、谢谢、在吗等） */
     private boolean isCasualQuestion(String question) {
         String normalized = question == null ? "" : question.trim().replaceAll("[\\s。！？!?，,.、]+", "");
         if (normalized.isBlank()) {
@@ -2666,6 +3446,22 @@ public class RagService {
             + " searchable chunk(s). Key points: " + highlights;
     }
 
+    // ========== BM25 关键词检索 ==========
+
+    /**
+     * BM25 关键词检索：基于倒排索引的传统信息检索方法。
+     * <p>
+     * BM25（Best Matching 25）是一种经典的信息检索算法，通过计算查询词
+     * 在文档中的词频（TF）和逆文档频率（IDF）来评分。
+     * <p>
+     * 与向量检索互补：
+     * <ul>
+     *   <li>向量检索擅长语义相似性（"快排"能匹配"快速排序算法"）</li>
+     *   <li>BM25 擅长精确关键词匹配（"TCP"只匹配包含"TCP"的片段）</li>
+     * </ul>
+     *
+     * @return 按 BM25 分数降序排列的所有片段
+     */
     private List<ScoredChunk> findScoredChunks(long userId, String question, Long materialId) {
         List<LearningMaterialEntity> materials = materialId == null
             ? learningMaterialRepository.findByOwnerIdOrderByCreatedAtDesc(userId)
@@ -2698,6 +3494,11 @@ public class RagService {
         return scoredChunks;
     }
 
+    /**
+     * 获取或创建 BM25 评分器。
+     * 使用缓存避免每次查询都重建倒排索引（构建索引开销较大）。
+     * 缓存满时清空所有缓存重新构建。
+     */
     private Bm25Scorer bm25Scorer(
         long userId,
         Long materialId,
@@ -2738,6 +3539,21 @@ public class RagService {
         return key.toString();
     }
 
+    // ========== 向量语义检索 ==========
+
+    /**
+     * 向量语义检索：将问题和片段都转为向量，计算余弦相似度。
+     * <p>
+     * 检索流程：
+     * <ol>
+     *   <li>调用 EmbeddingClient 将问题文本转为向量</li>
+     *   <li>优先使用外部向量数据库（如 Milvus）检索（速度更快）</li>
+     *   <li>如果外部向量数据库未配置，回退到本地遍历计算余弦相似度</li>
+     *   <li>根据问题长度动态调整相似度阈值（短问题降低阈值，长问题提高阈值）</li>
+     * </ol>
+     *
+     * @return 按相似度降序排列的片段列表
+     */
     private List<ScoredChunk> findVectorScoredChunks(long userId, String question, Long materialId) {
         Optional<List<Double>> questionEmbedding = embeddingClient.embed(question);
         if (questionEmbedding.isEmpty() || questionEmbedding.get().isEmpty()) {
@@ -2773,6 +3589,11 @@ public class RagService {
         return scoredChunks;
     }
 
+    /**
+     * 使用外部向量数据库检索：将问题向量发送到向量数据库进行 ANN（近似最近邻）搜索。
+     * 比本地遍历快得多，适合大规模资料库。
+     * 如果向量数据库未配置或无结果，返回空列表（调用方会回退到本地检索）。
+     */
     private List<ScoredChunk> findVectorStoreScoredChunks(long userId, Long materialId, List<Double> questionEmbedding, double scoreThreshold) {
         if (!vectorStoreClient.configured()) {
             return List.of();
@@ -2804,6 +3625,13 @@ public class RagService {
         return scoredChunks;
     }
 
+    /**
+     * 根据问题长度动态调整向量相似度阈值。
+     * <p>
+     * 短问题（<=8字符）：降低阈值 0.08（因为短问题的向量表示不够精确，需要放宽匹配）
+     * 长问题（>=80字符）：提高阈值 0.03（长问题向量更精确，可以更严格匹配）
+     * 其他：使用配置的默认阈值
+     */
     private double effectiveEmbeddingScoreThreshold(String question) {
         double baseThreshold = embeddingProperties.scoreThreshold();
         int normalizedLength = normalizeForTermMatch(question).length();
@@ -2816,6 +3644,17 @@ public class RagService {
         return baseThreshold;
     }
 
+    /**
+     * 从排序后的候选片段中选出最终的 topK 个片段。
+     * <p>
+     * 选择策略：
+     * <ul>
+     *   <li>分数 <= 0 的片段被跳过</li>
+     *   <li>如果使用 BM25 分数（>1.0），只保留 BM25 精确匹配的片段</li>
+     *   <li>超过 3 个片段后，避免来自同一页的重复片段（增加多样性）</li>
+     *   <li>最多选取 topK 个片段</li>
+     * </ul>
+     */
     private List<ScoredChunk> selectTopChunks(List<ScoredChunk> scoredChunks) {
         List<ScoredChunk> selected = new ArrayList<>();
         Set<String> seenPages = new HashSet<>();
@@ -2843,6 +3682,10 @@ public class RagService {
         return scoredChunks.stream().map(ScoredChunk::score).anyMatch(score -> score > 1.0);
     }
 
+    /**
+     * 限制上下文片段的总字符数，防止超出 LLM 的上下文窗口。
+     * 最多选取 topK 个片段，且总字符数不超过 MAX_CONTEXT_CHARS（10000字符）。
+     */
     private List<ScoredChunk> limitContextChunks(List<ScoredChunk> selected) {
         List<ScoredChunk> limited = new ArrayList<>();
         int totalChars = 0;
@@ -2860,6 +3703,7 @@ public class RagService {
         return limited;
     }
 
+    /** 解析存储在数据库中的嵌入向量 JSON 字符串为 Double 列表 */
     private List<Double> parseEmbedding(String embeddingJson) {
         if (embeddingJson == null || embeddingJson.isBlank() || embeddingJson.trim().startsWith("{")) {
             return List.of();
@@ -2882,6 +3726,15 @@ public class RagService {
         }
     }
 
+    /**
+     * 计算两个向量的余弦相似度。
+     * <p>
+     * 公式：cos(A, B) = (A . B) / (|A| * |B|)
+     * <p>
+     * 结果范围：-1 到 1（对于文本嵌入向量通常在 0 到 1 之间）。
+     * 1 表示完全相同方向，0 表示正交（无关），-1 表示完全相反。
+     * 返回 NaN 表示向量维度不匹配或零向量。
+     */
     private double cosineSimilarity(List<Double> left, List<Double> right) {
         if (left.size() != right.size() || left.isEmpty()) {
             return Double.NaN;
@@ -2902,19 +3755,36 @@ public class RagService {
         return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
     }
 
+    // ========== 图片处理常量和正则 ==========
+
+    /** 匹配资料中嵌入图片的标记：[[material-image:xxx.png]] */
     private static final java.util.regex.Pattern IMAGE_MARKER_PATTERN =
         java.util.regex.Pattern.compile("\\[\\[material-image:[^\\]]+\\]\\]\\s*");
+    /** 用于提取图片文件名的捕获组模式 */
     private static final java.util.regex.Pattern IMAGE_MARKER_EXTRACT_PATTERN =
         java.util.regex.Pattern.compile("\\[\\[material-image:([^\\]]+)\\]\\]");
+    /** 匹配 OCR 标记的模式 */
     private static final java.util.regex.Pattern IMAGE_OCR_PATTERN =
         java.util.regex.Pattern.compile("\\[image ocr:[^\\]]*\\]\\s*");
+    /** 每个片段最多加载的图片数量 */
     private static final int MAX_IMAGES_PER_CHUNK = 3;
+    /** 每次请求最多发送给 LLM 的图片总数 */
     private static final int MAX_IMAGES_PER_REQUEST = 5;
+    /** 图片发送给 LLM 前的最大边长（像素），超过会等比缩放 */
     private static final int MAX_IMAGE_SIDE = 768;
+    /** 资源文件夹后缀（如 xxx.pdf.assets 存放 PDF 提取的图片） */
     private static final String ASSET_SUFFIX = ".assets";
+    /** 图片标记前缀，用于快速检测片段文本中是否包含图片引用 */
     private static final String IMAGE_MARKER_PREFIX = "[[material-image:";
+    /** PDF 页面图片文件名的正则（如 page-1.png、page-1-0.png） */
     private static final String PAGE_IMAGE_RE = "^page-(\\d+)(?:-\\d+)?\\.png$";
 
+    // ========== 摘录与图片处理方法 ==========
+
+    /**
+     * 将文本截取为简短摘录（最多 160 字符），去除图片标记。
+     * 用于在回答中展示参考资料的简要内容。
+     */
     private String excerpt(String text) {
         String cleaned = IMAGE_MARKER_PATTERN.matcher(text == null ? "" : text).replaceAll("");
         cleaned = IMAGE_OCR_PATTERN.matcher(cleaned).replaceAll("图片OCR：");
@@ -2925,6 +3795,11 @@ public class RagService {
         return normalized.substring(0, 160) + "...";
     }
 
+    /**
+     * 将 ScoredChunk 截取为智能摘录。
+     * 如果有高亮关键词，会优先截取包含最多关键词的片段区域（而非简单截取开头），
+     * 让用户在摘录中就能看到匹配的部分。
+     */
     private String excerpt(ScoredChunk chunk) {
         if (chunk == null) {
             return "";
@@ -2978,12 +3853,29 @@ public class RagService {
         return count;
     }
 
+    /** 清理摘录文本：去除图片标记和 OCR 标记，规范化空白 */
     private String cleanExcerptText(String text) {
         String cleaned = IMAGE_MARKER_PATTERN.matcher(text == null ? "" : text).replaceAll("");
         cleaned = IMAGE_OCR_PATTERN.matcher(cleaned).replaceAll("");
         return cleaned.trim().replaceAll("\\s+", " ");
     }
 
+    /**
+     * 从资料片段中加载嵌入的图片。
+     * <p>
+     * 处理流程：
+     * <ol>
+     *   <li>从片段文本中提取图片标记（[[material-image:xxx.png]]）</li>
+     *   <li>在资料的资源文件夹中查找对应的图片文件</li>
+     *   <li>如果是 PDF 资料且图片不存在，尝试实时渲染 PDF 页面为图片</li>
+     *   <li>读取图片 -> 缩放到最大 768px -> 转为 Base64 PNG 格式</li>
+     *   <li>如果所有方法都找不到图片，对 PDF 资料尝试渲染当前页的截图</li>
+     * </ol>
+     *
+     * @param material 资料实体（包含存储路径等信息）
+     * @param chunk    片段实体（包含文本和页码等信息）
+     * @return Base64 编码的图片列表
+     */
     private List<LlmImage> loadChunkImages(LearningMaterialEntity material, MaterialChunkEntity chunk) {
         String chunkText = chunk.getChunkText();
         if (chunkText == null || material.getStoragePath() == null) {
@@ -3027,6 +3919,7 @@ public class RagService {
         return images;
     }
 
+    /** 加载图片文件并转为 Base64 编码的 LlmImage 对象 */
     private LlmImage loadImage(Path imagePath) {
         if (imagePath == null) {
             return null;
@@ -3044,6 +3937,10 @@ public class RagService {
         }
     }
 
+    /**
+     * 等比缩放图片，确保最长边不超过 maxSide 像素。
+     * 使用双线性插值算法保证缩放质量。
+     */
     private BufferedImage resizeImage(BufferedImage original, int maxSide) {
         int w = original.getWidth();
         int h = original.getHeight();
@@ -3061,10 +3958,23 @@ public class RagService {
         return resized;
     }
 
+    // ========== 文件路径处理 ==========
+
+    /** 获取资料的资源文件夹路径（如 xxx.pdf 对应 xxx.pdf.assets/） */
     private Path assetDir(Path sourcePath) {
         return Path.of(sourcePath.toString() + ASSET_SUFFIX).toAbsolutePath().normalize();
     }
 
+    /**
+     * 解析资料存储路径：将数据库中存储的路径转为实际文件系统路径。
+     * <p>
+     * 处理逻辑：
+     * <ul>
+     *   <li>相对路径：相对于 storageRoot 解析</li>
+     *   <li>绝对路径：先尝试重映射到当前存储根目录（兼容部署路径变化）</li>
+     *   <li>如果路径在 storageRoot 内部，直接使用</li>
+     * </ul>
+     */
     private Path resolveStoredPath(String storagePath) {
         Path rawPath = Path.of(storagePath.trim());
         if (!rawPath.isAbsolute()) {
@@ -3081,6 +3991,12 @@ public class RagService {
         return remappedPath.orElse(absolutePath);
     }
 
+    /**
+     * 路径重映射：当部署环境变化导致存储根目录改变时，
+     * 尝试从旧的绝对路径中找到存储根目录之后的相对部分，
+     * 然后用当前的 storageRoot 拼接出新路径。
+     * 这样即使把项目从一个目录搬到另一个目录，资料文件仍能正常访问。
+     */
     private Optional<Path> remapToCurrentStorageRoot(Path absolutePath) {
         Path storageRootName = storageRoot.getFileName();
         if (storageRootName == null) {
@@ -3099,6 +4015,7 @@ public class RagService {
         return Optional.empty();
     }
 
+    /** 在资源文件夹中查找指定文件名的资源文件，验证路径安全性 */
     private Path resolveAssetPath(Path sourcePath, String fileName) {
         Path dir = assetDir(sourcePath);
         Path direct = dir.resolve(fileName).normalize();
@@ -3109,6 +4026,11 @@ public class RagService {
         return null;
     }
 
+    /**
+     * 将 PDF 的指定页面渲染为 PNG 图片并保存到资源文件夹。
+     * 使用 144 DPI 渲染（比默认 72 DPI 更清晰，但文件不会太大）。
+     * 渲染结果会被缓存到磁盘，下次访问同一页时直接读取。
+     */
     private Path renderPdfPageAsset(Path sourcePath, String fileName) {
         java.util.regex.Matcher matcher = java.util.regex.Pattern
             .compile(PAGE_IMAGE_RE)
@@ -3138,6 +4060,7 @@ public class RagService {
         }
     }
 
+    /** 将新图片追加到目标列表中，不超过 MAX_IMAGES_PER_REQUEST 限制 */
     private void appendImages(List<LlmImage> target, List<LlmImage> additions) {
         for (LlmImage image : additions) {
             if (target.size() >= MAX_IMAGES_PER_REQUEST) {
@@ -3147,6 +4070,7 @@ public class RagService {
         }
     }
 
+    /** 根据文件扩展名检测图片的 MIME 类型 */
     private String detectMediaType(String fileName) {
         String lower = fileName.toLowerCase(Locale.ROOT);
         if (lower.endsWith(".png")) return "image/png";
@@ -3159,6 +4083,11 @@ public class RagService {
         return "image/png";
     }
 
+    /**
+     * 从资料的其他片段中补充图片。
+     * 遍历已选片段所属资料的所有片段，找到包含图片标记但还未被选中的片段，
+     * 加载它们的图片直到达到 MAX_IMAGES_PER_REQUEST 上限。
+     */
     private void collectImagesFromMaterialChunks(long userId, Long materialId, List<ScoredChunk> selectedChunks, List<LlmImage> images) {
         Set<Long> selectedChunkIds = selectedChunks.stream()
             .map(c -> c.chunk().getId())
@@ -3182,37 +4111,61 @@ public class RagService {
         }
     }
 
+    // ========== 内部枚举和记录类型 ==========
+
+    /**
+     * 关键词查询意图枚举。
+     * 用于指导关键词匹配时的评分策略。
+     */
     private enum KeywordIntent {
+        /** 定义类：什么是 XXX */
         DEFINITION,
+        /** 功能作用类：XXX 有什么用 */
         FUNCTION,
+        /** 对比类：A 和 B 的区别 */
         COMPARISON,
+        /** 出现位置类：XXX 在哪里提到 */
         OCCURRENCE
     }
 
+    /** 关键词查询：包含提取的术语列表和识别出的意图类型 */
     private record KeywordQuery(List<String> terms, KeywordIntent intent) {
     }
 
+    /** 资料及其片段的组合，用于批量处理 */
     private record MaterialChunks(LearningMaterialEntity material, List<MaterialChunkEntity> chunks) {
     }
 
+    /** BM25 索引缓存条目，包含预构建的 BM25 评分器 */
     private record Bm25IndexCacheEntry(Bm25Scorer scorer) {
     }
 
+    /** 检索结果缓存条目，包含排序后的片段 ID 和分数 */
     private record RetrievalCacheEntry(List<CachedScoredChunk> chunks) {
     }
 
+    /** 缓存中的片段记录：仅保存 chunkId 和分数（不持有实体引用，避免内存泄漏） */
     private record CachedScoredChunk(Long chunkId, double score, List<String> highlightTerms) {
     }
 
+    /** 关键词覆盖率结果：包含覆盖率分数和缺失的关键词列表 */
     private record TermCoverage(double score, List<String> missingTerms) {
     }
 
+    /**
+     * 混合检索候选对象：聚合同一片段在向量检索、BM25 检索和摘要检索中的分数。
+     * 用于融合阶段的多路分数合并。
+     */
     private static final class HybridCandidate {
         private final LearningMaterialEntity material;
         private final MaterialChunkEntity chunk;
+        /** 向量语义检索的最高分数 */
         private double vectorScore;
+        /** BM25 关键词检索的最高分数 */
         private double bm25Score;
+        /** 摘要种子检索的分数 */
         private double summaryScore;
+        /** 高亮关键词列表（用于摘录中重点显示） */
         private List<String> highlightTerms;
 
         private HybridCandidate(ScoredChunk scoredChunk) {
@@ -3222,6 +4175,10 @@ public class RagService {
         }
     }
 
+    /**
+     * 带分数的片段记录：将资料实体、片段实体和相关性分数绑定在一起。
+     * highlightTerms 记录了匹配到的关键词，用于在摘录中高亮显示。
+     */
     private record ScoredChunk(
         LearningMaterialEntity material,
         MaterialChunkEntity chunk,

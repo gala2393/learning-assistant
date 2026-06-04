@@ -1,3 +1,4 @@
+// 徽章组件 - 用于显示状态、标签、数量等小信息块
 import * as React from 'react'
 import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '@/lib/utils'

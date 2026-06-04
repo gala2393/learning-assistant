@@ -1,3 +1,20 @@
+/**
+ * EvaluationPage — RAG 评估工作台。
+ *
+ * 路由：/workspace/evaluation（普通用户）和 /admin/evaluation（管理员）
+ *
+ * 功能：
+ * 1. 三栏布局：左侧已保存套件列表 / 中间用例编辑 / 右侧结果展示
+ * 2. 即时运行：不保存套件，直接测试当前编辑的用例
+ * 3. 保存后运行：保存为套件，可重复运行和定时回归
+ * 4. 评估指标：通过率、忠实度、相关度、综合分
+ * 5. 运行历史：查看历次运行结果
+ * 6. 定时调度：设置套件定期自动运行（1-720 小时）
+ *
+ * 评估流程：对每个用例执行完整 RAG 流程（检索+生成），
+ * 然后用 LLM 自动评分（忠实度、相关度、综合分），
+ * 并检查答案是否包含预期关键词。
+ */
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import {

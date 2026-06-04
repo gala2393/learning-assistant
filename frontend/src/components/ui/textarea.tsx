@@ -1,3 +1,4 @@
+// 文本域组件 - 多行文本输入框
 import * as React from 'react'
 import { cn } from '@/lib/utils'
 

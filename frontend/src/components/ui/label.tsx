@@ -1,3 +1,4 @@
+// 标签组件 - 用于表单字段的文字说明标签
 import * as React from 'react'
 import * as LabelPrimitive from '@radix-ui/react-label'
 import { cva, type VariantProps } from 'class-variance-authority'

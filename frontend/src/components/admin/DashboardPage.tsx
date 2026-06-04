@@ -1,3 +1,19 @@
+/**
+ * 管理员仪表盘页面 - DashboardPage
+ *
+ * 路由：由 AdminLayout 渲染，路径通常为 /admin/dashboard
+ * 用途：以图表和指标卡片的形式展示系统整体运行概况，
+ *       包括用户数、资料数、问答数、收藏数、日志数等核心指标，
+ *       以及资料覆盖率、收藏转化率、审计压力等衍生洞察。
+ *
+ * 主要功能：
+ * - 从后端 useAdminStats 接口获取统计数据
+ * - 展示 5 张指标卡片（用户/资料/问答/收藏/日志），带进度条
+ * - 横向对比柱状图（系统指标对比）
+ * - 活跃度构成环形图（DonutChart）
+ * - 3 张洞察卡片（资料覆盖/收藏转化/审计压力）
+ */
+
 import { motion } from 'framer-motion'
 import { useAdminStats } from '@/api/admin'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -15,6 +31,15 @@ import {
 } from 'lucide-react'
 import type { AdminStats } from '@/types'
 
+/**
+ * 统计卡片配置数组
+ * 每项包含：
+ * - key：对应 AdminStats 中的字段名
+ * - label：展示标签
+ * - icon：图标组件
+ * - color：进度条颜色
+ * - bg：图标背景色类名（含暗色模式适配）
+ */
 const statCards = [
   { key: 'userCount', label: '用户', icon: Users, color: '#2563eb', bg: 'bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300' },
   { key: 'materialCount', label: '资料', icon: BookOpen, color: '#0f766e', bg: 'bg-teal-50 text-teal-700 dark:bg-teal-950/40 dark:text-teal-300' },
@@ -23,20 +48,35 @@ const statCards = [
   { key: 'logCount', label: '日志', icon: ScrollText, color: '#dc2626', bg: 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300' },
 ] as const
 
+/**
+ * DashboardPage 组件
+ * 无 Props，数据通过 useAdminStats hook 从后端获取
+ */
 export function DashboardPage() {
+  // 从后端获取管理员统计数据，isLoading 表示是否正在加载
   const { data: stats, isLoading } = useAdminStats()
+
+  // 计算所有指标中的最大值，用于进度条的百分比基准（最小为 1 防止除以零）
   const maxValue = Math.max(...statCards.map((card) => getStat(stats, card.key)), 1)
+
+  // 活跃事件总量 = 问答 + 收藏 + 日志
   const totalActivity = getStat(stats, 'questionCount') + getStat(stats, 'favoriteCount') + getStat(stats, 'logCount')
+
+  // 资料覆盖率 = 资料数 / 用户数 * 100
   const materialCoverage = ratio(getStat(stats, 'materialCount'), getStat(stats, 'userCount'))
+
+  // 收藏转化率 = 收藏数 / 问答数 * 100
   const favoriteRate = ratio(getStat(stats, 'favoriteCount'), getStat(stats, 'questionCount'))
 
   return (
+    /* 页面容器，带入场动画（淡入+上移） */
     <motion.div
       className="space-y-5 p-3 md:p-6"
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
     >
+      {/* ========== 页面顶部标题区域 ========== */}
       <section className="rounded-xl border border-slate-200 bg-gradient-to-r from-white to-slate-50 p-4 dark:border-slate-800 dark:from-[#171a21] dark:to-[#111318]">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
@@ -47,6 +87,7 @@ export function DashboardPage() {
               以图表方式查看系统规模、资料沉淀、问答活跃度和后台审计量。
             </p>
           </div>
+          {/* 右侧管理视图标识 */}
           <div className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2 text-xs text-muted-foreground dark:border-slate-800 dark:bg-slate-900">
             <ShieldCheck className="h-4 w-4 text-emerald-600" />
             管理视图
@@ -54,10 +95,12 @@ export function DashboardPage() {
         </div>
       </section>
 
+      {/* ========== 5 张核心指标卡片（响应式网格布局） ========== */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {statCards.map((card) => {
           const Icon = card.icon
           const value = getStat(stats, card.key)
+          // 计算进度条百分比，最小 8% 防止太小看不见
           const percent = Math.max(8, Math.round((value / maxValue) * 100))
 
           return (
@@ -66,12 +109,15 @@ export function DashboardPage() {
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-xs text-muted-foreground">{card.label}</p>
+                    {/* 加载中显示骨架屏，否则显示数值 */}
                     {isLoading ? <Skeleton className="mt-2 h-8 w-20" /> : <p className="mt-1 text-3xl font-semibold tabular-nums">{value}</p>}
                   </div>
+                  {/* 右上角图标 */}
                   <span className={`flex h-10 w-10 items-center justify-center rounded-lg ${card.bg}`}>
                     <Icon className="h-5 w-5" />
                   </span>
                 </div>
+                {/* 进度条：加载时显示 30% 固定宽度动画，否则按比例显示 */}
                 <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                   <div
                     className="h-full rounded-full transition-all duration-700"
@@ -84,7 +130,9 @@ export function DashboardPage() {
         })}
       </div>
 
+      {/* ========== 中部双栏：系统指标对比 + 活跃度构成 ========== */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.35fr_0.9fr]">
+        {/* 左侧：横向柱状图对比 */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
@@ -94,10 +142,12 @@ export function DashboardPage() {
           <CardContent className="space-y-4">
             {statCards.map((card) => {
               const value = getStat(stats, card.key)
+              // 柱状图宽度百分比，最小 4% 防止不可见
               const width = Math.max(4, Math.round((value / maxValue) * 100))
               return (
                 <div key={card.key} className="grid grid-cols-[4rem_1fr_4rem] items-center gap-3">
                   <span className="text-sm text-muted-foreground">{card.label}</span>
+                  {/* 柱状条，宽度大于 18% 时在条内显示数值 */}
                   <div className="h-8 overflow-hidden rounded-lg bg-slate-100 dark:bg-slate-800">
                     <div
                       className="flex h-full items-center justify-end rounded-lg pr-2 text-xs font-medium text-white transition-all duration-700"
@@ -106,6 +156,7 @@ export function DashboardPage() {
                       {!isLoading && width > 18 ? value : ''}
                     </div>
                   </div>
+                  {/* 右侧数值 */}
                   <span className="text-right text-sm font-medium tabular-nums">{isLoading ? '-' : value}</span>
                 </div>
               )
@@ -113,6 +164,7 @@ export function DashboardPage() {
           </CardContent>
         </Card>
 
+        {/* 右侧：活跃度构成环形图 */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
@@ -121,11 +173,13 @@ export function DashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="flex flex-col items-center gap-4 sm:flex-row xl:flex-col">
+              {/* 环形图：展示问答/收藏/日志三项占比 */}
               <DonutChart
                 stats={stats}
                 loading={isLoading}
                 keys={['questionCount', 'favoriteCount', 'logCount']}
               />
+              {/* 图例和总量 */}
               <div className="w-full space-y-3">
                 <Legend color="#7c3aed" label="问答" value={getStat(stats, 'questionCount')} />
                 <Legend color="#d97706" label="收藏" value={getStat(stats, 'favoriteCount')} />
@@ -139,6 +193,7 @@ export function DashboardPage() {
         </Card>
       </div>
 
+      {/* ========== 底部洞察卡片 ========== */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <InsightCard title="资料覆盖" value={`${materialCoverage}%`} desc="资料数 / 用户数，用于判断用户资料沉淀是否充足。" />
         <InsightCard title="收藏转化" value={`${favoriteRate}%`} desc="收藏数 / 问答数，用于粗略判断回答内容是否被复用。" />
@@ -148,15 +203,31 @@ export function DashboardPage() {
   )
 }
 
+/**
+ * 安全获取统计值，当 stats 为 undefined 或字段缺失时返回 0
+ * @param stats - 后端返回的统计数据对象
+ * @param key - 要获取的字段名
+ */
 function getStat(stats: AdminStats | undefined, key: keyof AdminStats) {
   return stats?.[key] ?? 0
 }
 
+/**
+ * 计算比率百分比，上限 999，分母为 0 时返回 0
+ * @param numerator - 分子
+ * @param denominator - 分母
+ */
 function ratio(numerator: number, denominator: number) {
   if (!denominator) return 0
   return Math.min(999, Math.round((numerator / denominator) * 100))
 }
 
+/**
+ * 图例组件 - 展示颜色圆点 + 标签 + 数值
+ * @param color - 颜色值
+ * @param label - 文字标签
+ * @param value - 数值
+ */
 function Legend({ color, label, value }: { color: string; label: string; value: number }) {
   return (
     <div className="flex items-center justify-between gap-3 text-sm">
@@ -169,6 +240,12 @@ function Legend({ color, label, value }: { color: string; label: string; value: 
   )
 }
 
+/**
+ * 环形图组件 - 纯 SVG 绘制，用于展示活跃度构成比例
+ * @param stats - 统计数据
+ * @param keys - 要展示的字段名数组
+ * @param loading - 是否正在加载
+ */
 function DonutChart({
   stats,
   keys,
@@ -178,15 +255,21 @@ function DonutChart({
   keys: Array<keyof AdminStats>
   loading: boolean
 }) {
+  // 各扇区颜色
   const colors = ['#7c3aed', '#d97706', '#dc2626']
+  // 获取各项数值
   const values = keys.map((key) => getStat(stats, key))
   const total = values.reduce((sum, value) => sum + value, 0)
+  // SVG 环形偏移量起始位置
   let offset = 25
 
   return (
     <svg viewBox="0 0 120 120" className="h-44 w-44 shrink-0">
+      {/* 底层灰色圆环 */}
       <circle cx="60" cy="60" r="42" fill="none" stroke="currentColor" strokeWidth="16" className="text-slate-100 dark:text-slate-800" />
+      {/* 加载完成且有数据时，逐段绘制彩色扇区 */}
       {!loading && total > 0 && values.map((value, index) => {
+        // 每段弧长 = (该值/总量) * 圆周长(2πr ≈ 263.89)
         const dash = (value / total) * 263.89
         const segment = (
           <circle
@@ -199,13 +282,14 @@ function DonutChart({
             strokeWidth="16"
             strokeLinecap="round"
             strokeDasharray={`${dash} 263.89`}
-            strokeDashoffset={-offset}
-            transform="rotate(-90 60 60)"
+            strokeDashoffset={-offset}  // 负偏移实现顺时针排列
+            transform="rotate(-90 60 60)"  // 从顶部开始绘制
           />
         )
-        offset += dash
+        offset += dash  // 累加偏移量
         return segment
       })}
+      {/* 中心显示总数 */}
       <text x="60" y="57" textAnchor="middle" className="fill-foreground text-xl font-semibold">
         {loading ? '-' : total}
       </text>
@@ -216,6 +300,12 @@ function DonutChart({
   )
 }
 
+/**
+ * 洞察卡片组件 - 展示单个指标及其说明
+ * @param title - 指标名称
+ * @param value - 指标值（字符串）
+ * @param desc - 指标说明文字
+ */
 function InsightCard({ title, value, desc }: { title: string; value: string; desc: string }) {
   return (
     <Card>

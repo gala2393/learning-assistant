@@ -1,3 +1,4 @@
+// 按钮组件 - 支持多种样式变体和尺寸，可通过 asChild 渲染为其他元素
 import * as React from 'react'
 import { Slot } from '@radix-ui/react-slot'
 import { cva, type VariantProps } from 'class-variance-authority'

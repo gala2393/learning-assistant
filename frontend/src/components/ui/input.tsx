@@ -1,3 +1,4 @@
+// 输入框组件 - 基础文本输入框，支持文件上传样式
 import * as React from 'react'
 import { cn } from '@/lib/utils'
 

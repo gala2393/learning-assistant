@@ -1,47 +1,79 @@
+/**
+ * types/index.ts - 全局 TypeScript 类型定义
+ *
+ * 功能说明：
+ * - 定义整个前端项目中共享的接口和类型
+ * - 包括：API 响应、用户认证、资料管理、聊天问答、
+ *   RAG 检索、历史记录、收藏、总结、管理员后台、LLM 配置等
+ *
+ * 类型组织顺序：
+ * 1. 通用 API 响应
+ * 2. 用户认证相关（Session、登录、注册、密码）
+ * 3. 资料管理相关（Material、MaterialChunk、MaterialPage）
+ * 4. 聊天与 RAG 相关（ChatPayload、RagSource、RagUsage）
+ * 5. 历史记录与收藏（HistoryItem、FavoriteItem）
+ * 6. RAG 评估（EvaluationCase/Suite）
+ * 7. 总结（SummaryResult）
+ * 8. 管理员后台（AdminStats、AdminUser、AdminLog、AdminUsageRecord）
+ * 9. LLM 配置（LlmStatus、UserLlmConfig）
+ */
+
+// ==================== 通用 API 响应 ====================
+
+/** 后端统一 API 响应格式 */
 export interface ApiResponse<T> {
-  code: number
-  message: string
-  data: T | null
+  code: number          // 业务状态码（0 表示成功）
+  message: string       // 提示信息
+  data: T | null        // 响应数据，失败时可能为 null
 }
 
+// ==================== 用户认证相关 ====================
+
+/** 用户会话信息（登录成功后存储在前端） */
 export interface Session {
-  id: string | number | null
-  username: string
-  nickname: string
-  avatar?: string
-  role: 'ADMIN' | 'USER'
-  token: string
+  id: string | number | null   // 用户 ID
+  username: string              // 用户名
+  nickname: string              // 昵称
+  avatar?: string               // 头像（Base64 或预设 ID）
+  role: 'ADMIN' | 'USER'       // 角色
+  token: string                 // JWT 认证令牌
 }
 
+/** 修改个人资料的请求体 */
 export interface ProfilePayload {
-  nickname: string
-  avatar: string
+  nickname: string              // 新昵称
+  avatar: string                // 新头像值
 }
 
+/** 修改密码的请求体 */
 export interface PasswordPayload {
-  currentPassword: string
-  newPassword: string
-  confirmPassword: string
+  currentPassword: string       // 当前密码
+  newPassword: string           // 新密码
+  confirmPassword: string       // 确认新密码
 }
 
+/** 用户名密码登录的请求体 */
 export interface LoginPayload {
   username: string
   password: string
 }
 
+/** 邮箱验证码登录的请求体 */
 export interface EmailLoginPayload {
-  email: string
-  code: string
+  email: string                 // 邮箱地址
+  code: string                  // 6 位验证码
 }
 
+/** 注册的请求体 */
 export interface RegisterPayload {
   email: string
   username: string
   password: string
   confirmPassword: string
-  code: string
+  code: string                  // 邮箱验证码
 }
 
+/** 重置密码的请求体 */
 export interface ResetPasswordPayload {
   email: string
   code: string
@@ -49,199 +81,247 @@ export interface ResetPasswordPayload {
   confirmPassword: string
 }
 
+/** 用户名可用性检查结果 */
 export interface UsernameCheckResult {
-  username: string
-  available: boolean
-  message: string
+  username: string              // 被检查的用户名
+  available: boolean            // 是否可用
+  message: string               // 提示信息
 }
 
+// ==================== 资料管理相关 ====================
+
+/** 资料来源类型枚举 */
 export type SourceType = 'PDF' | 'DOCX' | 'WORD' | 'PPT' | 'TXT' | 'MD' | 'HTML' | 'WEB'
+
+/** 资料解析状态枚举 */
 export type ParseStatus = 'SUCCESS' | 'PARSED' | 'PROCESSING' | 'PARSING' | 'PENDING' | 'FAILED'
+
+/** 总结生成状态枚举 */
 export type SummaryStatus = 'SUCCESS' | 'PENDING'
+
+/** 页面预览状态枚举 */
 export type PreviewStatus = 'NONE' | 'READY' | 'DEGRADED' | 'FAILED'
 
+/** 学习资料完整信息 */
 export interface Material {
-  id: string
-  title: string
-  sourceType: SourceType | string
-  originalName: string
-  sourceUrl: string
-  fileSize: number
-  parseStatus: ParseStatus
-  parseProgressPercent?: number | null
-  parseStage?: string | null
-  parseMessage?: string | null
-  summaryStatus: SummaryStatus
-  previewStatus?: PreviewStatus
-  previewError?: string | null
-  pageCount?: number | null
-  chunkCount: number
-  createdAt: string
-  updatedAt?: string
+  id: string                              // 资料 ID
+  title: string                           // 资料标题
+  sourceType: SourceType | string         // 来源类型（PDF/DOCX 等）
+  originalName: string                    // 原始文件名
+  sourceUrl: string                       // 来源 URL（网页资料使用）
+  fileSize: number                        // 文件大小（字节）
+  parseStatus: ParseStatus                // 解析状态
+  parseProgressPercent?: number | null    // 解析进度百分比
+  parseStage?: string | null              // 解析阶段名称
+  parseMessage?: string | null            // 解析阶段说明消息
+  summaryStatus: SummaryStatus            // 总结生成状态
+  previewStatus?: PreviewStatus           // 页面预览状态
+  previewError?: string | null            // 预览失败的错误信息
+  pageCount?: number | null               // 总页数
+  chunkCount: number                      // 片段数量
+  createdAt: string                       // 创建时间
+  updatedAt?: string                      // 更新时间
 }
 
+/** 资料片段（解析后的文本块） */
 export interface MaterialChunk {
-  id: string
-  materialId: string
-  chunkIndex: number
-  chunkText: string
-  pageNo: number | null
-  sectionTitle: string
-  hierarchyPath?: string | null
-  summary?: string | null
-  keywords?: string | null
-  excerpt: string
-  createdAt?: string
+  id: string                      // 片段 ID
+  materialId: string              // 所属资料 ID
+  chunkIndex: number              // 片段序号（从 0 开始）
+  chunkText: string               // 片段文本内容
+  pageNo: number | null           // 所在页码
+  sectionTitle: string            // 章节标题
+  hierarchyPath?: string | null   // 层级路径（如 "第一章 > 第二节"）
+  summary?: string | null         // 片段摘要
+  keywords?: string | null        // 关键词
+  excerpt: string                 // 摘录（用于检索结果展示）
+  createdAt?: string              // 创建时间
 }
 
+/** 资料页面信息（用于页面预览模式） */
 export interface MaterialPage {
-  pageNo: number
-  width: number | null
-  height: number | null
-  imageName: string
-  chunkIds: Array<string | number>
-  renderStatus: 'READY' | 'PENDING' | 'FAILED' | string
+  pageNo: number                              // 页码
+  width: number | null                        // 页面宽度（像素）
+  height: number | null                       // 页面高度（像素）
+  imageName: string                           // 预览图片文件名
+  chunkIds: Array<string | number>            // 包含的片段 ID 列表
+  renderStatus: 'READY' | 'PENDING' | 'FAILED' | string  // 渲染状态
 }
 
+// ==================== 聊天与 RAG 相关 ====================
+
+/** 普通聊天请求体 */
 export interface ChatPayload {
-  question: string
-  mode: 'GENERAL' | 'MATERIAL'
-  materialId?: string
-  answerStyle?: 'STUDY' | 'HOMEWORK'
-  conversationId?: string | number | null
-  images?: ChatImagePayload[]
+  question: string                            // 用户问题
+  mode: 'GENERAL' | 'MATERIAL'               // 模式：通用/资料
+  materialId?: string                         // 资料模式下的资料 ID
+  answerStyle?: 'STUDY' | 'HOMEWORK'         // 回答风格：学习/作业
+  conversationId?: string | number | null     // 会话 ID
+  images?: ChatImagePayload[]                 // 附带的图片
 }
 
+/** 流式聊天请求体（SSE） */
 export interface StreamChatPayload {
-  question: string
-  mode: 'GENERAL' | 'MATERIAL'
-  materialId?: string
-  chunkId?: string
-  currentPageNo?: number
-  currentPageChunkIds?: Array<string | number>
-  selectedText?: string
-  answerStyle?: 'STUDY' | 'HOMEWORK'
-  history?: { role: string; content: string }[]
-  conversationId?: string | number | null
-  images?: ChatImagePayload[]
+  question: string                            // 用户问题
+  mode: 'GENERAL' | 'MATERIAL'               // 模式
+  materialId?: string                         // 资料 ID
+  chunkId?: string                            // 当前片段 ID（边读边问时使用）
+  currentPageNo?: number                      // 当前页码
+  currentPageChunkIds?: Array<string | number>  // 当前页的所有片段 ID
+  selectedText?: string                       // 用户选中的文本
+  answerStyle?: 'STUDY' | 'HOMEWORK'         // 回答风格
+  history?: { role: string; content: string }[]  // 对话历史（最近几轮）
+  conversationId?: string | number | null     // 会话 ID
+  images?: ChatImagePayload[]                 // 附带的图片
 }
 
+/** 聊天附带的图片数据 */
 export interface ChatImagePayload {
-  dataUrl: string
-  mediaType: string
+  dataUrl: string       // Base64 编码的图片数据
+  mediaType: string     // MIME 类型（如 image/png）
 }
 
+/** RAG 检索来源信息 */
 export interface RagSource {
-  materialId: string
-  chunkId: string
-  materialTitle: string
-  pageNo: number
-  excerpt: string
-  score: number
+  materialId: string      // 来源资料 ID
+  chunkId: string         // 来源片段 ID
+  materialTitle: string   // 资料标题
+  pageNo: number          // 来源页码
+  excerpt: string         // 摘录文本
+  score: number           // 相关度分数（0~1）
 }
 
+/** RAG 问答使用额度 */
 export interface RagUsage {
-  dailyLimit: number
-  usedToday: number
-  remainingToday: number | null
-  unlimited: boolean
+  dailyLimit: number          // 每日限额
+  usedToday: number           // 今日已用
+  remainingToday: number | null  // 今日剩余（null 表示无限）
+  unlimited: boolean          // 是否不限额
 }
 
+// ==================== 历史记录与收藏 ====================
+
+/** 历史问答记录 */
 export interface HistoryItem {
-  id: string
-  conversationId?: string | null
-  title?: string | null
-  question: string
-  answer: string
-  createdAt: string
-  favoriteId: string | null
-  favorite?: boolean
-  pinned?: boolean
-  messages?: Array<{
+  id: string                                // 记录 ID
+  conversationId?: string | null            // 会话 ID
+  title?: string | null                     // 自定义标题
+  question: string                          // 问题
+  answer: string                            // 回答
+  createdAt: string                         // 创建时间
+  favoriteId: string | null                 // 收藏记录 ID（null 表示未收藏）
+  favorite?: boolean                        // 是否已收藏
+  pinned?: boolean                          // 是否置顶
+  messages?: Array<{                        // 完整对话消息列表
     id: string
     role: 'user' | 'assistant'
     text: string
   }>
-  sources?: RagSource[]
+  sources?: RagSource[]                     // 检索来源列表
 }
 
+/** 收藏项 */
+export interface FavoriteItem {
+  id: string                                // 收藏记录 ID
+  questionId: string                        // 对应的历史记录 ID
+  conversationId?: string | null            // 会话 ID
+  question: string                          // 问题
+  answer: string                            // 回答
+  createdAt: string                         // 收藏时间
+  messages?: Array<{                        // 关联的对话消息
+    id: string
+    role: 'user' | 'assistant'
+    text: string
+  }>
+}
+
+// ==================== RAG 评估相关 ====================
+
+/** RAG 评估用例请求体 */
 export interface RagEvaluationCasePayload {
-  question: string
-  materialId?: string | number | null
-  expectedAnswerTerms?: string[]
-  expectedSourceTerms?: string[]
+  question: string                              // 测试问题
+  materialId?: string | number | null           // 关联资料 ID
+  expectedAnswerTerms?: string[]                // 期望回答中包含的关键词
+  expectedSourceTerms?: string[]                // 期望来源中包含的关键词
 }
 
+/** RAG 评估套件请求体（批量用例） */
 export interface RagEvaluationSuitePayload {
-  cases: RagEvaluationCasePayload[]
+  cases: RagEvaluationCasePayload[]             // 用例列表
 }
 
+/** RAG 评估套件保存请求体 */
 export interface RagEvaluationSuiteSavePayload {
-  name: string
-  description?: string
-  cases: RagEvaluationCasePayload[]
+  name: string                    // 套件名称
+  description?: string            // 套件描述
+  cases: RagEvaluationCasePayload[]  // 用例列表
 }
 
+/** 单个评估用例的运行结果 */
 export interface RagEvaluationCaseResult {
-  caseIndex: number
-  questionId: string | number | null
-  question: string
-  faithfulnessScore: number
-  contextRelevanceScore: number
-  overallScore: number
-  expectedAnswerCoverage: number
-  expectedSourceCoverage: number
-  verdict: string
-  passed: boolean
-  missingAnswerTerms: string[]
-  missingSourceTerms: string[]
+  caseIndex: number               // 用例序号
+  questionId: string | number | null  // 生成的问答 ID
+  question: string                // 测试问题
+  faithfulnessScore: number       // 忠实度得分
+  contextRelevanceScore: number   // 上下文相关性得分
+  overallScore: number            // 综合得分
+  expectedAnswerCoverage: number  // 期望回答关键词覆盖率
+  expectedSourceCoverage: number  // 期望来源关键词覆盖率
+  verdict: string                 // 评估结论
+  passed: boolean                 // 是否通过
+  missingAnswerTerms: string[]    // 回答中缺失的关键词
+  missingSourceTerms: string[]    // 来源中缺失的关键词
 }
 
+/** 评估套件的整体结果 */
 export interface RagEvaluationSuiteResult {
-  totalCases: number
-  passedCases: number
-  passRate: number
-  averageFaithfulnessScore: number
-  averageContextRelevanceScore: number
-  averageOverallScore: number
-  cases: RagEvaluationCaseResult[]
+  totalCases: number                        // 总用例数
+  passedCases: number                       // 通过用例数
+  passRate: number                          // 通过率
+  averageFaithfulnessScore: number          // 平均忠实度
+  averageContextRelevanceScore: number      // 平均上下文相关性
+  averageOverallScore: number               // 平均综合分
+  cases: RagEvaluationCaseResult[]          // 各用例结果
 }
 
+/** 评估套件摘要（列表页使用） */
 export interface RagEvaluationSuiteSummary {
-  id: string
-  name: string
-  description?: string | null
-  caseCount: number
-  lastTotalCases?: number | null
-  lastPassedCases?: number | null
-  lastPassRate?: number | null
-  lastAverageOverallScore?: number | null
-  lastRunAt?: string | null
-  scheduled: boolean
-  scheduleIntervalHours: number
-  nextRunAt?: string | null
-  updatedAt?: string | null
+  id: string                              // 套件 ID
+  name: string                            // 套件名称
+  description?: string | null             // 描述
+  caseCount: number                       // 用例数
+  lastTotalCases?: number | null          // 最近运行的总用例数
+  lastPassedCases?: number | null         // 最近运行的通过数
+  lastPassRate?: number | null            // 最近运行的通过率
+  lastAverageOverallScore?: number | null // 最近运行的综合分
+  lastRunAt?: string | null               // 最近运行时间
+  scheduled: boolean                      // 是否定时运行
+  scheduleIntervalHours: number           // 定时间隔（小时）
+  nextRunAt?: string | null               // 下次运行时间
+  updatedAt?: string | null               // 更新时间
 }
 
+/** 评估套件运行记录 */
 export interface RagEvaluationSuiteRun {
-  id: string
-  suiteId: string
+  id: string                              // 运行记录 ID
+  suiteId: string                         // 所属套件 ID
   totalCases: number
   passedCases: number
   passRate: number
   averageFaithfulnessScore: number
   averageContextRelevanceScore: number
   averageOverallScore: number
-  result?: RagEvaluationSuiteResult | null
-  createdAt: string
+  result?: RagEvaluationSuiteResult | null  // 完整结果
+  createdAt: string                       // 运行时间
 }
 
+/** 评估套件详情（含用例配置和最新运行结果） */
 export interface RagEvaluationSuiteDetail {
   id: string
   name: string
   description?: string | null
-  cases: RagEvaluationCasePayload[]
-  latestRun?: RagEvaluationSuiteRun | null
+  cases: RagEvaluationCasePayload[]         // 配置的用例列表
+  latestRun?: RagEvaluationSuiteRun | null  // 最新运行记录
   scheduled: boolean
   scheduleIntervalHours: number
   nextRunAt?: string | null
@@ -249,122 +329,126 @@ export interface RagEvaluationSuiteDetail {
   updatedAt?: string | null
 }
 
-export interface FavoriteItem {
-  id: string
-  questionId: string
-  conversationId?: string | null
-  question: string
-  answer: string
-  createdAt: string
-  messages?: Array<{
-    id: string
-    role: 'user' | 'assistant'
-    text: string
-  }>
-}
+// ==================== 知识总结 ====================
 
+/** AI 知识总结结果 */
 export interface SummaryResult {
-  summaryId: string
-  materialId: string
-  materialTitle: string
-  summary: string
-  modelName: string
-  sourceCount: number
-  createdAt: string
+  summaryId: string           // 总结 ID
+  materialId: string          // 资料 ID
+  materialTitle: string       // 资料标题
+  summary: string             // 总结内容
+  modelName: string           // 使用的模型名称
+  sourceCount: number         // 引用来源数
+  createdAt: string           // 生成时间
 }
 
+// ==================== 管理员后台相关 ====================
+
+/** 管理后台统计数据 */
 export interface AdminStats {
-  userCount: number
-  materialCount: number
-  questionCount: number
-  favoriteCount: number
-  logCount: number
+  userCount: number           // 用户总数
+  materialCount: number       // 资料总数
+  questionCount: number       // 问答总数
+  favoriteCount: number       // 收藏总数
+  logCount: number            // 日志总数
 }
 
+/** 管理员视角的用户信息 */
 export interface AdminUser {
   id: string
-  username: string
-  nickname: string
-  role: 'ADMIN' | 'USER'
-  status: 'ACTIVE' | 'DISABLED'
-  createdAt: string
-  updatedAt: string
+  username: string            // 用户名
+  nickname: string            // 昵称
+  role: 'ADMIN' | 'USER'     // 角色
+  status: 'ACTIVE' | 'DISABLED'  // 状态（正常/禁用）
+  createdAt: string           // 注册时间
+  updatedAt: string           // 最后更新时间
 }
 
+/** 管理员视角的资料信息（继承 Material，增加所有者信息） */
 export interface AdminMaterial extends Material {
-  ownerId: string
-  ownerUsername: string
+  ownerId: string             // 所有者用户 ID
+  ownerUsername: string       // 所有者用户名
 }
 
+/** 管理员审计日志 */
 export interface AdminLog {
   id: string
-  actorUserId: string
-  actorUsername: string
-  action: string
-  targetType: string
-  targetId: string
-  detail: string
-  createdAt: string
+  actorUserId: string         // 操作者用户 ID
+  actorUsername: string       // 操作者用户名
+  action: string              // 操作类型
+  targetType: string          // 操作对象类型
+  targetId: string            // 操作对象 ID
+  detail: string              // 操作详情
+  createdAt: string           // 操作时间
 }
 
+/** 用户使用记录（含 Token 消耗统计） */
 export interface AdminUsageRecord {
   id: string
-  userId: string
-  username: string
-  action: string
-  targetType: string
-  targetId: string
-  modelName?: string | null
-  promptTokens?: number | null
-  completionTokens?: number | null
-  totalTokens?: number | null
-  detail: string
-  createdAt: string
+  userId: string                // 用户 ID
+  username: string              // 用户名
+  action: string                // 操作类型（RAG_CHAT/UPLOAD_MATERIAL 等）
+  targetType: string            // 对象类型
+  targetId: string              // 对象 ID
+  modelName?: string | null     // 使用的模型名
+  promptTokens?: number | null  // 输入 Token 数
+  completionTokens?: number | null  // 输出 Token 数
+  totalTokens?: number | null   // 总 Token 数
+  detail: string                // 详情（key=value 格式）
+  createdAt: string             // 记录时间
 }
 
+/** 分页查询结果 */
 export interface PageResult<T> {
-  items: T[]
-  page: number
-  size: number
-  total: number
+  items: T[]                    // 当前页数据列表
+  page: number                  // 当前页码（从 0 开始）
+  size: number                  // 每页条数
+  total: number                 // 总记录数
 }
 
+// ==================== LLM 配置相关 ====================
+
+/** LLM 服务状态 */
 export interface LlmStatus {
-  enabled: boolean
-  configured: boolean
-  message: string
+  enabled: boolean              // 是否启用
+  configured: boolean           // 是否已配置
+  message: string               // 状态描述信息
 }
 
+/** 用户自定义 LLM 配置 */
 export interface UserLlmConfig {
-  enabled: boolean
-  baseUrl: string
-  model: string
-  hasApiKey: boolean
-  activeLabel: string
-  activeConfigId: string | number | null
-  configs: UserLlmConfigItem[]
+  enabled: boolean                    // 是否启用自定义配置
+  baseUrl: string                     // API 基础地址
+  model: string                       // 模型名称
+  hasApiKey: boolean                  // 是否设置了 API Key
+  activeLabel: string                 // 当前活跃配置的显示名称
+  activeConfigId: string | number | null  // 当前活跃配置 ID
+  configs: UserLlmConfigItem[]        // 所有配置列表
 }
 
+/** 单条 LLM 配置项 */
 export interface UserLlmConfigItem {
-  id: string | number
-  displayName: string
-  baseUrl: string
-  model: string
-  hasApiKey: boolean
-  active: boolean
+  id: string | number           // 配置 ID
+  displayName: string           // 显示名称
+  baseUrl: string               // API 基础地址
+  model: string                 // 模型名称
+  hasApiKey: boolean            // 是否设置了 API Key
+  active: boolean               // 是否为当前活跃配置
 }
 
+/** 保存 LLM 配置的请求体 */
 export interface UserLlmConfigPayload {
-  id?: string | number | null
-  enabled: boolean
-  displayName?: string
-  baseUrl: string
-  apiKey?: string
-  model: string
+  id?: string | number | null   // 配置 ID（新增时不传）
+  enabled: boolean              // 是否启用
+  displayName?: string          // 显示名称
+  baseUrl: string               // API 基础地址
+  apiKey?: string               // API Key（不修改时不传）
+  model: string                 // 模型名称
 }
 
+/** LLM 连接测试结果 */
 export interface UserLlmTestResult {
-  ok: boolean
-  message: string
-  model: string
+  ok: boolean                   // 是否成功
+  message: string               // 测试结果消息
+  model: string                 // 实际连接的模型名
 }

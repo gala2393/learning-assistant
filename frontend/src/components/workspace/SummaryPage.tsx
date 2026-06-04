@@ -1,3 +1,16 @@
+/**
+ * SummaryPage - 知识总结页面
+ *
+ * 功能说明：
+ * - 左侧展示资料列表，右侧展示 AI 生成的知识总结
+ * - 支持选择资料后点击"生成总结"按钮，调用 AI 生成摘要
+ * - 展示最新总结和历史总结记录
+ *
+ * 数据流：
+ * 1. useMaterials() 获取所有资料列表
+ * 2. 用户选择资料后，useMaterialSummaryHistory() 获取该资料的总结历史
+ * 3. 点击"生成总结"通过 useSummarizeMaterial() mutation 触发 AI 生成
+ */
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { useMaterials } from '@/api/materials'
@@ -13,20 +26,27 @@ import { Sparkles, BookOpen, Loader2, Clock } from 'lucide-react'
 import type { SummaryResult } from '@/types'
 
 export function SummaryPage() {
+  // 获取所有资料列表
   const { data: materials = [] } = useMaterials()
+  // 当前选中的资料 ID
   const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(null)
 
+  // 获取选中资料的总结历史记录
   const { data: summaryHistory = [], isLoading: summaryLoading } = useMaterialSummaryHistory(selectedMaterialId)
+  // 生成总结的 mutation
   const summarizeMutation = useSummarizeMaterial()
 
+  // 当前选中的资料对象
   const selectedMaterial = materials.find((m) => m.id === selectedMaterialId) || null
 
+  // 触发生成总结
   const handleGenerate = () => {
     if (selectedMaterialId) {
       summarizeMutation.mutate(selectedMaterialId)
     }
   }
 
+  // 最新一条总结（列表第一项）
   const latestSummary = summaryHistory[0] || null
 
   return (
@@ -36,7 +56,7 @@ export function SummaryPage() {
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
     >
-      {/* Left: Material list */}
+      {/* 左侧：资料选择列表 */}
       <div className="w-60 border-r flex flex-col h-full bg-muted/20">
         <div className="p-3 border-b">
           <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
@@ -60,10 +80,11 @@ export function SummaryPage() {
         </ScrollArea>
       </div>
 
-      {/* Right: Summary content */}
+      {/* 右侧：总结内容展示 */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {selectedMaterial ? (
           <>
+            {/* 标题栏和生成按钮 */}
             <div className="flex items-center justify-between px-6 py-3 border-b">
               <div>
                 <h3 className="text-sm font-medium">{selectedMaterial.title || selectedMaterial.originalName}</h3>
@@ -72,7 +93,7 @@ export function SummaryPage() {
               <Button
                 size="sm"
                 onClick={handleGenerate}
-                disabled={summarizeMutation.isPending}
+                disabled={summarizeMutation.isPending}  // 生成中禁用按钮
               >
                 {summarizeMutation.isPending ? (
                   <>
@@ -87,7 +108,7 @@ export function SummaryPage() {
             </div>
 
             <ScrollArea className="flex-1 px-6 py-4">
-              {/* Latest summary */}
+              {/* 加载骨架屏 */}
               {summaryLoading ? (
                 <div className="space-y-2">
                   <Skeleton className="h-4 w-3/4" />
@@ -95,6 +116,7 @@ export function SummaryPage() {
                   <Skeleton className="h-4 w-5/6" />
                 </div>
               ) : latestSummary ? (
+                /* 最新总结卡片 */
                 <Card className="mb-4">
                   <CardHeader className="pb-2">
                     <div className="flex items-center justify-between">
@@ -108,6 +130,7 @@ export function SummaryPage() {
                     <div className="text-sm leading-7 whitespace-pre-wrap">
                       {latestSummary.summary}
                     </div>
+                    {/* 时间和模型信息 */}
                     <div className="flex items-center gap-2 mt-3 text-[10px] text-muted-foreground">
                       <Clock className="h-3 w-3" />
                       {formatDate(latestSummary.createdAt)}
@@ -120,12 +143,13 @@ export function SummaryPage() {
                   </CardContent>
                 </Card>
               ) : (
+                /* 无总结时的引导提示 */
                 <p className="text-center text-muted-foreground py-8 text-sm">
                   点击「生成总结」开始
                 </p>
               )}
 
-              {/* History timeline */}
+              {/* 历史总结时间线（当有 2 条以上记录时显示） */}
               {summaryHistory.length > 1 && (
                 <>
                   <Separator className="my-4" />
@@ -150,6 +174,7 @@ export function SummaryPage() {
             </ScrollArea>
           </>
         ) : (
+          /* 未选择资料时的占位提示 */
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
             <div className="text-center">
               <Sparkles className="h-10 w-10 mx-auto mb-3 opacity-40" />

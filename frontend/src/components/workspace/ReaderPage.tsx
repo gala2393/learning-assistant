@@ -1,3 +1,24 @@
+/**
+ * ReaderPage — 文档阅读器页面。
+ *
+ * 路由：/workspace/reader
+ *
+ * 三栏布局：
+ * - 左侧：目录/分块列表（ReaderToc），可折叠
+ * - 中间：文档内容展示区（ReaderPaper），支持 PDF 预览和纯文本模式
+ * - 右侧：AI 问答面板（ReaderAsk），支持选中文本提问
+ *
+ * 功能：
+ * 1. 资料选择：从 URL 参数 materialId 读取当前资料
+ * 2. 分块导航：点击左侧目录项跳转到对应分块
+ * 3. PDF 预览：显示页面图片，支持缩放和翻页
+ * 4. 纯文本模式：直接显示分块文本，支持内嵌图片
+ * 5. 选中文本提问：在文档中选中 5-500 字符的文字，自动填入问答面板
+ * 6. 推荐问题：首次加载时 AI 根据当前分块生成推荐问题
+ * 7. URL 同步：materialId 和 chunkId 通过 URL 参数保持
+ * 8. 右侧面板宽度可拖拽调整（保存到 localStorage）
+ * 9. 移动端：底部 Tab 切换目录和问答面板
+ */
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'

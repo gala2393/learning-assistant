@@ -1,3 +1,18 @@
+/**
+ * 使用记录页面 - UsageRecordsPage
+ *
+ * 路由：由 AdminLayout 渲染，路径通常为 /admin/usage
+ * 用途：记录用户的行为流水，包括问答（RAG_CHAT）、资料上传（UPLOAD_MATERIAL）、
+ *       调用的模型名称、Token 消耗量等信息。
+ *       注意：此页面展示的是用户行为记录，系统日志页面只保留管理员审计操作。
+ *
+ * 主要功能：
+ * - 从后端 useAdminUsageRecords 获取使用记录，支持分页和关键词搜索（防抖 300ms）
+ * - 展示统计指标卡片（当前页问答数/上传数/Token 总量/最近使用时间）
+ * - 表格展示每条记录的详情：时间、用户、操作类型、模型、Token 消耗、对象/详情
+ * - 支持手动刷新数据
+ */
+
 import { useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
@@ -27,9 +42,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { formatDate } from '@/lib/utils'
 import type { AdminUsageRecord } from '@/types'
 
+/** 每页显示条数 */
 const PAGE_SIZE = 12
+/** TanStack Table 列辅助工具 */
 const columnHelper = createColumnHelper<AdminUsageRecord>()
 
+/**
+ * 操作类型中文映射
+ * 将后端返回的英文 action 翻译为可读的中文标签
+ * RAG_CHAT 和 RAG_CHAT_STREAM 都映射为"问答"
+ */
 const ACTION_LABELS: Record<string, string> = {
   RAG_CHAT: '问答',
   RAG_CHAT_STREAM: '问答',
@@ -37,11 +59,19 @@ const ACTION_LABELS: Record<string, string> = {
   CREATE_UPLOAD_SESSION: '创建上传任务',
 }
 
+/**
+ * UsageRecordsPage 组件
+ * 无 Props，数据通过 useAdminUsageRecords hook 从后端获取
+ */
 export function UsageRecordsPage() {
+  // 当前页码（从 0 开始）
   const [page, setPage] = useState(0)
+  // 搜索关键词
   const [keyword, setKeyword] = useState('')
+  // 防抖关键词，输入 300ms 后才触发请求
   const debouncedKeyword = useDebounce(keyword, 300)
 
+  // 从后端获取使用记录，refetch 用于手动刷新
   const { data, isLoading, refetch, isFetching } = useAdminUsageRecords({
     page,
     size: PAGE_SIZE,
@@ -52,16 +82,23 @@ export function UsageRecordsPage() {
   const total = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
+  // 计算当前页的统计指标
   const stats = useMemo(() => {
+    // 问答操作数
     const questionCount = items.filter(isQuestionAction).length
+    // 上传操作数（非问答即上传）
     const uploadCount = items.filter((item) => !isQuestionAction(item)).length
+    // Token 消耗总量
     const tokenTotal = items.reduce((sum, item) => sum + Number(item.totalTokens || 0), 0)
+    // 最近使用时间
     const latest = items[0]?.createdAt || ''
     return { questionCount, uploadCount, tokenTotal, latest }
   }, [items])
 
+  // 表格列定义
   const columns = useMemo(
     () => [
+      // 时间列
       columnHelper.accessor('createdAt', {
         header: '时间',
         cell: (info) => (
@@ -70,6 +107,7 @@ export function UsageRecordsPage() {
           </div>
         ),
       }),
+      // 用户列：显示用户名和用户 ID
       columnHelper.accessor('username', {
         header: '用户',
         cell: (info) => (
@@ -82,11 +120,13 @@ export function UsageRecordsPage() {
           </div>
         ),
       }),
+      // 操作列：根据操作类型显示不同图标和 Badge
       columnHelper.accessor('action', {
         header: '操作',
         cell: (info) => {
           const row = info.row.original
           const question = isQuestionAction(row)
+          // 问答用消息图标，上传用文件图标
           const Icon = question ? MessageSquareText : FileUp
           return (
             <Badge variant={question ? 'success' : 'warning'} className="gap-1.5 whitespace-nowrap">
@@ -96,6 +136,7 @@ export function UsageRecordsPage() {
           )
         },
       }),
+      // 模型列：显示调用的模型名称
       columnHelper.accessor('modelName', {
         header: '模型',
         cell: (info) => (
@@ -110,6 +151,7 @@ export function UsageRecordsPage() {
           </div>
         ),
       }),
+      // Token 列：显示总量及输入/输出分项
       columnHelper.accessor('totalTokens', {
         header: 'Token',
         cell: (info) => {
@@ -126,6 +168,7 @@ export function UsageRecordsPage() {
           )
         },
       }),
+      // 对象/详情列：显示目标类型和解析后的详情字段
       columnHelper.accessor('detail', {
         header: '对象 / 详情',
         cell: (info) => {
@@ -147,6 +190,7 @@ export function UsageRecordsPage() {
     [],
   )
 
+  // 创建 TanStack Table 实例
   const table = useReactTable({
     data: items,
     columns,
@@ -154,12 +198,14 @@ export function UsageRecordsPage() {
   })
 
   return (
+    /* 页面容器，带入场动画 */
     <motion.div
       className="space-y-4 p-3 md:p-6"
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
     >
+      {/* ========== 页面顶部标题区域 ========== */}
       <section className="rounded-lg border bg-white p-4 dark:border-slate-800 dark:bg-slate-950/40">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -173,6 +219,7 @@ export function UsageRecordsPage() {
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="outline">共 {total} 条</Badge>
+            {/* 手动刷新按钮 */}
             <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
               {isFetching ? '刷新中...' : '刷新'}
             </Button>
@@ -180,6 +227,7 @@ export function UsageRecordsPage() {
         </div>
       </section>
 
+      {/* ========== 统计指标卡片 ========== */}
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Metric icon={MessageSquareText} label="当前页问答" value={String(stats.questionCount)} />
         <Metric icon={FileUp} label="当前页上传" value={String(stats.uploadCount)} />
@@ -187,10 +235,12 @@ export function UsageRecordsPage() {
         <Metric icon={Clock3} label="最近使用" value={stats.latest ? formatDate(stats.latest) : '-'} />
       </div>
 
+      {/* ========== 使用明细表格 ========== */}
       <Card className="overflow-hidden rounded-lg">
         <CardHeader className="border-b bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/40">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <CardTitle className="text-base">使用明细</CardTitle>
+            {/* 搜索框 */}
             <div className="relative lg:w-96">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -199,7 +249,7 @@ export function UsageRecordsPage() {
                 value={keyword}
                 onChange={(event) => {
                   setKeyword(event.target.value)
-                  setPage(0)
+                  setPage(0) // 搜索时重置到第一页
                 }}
               />
             </div>
@@ -221,12 +271,14 @@ export function UsageRecordsPage() {
               </TableHeader>
               <TableBody>
                 {isLoading ? (
+                  /* 加载中状态 */
                   <TableRow>
                     <TableCell colSpan={columns.length} className="py-10 text-center text-muted-foreground">
                       正在加载使用记录...
                     </TableCell>
                   </TableRow>
                 ) : items.length === 0 ? (
+                  /* 无数据状态：展示友好提示 */
                   <TableRow>
                     <TableCell colSpan={columns.length} className="py-12 text-center">
                       <div className="mx-auto flex max-w-sm flex-col items-center gap-2 text-muted-foreground">
@@ -237,6 +289,7 @@ export function UsageRecordsPage() {
                     </TableCell>
                   </TableRow>
                 ) : (
+                  /* 正常渲染行数据，hover 时显示青色背景 */
                   table.getRowModel().rows.map((row) => (
                     <TableRow key={row.id} className="hover:bg-cyan-50/40 dark:hover:bg-cyan-950/10">
                       {row.getVisibleCells().map((cell) => (
@@ -251,6 +304,7 @@ export function UsageRecordsPage() {
         </CardContent>
       </Card>
 
+      {/* ========== 分页控制 ========== */}
       <div className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
         <span>第 {page + 1} / {totalPages} 页</span>
         <div className="flex items-center gap-2">
@@ -266,6 +320,12 @@ export function UsageRecordsPage() {
   )
 }
 
+/**
+ * 统计指标卡片组件（简洁风格，青色主题）
+ * @param icon - 图标组件
+ * @param label - 指标名称
+ * @param value - 指标值
+ */
 function Metric({ icon: Icon, label, value }: { icon: React.ElementType; label: string; value: string }) {
   return (
     <Card className="rounded-lg">
@@ -282,16 +342,30 @@ function Metric({ icon: Icon, label, value }: { icon: React.ElementType; label: 
   )
 }
 
+/**
+ * 判断记录是否为问答操作
+ * RAG_CHAT 和 RAG_CHAT_STREAM 都算问答
+ * @param item - 使用记录对象
+ */
 function isQuestionAction(item: AdminUsageRecord) {
   return item.action === 'RAG_CHAT' || item.action === 'RAG_CHAT_STREAM'
 }
 
+/**
+ * 将目标类型英文转为中文
+ * @param value - 后端返回的目标类型字符串
+ */
 function targetLabel(value: string) {
   if (value === 'RAG_QUESTION') return '问答'
   if (value === 'MATERIAL') return '资料'
   return value || '对象'
 }
 
+/**
+ * 解析 detail 字符串为 key-value 对象
+ * detail 格式为 "key1=value1,key2=value2"
+ * @param value - detail 字符串
+ */
 function parseDetail(value: string) {
   const result: Record<string, string> = {}
   for (const part of String(value || '').split(',')) {

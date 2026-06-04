@@ -1,3 +1,4 @@
+// 复选框组件 - 基于 Radix UI 的可勾选选择框
 import * as React from 'react'
 import * as CheckboxPrimitive from '@radix-ui/react-checkbox'
 import { Check } from 'lucide-react'

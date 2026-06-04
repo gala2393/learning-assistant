@@ -1,3 +1,4 @@
+// 工具提示组件 - 鼠标悬停时显示的提示信息气泡
 import * as React from 'react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'

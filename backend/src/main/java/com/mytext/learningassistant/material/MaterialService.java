@@ -69,36 +69,103 @@ import org.springframework.web.multipart.MultipartFile;
 
 import jakarta.annotation.PreDestroy;
 
+/**
+ * 学习资料核心业务服务类。
+ *
+ * 负责学习资料的完整生命周期管理，包括：
+ * <ul>
+ *   <li>文件上传（单次上传 / 分片上传 / 网页导入）</li>
+ *   <li>文档解析（PDF、Word、PPT、Markdown、纯文本、HTML 等多种格式）</li>
+ *   <li>文本分块（语义分块策略：按段落拆分、句子拆分、重叠窗口）</li>
+ *   <li>Embedding 向量生成和向量数据库写入</li>
+ *   <li>PDF 页面渲染和预览文件管理</li>
+ *   <li>OCR 图片文字提取（可选，依赖 Tesseract）</li>
+ *   <li>资料的增删改查和重新解析</li>
+ * </ul>
+ *
+ * <p>关键算法说明：
+ * <ul>
+ *   <li><b>文本分块</b>：采用语义分块策略，按段落和句子边界拆分，每个片段 300~800 字符，
+ *       相邻片段之间有 120 字符的重叠窗口以保持上下文连贯性。</li>
+ *   <li><b>Embedding</b>：通过 OpenAI 兼容接口生成文本向量，使用 SHA-256 作为缓存 key
+ *       避免重复请求，缓存上限 2048 条。</li>
+ *   <li><b>PDF 解析</b>：使用 PDFBox 逐页提取文本，对于扫描件（无可抽取文本的页面）
+ *       支持可选的 OCR 或保留图片标记供多模态问答使用。</li>
+ * </ul>
+ */
 @Service
 public class MaterialService {
 
     private static final Logger log = LoggerFactory.getLogger(MaterialService.class);
+
+    /** 日期时间格式化器，用于将 LocalDateTime 转为 "yyyy-MM-dd HH:mm:ss" 格式 */
     private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    /** 文本分块的最小字符数 */
     private static final int CHUNK_MIN_SIZE = 300;
+
+    /** 文本分块的最大字符数 */
     private static final int CHUNK_MAX_SIZE = 800;
+
+    /** 相邻分块之间的重叠字符数，用于保持上下文连贯 */
     private static final int CHUNK_OVERLAP = 120;
+
+    /** 单次上传文件的最大大小：500MB */
     private static final long MAX_MATERIAL_BYTES = 500L * 1024L * 1024L;
+
+    /** 网页导入内容的最大大小 */
     private static final long MAX_WEB_BYTES = MAX_MATERIAL_BYTES;
+
+    /** 网页抓取请求的超时时间 */
     private static final Duration WEB_REQUEST_TIMEOUT = Duration.ofSeconds(10);
+
+    /** 分片上传临时文件目录后缀 */
     private static final String PART_SUFFIX = ".parts";
+
+    /** 资源文件（图片等）目录后缀 */
     private static final String ASSET_SUFFIX = ".assets";
+
+    /** 图片标记前缀，用于在文本中标记图片位置 */
     private static final String IMAGE_MARKER_PREFIX = "[[material-image:";
+
+    /** 图片标记后缀 */
     private static final String IMAGE_MARKER_SUFFIX = "]]";
+
+    /** 预览 PDF 文件后缀 */
     private static final String PREVIEW_SUFFIX = ".preview.pdf";
+
+    /** 页面图片文件名的正则模式，如 "page-3.png" */
     private static final String PAGE_IMAGE_RE = "^page-(\\d+)(?:-\\d+)?\\.png$";
+
+    /** PDF 页面渲染的默认 DPI（每英寸点数） */
     private static final int DEFAULT_RENDER_DPI = 144;
+
+    /** 内联 PDF OCR 的最大文件大小限制：100MB */
     private static final long DEFAULT_INLINE_PDF_OCR_MAX_BYTES = 100L * 1024L * 1024L;
+
+    /** 内联 PDF OCR 的最大页数限制 */
     private static final int DEFAULT_INLINE_PDF_OCR_MAX_PAGES = 200;
+
+    /** PDF 压缩的最小文件大小阈值：64MB */
     private static final long DEFAULT_PDF_COMPRESSION_MIN_BYTES = 64L * 1024L * 1024L;
+
+    /** PDF 压缩的目标 DPI */
     private static final int DEFAULT_PDF_COMPRESSION_TARGET_DPI = 144;
+
+    /** Embedding 向量缓存的最大条目数 */
     private static final int EMBEDDING_CACHE_MAX_ENTRIES = 2_048;
+
+    /** 关键词提取的正则模式：匹配中文、英文、数字、特殊符号组成的 2 字符以上词组 */
     private static final Pattern KEYWORD_PATTERN = Pattern.compile("[\\p{IsHan}A-Za-z0-9+#./-]{2,}");
+
+    /** 关键词停用词列表，这些常见词不会作为关键词输出 */
     private static final List<String> KEYWORD_STOP_WORDS = List.of(
         "the", "and", "for", "with", "that", "this", "from", "into", "are", "was", "were", "has", "have",
         "what", "how", "why", "where", "which", "does", "do", "did", "can", "could", "would", "should",
         "什么", "怎么", "为什么", "哪里", "哪个", "哪些", "一个", "这个", "那个", "以及", "如果", "因为"
     );
 
+    // ======================== 依赖注入的仓库和工具 ========================
     private final LearningMaterialRepository learningMaterialRepository;
     private final MaterialChunkRepository materialChunkRepository;
     private final MaterialSummaryRepository materialSummaryRepository;
@@ -109,28 +176,59 @@ public class MaterialService {
     private final EmbeddingClient embeddingClient;
     private final VectorStoreClient vectorStoreClient;
     private final HttpClient httpClient;
+
+    // ======================== 存储和配置 ========================
+    /** 文件存储根目录的绝对路径 */
     private final Path storageRoot;
+    /** 是否启用 OCR（光学字符识别） */
     private final boolean ocrEnabled;
+    /** OCR 语言参数（如 "eng+chi_sim" 表示英文+简体中文） */
     private final String ocrLang;
+    /** OCR 命令（默认 tesseract） */
     private final String ocrCommand;
+    /** OCR 自定义命令模板（支持 {image} 和 {lang} 占位符） */
     private final String ocrCommandTemplate;
+    /** OCR 超时时间 */
     private final Duration ocrTimeout;
+    /** 是否启用文档格式转换器（LibreOffice/soffice） */
     private final boolean converterEnabled;
+    /** 文档转换器命令 */
     private final String converterCommand;
+    /** 文档转换器超时时间 */
     private final Duration converterTimeout;
+    /** PDF 页面渲染 DPI */
     private final int renderDpi;
+    /** 内联 PDF OCR 的最大文件大小 */
     private final long inlinePdfOcrMaxBytes;
+    /** 内联 PDF OCR 的最大页数 */
     private final int inlinePdfOcrMaxPages;
+
+    // ======================== PDF 压缩配置 ========================
+    /** 是否启用 PDF 压缩 */
     private final boolean pdfCompressionEnabled;
+    /** PDF 压缩命令（默认 gs / Ghostscript） */
     private final String pdfCompressionCommand;
+    /** PDF 压缩自定义命令模板 */
     private final String pdfCompressionCommandTemplate;
+    /** PDF 压缩超时时间 */
     private final Duration pdfCompressionTimeout;
+    /** 触发 PDF 压缩的最小文件大小 */
     private final long pdfCompressionMinBytes;
+    /** PDF 压缩的目标 DPI */
     private final int pdfCompressionTargetDpi;
+
+    // ======================== 线程和缓存 ========================
+    /** 上传会话后台处理线程池（2 个线程） */
     private final ExecutorService uploadExecutor = Executors.newFixedThreadPool(2);
+    /** PDF 页面渲染并发信号量（限制同时渲染 2 个页面，防止内存溢出） */
     private final Semaphore renderSemaphore = new Semaphore(2);
+    /** Embedding 向量缓存（key 为文本 SHA-256，value 为 JSON 格式的向量） */
     private final ConcurrentMap<String, String> embeddingJsonCache = new ConcurrentHashMap<>();
 
+    /**
+     * 构造函数 -- 通过 Spring 依赖注入初始化所有组件和配置。
+     * 大量参数通过 {@code @Value} 从 application.properties / application.yml 中读取。
+     */
     public MaterialService(
         LearningMaterialRepository learningMaterialRepository,
         MaterialChunkRepository materialChunkRepository,
@@ -193,11 +291,36 @@ public class MaterialService {
             .build();
     }
 
+    /**
+     * 应用关闭时清理线程池资源。
+     */
     @PreDestroy
     public void shutdown() {
         uploadExecutor.shutdownNow();
     }
 
+    /**
+     * 上传学习资料文件（单次上传模式）。
+     *
+     * <p>处理流程：
+     * <ol>
+     *   <li>校验文件非空且大小不超限</li>
+     *   <li>推断文件类型（根据扩展名或显式指定）</li>
+     *   <li>将文件保存到磁盘</li>
+     *   <li>解析文件提取文本（根据类型调用不同解析器）</li>
+     *   <li>将文本切分为知识片段（Chunk）</li>
+     *   <li>为每个片段生成 Embedding 向量</li>
+     *   <li>将数据保存到数据库和向量数据库</li>
+     * </ol>
+     *
+     * @param ownerId         资料所有者用户 ID
+     * @param title           资料标题（可选）
+     * @param sourceTypeValue 来源类型字符串（可选，为空时自动推断）
+     * @param file            上传的文件
+     * @param sourceUrl       来源 URL（可选）
+     * @return 保存成功的资料响应
+     * @throws BusinessException 文件为空、过大或解析失败时抛出
+     */
     @Transactional
     public MaterialResponse upload(long ownerId, String title, String sourceTypeValue, MultipartFile file, String sourceUrl) {
         if (file == null || file.isEmpty()) {
@@ -220,6 +343,22 @@ public class MaterialService {
         return saveMaterial(ownerId, title, sourceType, originalName, storagePath, sourceUrl, file.getSize(), parsed);
     }
 
+    /**
+     * 通过 URL 导入网页内容作为学习资料。
+     *
+     * <p>处理流程：
+     * <ol>
+     *   <li>校验并解析 URL</li>
+     *   <li>发送 HTTP GET 请求获取网页内容</li>
+     *   <li>清理 HTML 标签，提取纯文本</li>
+     *   <li>保存文本到磁盘并执行分块和索引</li>
+     * </ol>
+     *
+     * @param ownerId   资料所有者用户 ID
+     * @param title     资料标题（可选，为空时从 URL 推断）
+     * @param sourceUrl 网页 URL
+     * @return 导入成功的资料响应
+     */
     @Transactional
     public MaterialResponse importWeb(long ownerId, String title, String sourceUrl) {
         URI uri = parseWebUri(sourceUrl);
@@ -251,6 +390,16 @@ public class MaterialService {
         return saveMaterial(ownerId, title, htmlPage ? MaterialSourceType.WEB : sourceType, originalName, storagePath, uri.toString(), fileSize, parsed);
     }
 
+    /**
+     * 创建分片上传会话。
+     *
+     * <p>前端大文件上传的入口，创建会话后可通过 uploadChunk 方法逐个上传分片。
+     * 同一个 clientUploadId 的重复请求具有幂等性（返回已有会话）。
+     *
+     * @param ownerId  资料所有者用户 ID
+     * @param request  创建请求（包含文件元数据）
+     * @return 上传会话信息
+     */
     @Transactional
     public MaterialUploadSessionResponse createUploadSession(long ownerId, MaterialUploadSessionCreateRequest request) {
         String clientUploadId = normalizeClientUploadId(request.clientUploadId());
@@ -309,11 +458,32 @@ public class MaterialService {
         return toUploadSessionResponse(session);
     }
 
+    /**
+     * 查询上传会话的当前状态。
+     *
+     * @param ownerId   用户 ID
+     * @param sessionId 会话 ID
+     * @return 上传会话状态信息
+     */
     @Transactional(readOnly = true)
     public MaterialUploadSessionResponse getUploadSession(long ownerId, String sessionId) {
         return toUploadSessionResponse(requireUploadSession(ownerId, sessionId));
     }
 
+    /**
+     * 上传一个文件分片。
+     *
+     * <p>当所有分片都已上传完毕后，自动触发后台合并和解析任务。
+     * 分片支持 SHA-256 校验，已有分片的重复上传是幂等的。
+     *
+     * @param ownerId       用户 ID
+     * @param sessionId     会话 ID
+     * @param chunkIndex    分片索引（从 0 开始）
+     * @param totalChunks   总分片数
+     * @param chunk         分片文件内容
+     * @param checksumSha256 分片校验值（可选）
+     * @return 上传会话的最新状态
+     */
     @Transactional
     public MaterialUploadSessionResponse uploadChunk(
         long ownerId,

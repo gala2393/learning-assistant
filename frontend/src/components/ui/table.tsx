@@ -1,3 +1,4 @@
+// 表格组件 - 包含表格、表头、表体、表尾、行、单元格、标题等子组件
 import * as React from 'react'
 import { cn } from '@/lib/utils'
 

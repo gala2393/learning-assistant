@@ -1,3 +1,4 @@
+// 滚动区域组件 - 自定义样式的可滚动容器，替代浏览器默认滚动条
 import * as React from 'react'
 import * as ScrollAreaPrimitive from '@radix-ui/react-scroll-area'
 import { cn } from '@/lib/utils'

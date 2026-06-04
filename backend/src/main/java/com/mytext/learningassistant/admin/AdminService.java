@@ -29,6 +29,22 @@ import com.mytext.learningassistant.user.UserStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * 管理后台业务逻辑 — 处理管理员的所有操作。
+ *
+ * 核心功能：
+ * 1. 统计 — 返回系统整体数据概况（用户数、资料数等）
+ * 2. 用户管理 — 列表、搜索、修改角色、禁用/启用
+ * 3. 资料管理 — 列表、搜索、修改状态
+ * 4. 系统日志 — 查看管理员操作记录
+ * 5. 使用记录 — 查看用户问答/上传操作和 token 消耗
+ *
+ * 安全规则：
+ * - 所有方法都会调用 requireAdmin() 验证当前用户是管理员
+ * - 不能把自己降级为普通用户
+ * - 不能禁用自己
+ * - 至少保留一个管理员
+ */
 @Service
 public class AdminService {
 

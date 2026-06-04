@@ -1,3 +1,4 @@
+// 卡片组件 - 用于信息分组展示，包含头部、标题、描述、内容、底部等子组件
 import * as React from 'react'
 import { cn } from '@/lib/utils'
 
