@@ -62,7 +62,7 @@ class RagApiTest {
 
     @BeforeEach
     void useLocalFallbackByDefault() {
-        when(embeddingClient.embed(anyString())).thenReturn(Optional.empty());
+        when(embeddingClient.embedQuery(anyString())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean(), any())).thenReturn(Optional.empty());
@@ -1456,9 +1456,9 @@ class RagApiTest {
         });
         when(thirdPartyLlmClient.generateHydeAnswer("Can you infer the hidden concept?"))
             .thenReturn(Optional.of("semantic anchor vector target passage"));
-        when(embeddingClient.embed("Can you infer the hidden concept?"))
+        when(embeddingClient.embedQuery("Can you infer the hidden concept?"))
             .thenReturn(Optional.of(List.of(0.0, 1.0)));
-        when(embeddingClient.embed("semantic anchor vector target passage"))
+        when(embeddingClient.embedQuery("semantic anchor vector target passage"))
             .thenReturn(Optional.of(List.of(1.0, 0.0)));
 
         mockMvc.perform(post("/api/rag/chat")
@@ -1477,7 +1477,7 @@ class RagApiTest {
             .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("semantic anchor vector target")));
 
         verify(thirdPartyLlmClient).generateHydeAnswer("Can you infer the hidden concept?");
-        verify(embeddingClient, atLeastOnce()).embed("semantic anchor vector target passage");
+        verify(embeddingClient, atLeastOnce()).embedQuery("semantic anchor vector target passage");
     }
 
     @Test

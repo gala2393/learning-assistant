@@ -1,0 +1,7 @@
+.env.local
+*.log
+target/
+.m2/
+data/
+tools/
+

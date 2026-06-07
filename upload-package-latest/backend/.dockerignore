@@ -1,0 +1,9 @@
+target/
+.git/
+.idea/
+.m2/
+data/
+tools/
+*.log
+.env
+.env.local

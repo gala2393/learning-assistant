@@ -1,0 +1,8 @@
+.env.local
+*.log
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+
+
+.vercel

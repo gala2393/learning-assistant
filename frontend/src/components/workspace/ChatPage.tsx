@@ -1,13 +1,14 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { AlertCircle, BookOpen, CheckCircle2, Plus, Server, Sparkles, Trash2 } from 'lucide-react'
+import { AlertCircle, BookOpen, CheckCircle2, Plus, Search, Server, Sparkles, Trash2, Upload } from 'lucide-react'
 import { ChatThread } from './ChatThread'
 import { ChatComposer } from './ChatComposer'
+import { MaterialUploadForm } from './MaterialUploadForm'
 import { useDeleteHistory, useHistory, useRagUsage, useRenameHistory, useTogglePinHistory } from '@/api/rag'
 import { useDeleteUserLlmConfig, useSaveUserLlmConfig, useTestUserLlmConfig, useUserLlmConfig } from '@/api/llm'
 import { useAddFavorite, useDeleteFavorite, useFavorites } from '@/api/favorites'
-import { useMaterials } from '@/api/materials'
+import { MAX_TEMPORARY_MATERIAL_BYTES, uploadMaterialInChunks, uploadTemporaryMaterial, useMaterials } from '@/api/materials'
 import { GENERAL_PROMPTS, MATERIAL_PROMPTS } from '@/constants'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -15,9 +16,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { cn } from '@/lib/utils'
+import { cleanTemporaryMaterialText, cn, formatBytes, inferSourceType } from '@/lib/utils'
 import { queryClient } from '@/lib/query-client'
 import { useToast } from '@/components/ui/toast'
+import { useGlobalSearch } from '@/hooks/useGlobalSearch'
+import { GlobalSearch } from '@/components/layout/GlobalSearch'
 import {
   getChatSessionSnapshot,
   resetChatSession,
@@ -26,76 +29,184 @@ import {
   subscribeChatSession,
   updateChatSession,
 } from '@/lib/chat-session'
-import type { HistoryItem, RagSource, UserLlmConfig } from '@/types'
+import type { HistoryItem, RagSource, TemporaryMaterial, UserLlmConfig } from '@/types'
+import type { UploadProgress, UploadProgressItem } from '@/api/materials'
 
 /**
- * ChatPage — 聊天主页，项目最核心的页面组件。
+ * ChatPage -- 聊天主页（项目最核心的页面组件）
  *
- * 路由：/workspace/chat
+ * 【路由】/workspace/chat
  *
- * 功能：
- * 1. 两种问答模式：通用模式（智能问答）和资料模式（资料问答）
- * 2. 空状态：居中 hero 布局，显示大标题 + 资料选择器 + 输入框
- * 3. 有消息时：上方消息列表 + 下方输入框
- * 4. 模型切换弹窗：支持系统默认模型和用户自定义 LLM 配置
- * 5. 通过 useSyncExternalStore 订阅 chat-session 的全局状态
- * 6. URL 参数同步：materialId、chunkId、historyId、new
- * 7. 快捷提示词芯片
- * 8. 使用量提示（今日剩余次数）
+ * 【页面结构】
  *
- * 状态管理：使用 External Store 模式（chat-session.ts），
- * 而非 React useState，因为流式输出时需要高频更新（每秒 10+ 次）。
+ * 顶部导航栏（h-9）：
+ *   左侧：当前模式状态文字（"基于通用知识回答" / "已绑定：xxx"）
+ *   中间：模式切换标签（智能 / 资料）
+ *   右侧：上传资料按钮（资料模式）+ 搜索按钮
+ *
+ * 空状态布局（isEmptyChat=true）：
+ *   居中 hero 布局，显示大标题"智能问答" + 资料选择器（资料模式）+ 居中输入框
+ *
+ * 有消息布局（isEmptyChat=false）：
+ *   上方：ChatThread 消息列表（支持富文本渲染、来源引用）
+ *   下方：ChatComposer 输入框（底部固定）
+ *
+ * 弹窗：
+ *   - 资料上传弹窗（MaterialUploadForm）
+ *   - 模型切换弹窗（系统默认 / 自定义 LLM 配置，支持保存多个、测试连接）
+ *
+ * 【核心功能详解】
+ *
+ * 1. 两种问答模式：
+ *    - GENERAL（智能问答）：基于通用知识回答，支持上传临时资料增强上下文
+ *    - MATERIAL（资料问答）：绑定一份资料，基于 RAG 检索回答
+ *
+ * 2. SSE 流式回答（核心交互）：
+ *    通过 chat-session.ts 的 External Store 模式管理状态。
+ *    用户提交问题后，startChatSessionStream() 发起 SSE 连接，
+ *    流式接收 AI 回答的文本片段（delta），每秒 10+ 次高频更新。
+ *    使用 useSyncExternalStore 订阅状态变化，而非 React useState，
+ *    这样可以在流式输出时避免不必要的组件重渲染。
+ *
+ * 3. URL 参数同步：
+ *    - materialId：当前绑定的资料 ID（资料模式）
+ *    - chunkId：当前选中的片段 ID
+ *    - historyId：当前加载的历史会话 ID
+ *    - new=1：新建会话标记
+ *
+ * 4. 模型切换弹窗：
+ *    - 左侧边栏：系统默认模型 + 用户保存的自定义模型列表
+ *    - 右侧表单：显示名称、URL 地址、API 密钥、模型名称
+ *    - 支持测试连接、保存、删除自定义模型
+ *    - 启用自定义模型后，今日问答次数变为不限
+ *
+ * 5. 临时资料上传（通用模式）：
+ *    用户可以上传文件作为临时资料，AI 在回答时会参考这些资料。
+ *    临时资料不会保存到资料库，仅在当前会话有效。
+ *    支持多文件上传，每个文件独立追踪上传和解析进度。
+ *
+ * 【状态管理架构】
+ * 使用 External Store 模式（chat-session.ts）管理核心聊天状态：
+ * - messages: 消息列表
+ * - input: 输入框文本
+ * - images: 待发送图片
+ * - streaming: 是否正在流式输出
+ * - mode: 问答模式
+ * - materialId/chunkId: 当前绑定的资料
+ * - temporaryMaterial: 临时资料
+ * - selectedHistoryId: 当前历史会话 ID
  */
 export function ChatPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
+
+  // === 数据获取（React Query hooks） ===
+  /** 历史会话列表 */
   const { data: historyItems = [] } = useHistory()
+  /** 今日使用额度信息 */
   const { data: ragUsage } = useRagUsage()
+  /** 用户 LLM 配置（模型设置） */
   const { data: llmConfig } = useUserLlmConfig()
+  /** 收藏列表 */
   const { data: favorites = [] } = useFavorites()
+  /** 资料列表 */
   const { data: materials = [] } = useMaterials()
+
+  // === Mutations ===
   const deleteHistoryMutation = useDeleteHistory()
   const renameHistoryMutation = useRenameHistory()
   const togglePinHistoryMutation = useTogglePinHistory()
   const addFavoriteMutation = useAddFavorite()
   const deleteFavoriteMutation = useDeleteFavorite()
-  const { showToast } = useToast()
-  const [modelDialogOpen, setModelDialogOpen] = useState(false)
-  const [modelMode, setModelMode] = useState<'SYSTEM' | 'CUSTOM'>('SYSTEM')
-  const [selectedConfigId, setSelectedConfigId] = useState<string | null>(null)
-  const [displayName, setDisplayName] = useState('')
-  const [baseUrl, setBaseUrl] = useState('')
-  const [apiKey, setApiKey] = useState('')
-  const [modelName, setModelName] = useState('')
-  const [actionNotice, setActionNotice] = useState<{ type: 'info' | 'success' | 'error'; message: string } | null>(null)
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
-  const [localLlmConfig, setLocalLlmConfig] = useState<UserLlmConfig | null>(null)
   const saveLlmConfigMutation = useSaveUserLlmConfig()
   const testLlmConfigMutation = useTestUserLlmConfig()
   const deleteLlmConfigMutation = useDeleteUserLlmConfig()
+
+  const { showToast } = useToast()
+  const { open: searchOpen, setOpen: setSearchOpen, close: closeSearch } = useGlobalSearch()
+
+  // === 模型切换弹窗状态 ===
+  /** 模型切换弹窗是否打开 */
+  const [modelDialogOpen, setModelDialogOpen] = useState(false)
+  /** 模型模式：'SYSTEM' 系统默认 | 'CUSTOM' 自定义 */
+  const [modelMode, setModelMode] = useState<'SYSTEM' | 'CUSTOM'>('SYSTEM')
+  /** 当前选中的自定义模型配置 ID */
+  const [selectedConfigId, setSelectedConfigId] = useState<string | null>(null)
+  /** 模型表单字段 */
+  const [displayName, setDisplayName] = useState('')  // 显示名称
+  const [baseUrl, setBaseUrl] = useState('')          // API URL 地址
+  const [apiKey, setApiKey] = useState('')            // API 密钥
+  const [modelName, setModelName] = useState('')      // 模型名称
+  /** 模型操作的通知消息（测试/保存/删除结果） */
+  const [actionNotice, setActionNotice] = useState<{ type: 'info' | 'success' | 'error'; message: string } | null>(null)
+  /** 删除确认状态（第一次点击显示确认，第二次执行删除） */
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  /** 本地 LLM 配置（乐观更新，避免等待服务器响应） */
+  const [localLlmConfig, setLocalLlmConfig] = useState<UserLlmConfig | null>(null)
+
+  // === 资料上传弹窗状态 ===
+  /** 上传弹窗是否打开 */
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
+  /** 是否正在上传 */
+  const [uploading, setUploading] = useState(false)
+  /** 单文件上传进度 */
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)
+  /** 多文件上传进度列表 */
+  const [uploadProgressItems, setUploadProgressItems] = useState<UploadProgressItem[]>([])
+
+  // === 临时资料上传状态 ===
+  /** 正在上传/解析的临时资料文件信息 */
+  const [temporaryUploadFile, setTemporaryUploadFile] = useState<{ name: string; size: number; sourceType: string } | null>(null)
+  /** 临时上传的文件列表（用于显示附件卡片） */
+  const [temporaryUploadFiles, setTemporaryUploadFiles] = useState<{ name: string; size?: number | null; type?: string | null }[]>([])
+  /** 临时资料上传/解析进度 */
+  const [temporaryUploadProgress, setTemporaryUploadProgress] = useState<{ phase: 'uploading' | 'processing'; percent: number; message?: string } | null>(null)
+  /** 临时资料上传/解析错误 */
+  const [temporaryUploadError, setTemporaryUploadError] = useState<string | null>(null)
+
+  /** 有效的 LLM 配置（优先本地乐观更新 > 服务器数据） */
   const effectiveLlmConfig = localLlmConfig ?? llmConfig ?? null
 
+  /**
+   * 订阅 chat-session 外部状态存储
+   * 使用 useSyncExternalStore 而非 useState 的原因：
+   * SSE 流式输出时，文本片段每秒更新 10+ 次，
+   * 如果用 useState 会导致每次更新都触发完整的 React 渲染周期。
+   * External Store 模式可以在 store 内部批量更新，
+   * React 只在需要时读取快照，避免不必要的重渲染。
+   */
   const chat = useSyncExternalStore(
     subscribeChatSession,
     getChatSessionSnapshot,
     getChatSessionSnapshot,
   )
 
+  // === 从 External Store 解构聊天状态 ===
   const {
-    selectedHistoryId,
-    currentQuestionId,
-    mode,
-    input,
-    images,
-    messages,
-    materialId: selectedMaterialId,
-    chunkId: selectedChunkId,
-    streaming,
+    selectedHistoryId,   // 当前加载的历史会话 ID
+    currentQuestionId,   // 当前问题 ID
+    mode,                // 问答模式：'GENERAL' | 'MATERIAL'
+    input,               // 输入框文本
+    images,              // 待发送的图片列表
+    messages,            // 消息列表（ChatMessage[]）
+    materialId: selectedMaterialId,   // 当前绑定的资料 ID
+    chunkId: selectedChunkId,         // 当前选中的片段 ID
+    temporaryMaterial,   // 临时资料对象
+    streaming,           // 是否正在流式输出
   } = chat
 
+  // === URL 参数 ===
+  const newChatParam = searchParams.get('new')       // 新建会话标记（'1' 时重置会话）
+  const historyParam = searchParams.get('historyId')  // 历史会话 ID
+  const materialParam = searchParams.get('materialId')  // 资料 ID
+  const chunkParam = searchParams.get('chunkId')        // 片段 ID
+
+  /**
+   * LLM 配置同步效果
+   * 当服务器返回的 LLM 配置变化时，同步到本地状态
+   * 初始化模型弹窗的表单字段
+   */
   useEffect(() => {
-    if (!llmConfig) return
-    setLocalLlmConfig((current) => mergeLlmConfig(current, llmConfig))
     setModelMode(llmConfig.enabled ? 'CUSTOM' : 'SYSTEM')
     setSelectedConfigId(llmConfig.activeConfigId == null ? null : String(llmConfig.activeConfigId))
     const active = llmConfig.configs?.find((item) => String(item.id) === String(llmConfig.activeConfigId))
@@ -107,33 +218,40 @@ export function ChatPage() {
     setDeleteConfirmId(null)
   }, [llmConfig])
 
+  /**
+   * URL 参数同步效果
+   * 监听 URL 参数变化，同步到聊天状态：
+   * - new=1：重置会话（新建聊天）
+   * - historyId：加载指定的历史会话
+   * - materialId + chunkId：切换到指定的资料和片段
+   */
   useEffect(() => {
-    if (searchParams.get('new') === '1') {
       resetChatSession()
       setSearchParams(new URLSearchParams(), { replace: true })
       return
     }
 
-    const historyId = searchParams.get('historyId')
-    if (historyId) {
-      const target = historyItems.find((item) => String(item.id) === historyId)
-      if (target && selectedHistoryId !== historyId) {
+    if (historyParam) {
+      const target = historyItems.find((item) => String(item.id) === historyParam)
+      if (target && selectedHistoryId !== historyParam) {
         selectHistorySession(target)
       }
       return
     }
 
-    const materialId = searchParams.get('materialId')
-    const chunkId = searchParams.get('chunkId')
-    if (materialId && (mode !== 'MATERIAL' || selectedMaterialId !== materialId || selectedChunkId !== chunkId)) {
+    if (materialParam && (mode !== 'MATERIAL' || selectedMaterialId !== materialParam || selectedChunkId !== chunkParam)) {
       updateChatSession({
         mode: 'MATERIAL',
-        materialId,
-        chunkId,
+        materialId: materialParam,
+        chunkId: chunkParam,
       })
     }
-  }, [historyItems, mode, searchParams, selectedChunkId, selectedHistoryId, selectedMaterialId, setSearchParams])
+  }, [chunkParam, historyItems, historyParam, materialParam, mode, newChatParam, selectedChunkId, selectedHistoryId, selectedMaterialId, setSearchParams])
 
+  /**
+   * 更新 URL 参数以反映当前聊天上下文
+   * 资料模式时保留 materialId 和 chunkId，通用模式时清空
+   */
   const updateLocationForContext = (newMode: 'GENERAL' | 'MATERIAL', materialId: string | null, chunkId: string | null) => {
     const nextParams = new URLSearchParams()
     if (newMode === 'MATERIAL' && materialId) {
@@ -143,6 +261,10 @@ export function ChatPage() {
     setSearchParams(nextParams, { replace: true })
   }
 
+  /**
+   * 切换问答模式（智能 <-> 资料）
+   * 切换时重置聊天会话，保留目标模式的资料绑定
+   */
   const handleModeChange = (newMode: 'GENERAL' | 'MATERIAL') => {
     if (newMode === mode) return
     const nextMaterialId = newMode === 'MATERIAL' ? selectedMaterialId : null
@@ -154,12 +276,14 @@ export function ChatPage() {
     updateLocationForContext(newMode, nextMaterialId, newMode === 'MATERIAL' ? selectedChunkId : null)
   }
 
+  /** 新建会话（保留当前模式和资料绑定，清除消息和临时资料） */
   const handleNewChat = () => {
     resetChatSession({
       mode,
       materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
       chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
       images,
+      temporaryMaterial: mode === 'GENERAL' ? temporaryMaterial : null,
     })
     updateLocationForContext(mode, selectedMaterialId, selectedChunkId)
   }
@@ -233,15 +357,235 @@ export function ChatPage() {
     updateLocationForContext('MATERIAL', materialId, null)
   }
 
+  const handleUploadMaterial = async (data: { title?: string; file?: File; files?: File[] }) => {
+    const files = data.files?.length ? data.files : data.file ? [data.file] : []
+    await handleUploadMaterialFiles(files, data.title)
+  }
+
+  /**
+   * handleUploadMaterialFiles -- 持久资料上传（资料模式核心功能）
+   *
+   * 将文件上传为持久资料（保存到资料库），使用分片上传策略。
+   * 上传完成后自动选中第一份资料并切换到资料问答模式。
+   *
+   * 流程：
+   * 1. 并行上传所有文件（uploadMaterialInChunks，分片大小 5MB）
+   * 2. 每个文件独立追踪分片上传进度
+   * 3. 全部完成后：
+   *    - 刷新资料列表缓存
+   *    - 自动选中第一份资料
+   *    - 切换到 MATERIAL 模式
+   *    - 有失败时显示错误信息
+   */
+  const handleUploadMaterialFiles = async (files: File[], title?: string) => {
+    if (files.length === 0) return
+    setUploading(true)
+    setUploadProgress(null)
+    setUploadProgressItems(createUploadProgressItems(files))
+    setTemporaryUploadError(null)
+    try {
+      const results = await Promise.allSettled(files.map((file, index) => {
+        const id = uploadProgressItemId(file, index)
+        return uploadMaterialInChunks({
+          file,
+          title: files.length === 1 ? title : undefined,
+          sourceType: inferSourceType(file.name),
+        }, (progress) => {
+          setUploadProgressItems((current) => updateUploadProgressItem(current, id, progress))
+        }).then((session) => {
+          setUploadProgressItems((current) => updateUploadProgressItem(current, id, {
+            phase: 'processing',
+            percent: 100,
+            uploadedChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),
+            totalChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),
+            stage: '解析完成',
+            message: '资料已上传完成',
+          }, 'success'))
+          return session
+        }).catch((error) => {
+          setUploadProgressItems((current) => updateUploadProgressItem(current, id, null, 'error', error instanceof Error ? error.message : '上传失败'))
+          throw error
+        })
+      }))
+      const successfulMaterialIds = results
+        .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof uploadMaterialInChunks>>> => result.status === 'fulfilled')
+        .map((result) => result.value.materialId)
+        .filter((materialId): materialId is string => !!materialId)
+      const failedCount = results.length - successfulMaterialIds.length
+      await queryClient.invalidateQueries({ queryKey: ['materials'] })
+      if (failedCount > 0) {
+        const message = `${failedCount}/${files.length} 份资料上传失败，请查看进度列表`
+        setTemporaryUploadError(message)
+        showToast(message)
+        return
+      }
+      setUploadDialogOpen(false)
+      const firstMaterialId = successfulMaterialIds[0]
+      if (firstMaterialId) {
+        updateChatSession({
+          mode: 'MATERIAL',
+          materialId: firstMaterialId,
+          chunkId: null,
+        })
+        updateLocationForContext('MATERIAL', firstMaterialId, null)
+        showToast(files.length > 1 ? `已上传 ${files.length} 份资料，并选中第一份` : '资料已上传并选中，可以直接提问')
+      } else {
+        showToast(files.length > 1 ? `已上传 ${files.length} 份资料，请在列表中选择后提问` : '资料已上传，请在列表中选择后提问')
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '资料上传失败，请重试'
+      setTemporaryUploadError(message)
+      showToast(message)
+    } finally {
+      setUploading(false)
+      setUploadProgress(null)
+    }
+  }
+
+  const handleUploadTemporaryMaterial = async (file: File) => {
+    await handleUploadTemporaryMaterials([file])
+  }
+
+  /**
+   * handleUploadTemporaryMaterials -- 临时资料上传（通用模式核心功能）
+   *
+   * 允许用户在智能问答模式下上传文件作为临时资料。
+   * AI 在回答时会参考这些临时资料的内容。
+   *
+   * 流程：
+   * 1. 检查文件大小限制（MAX_TEMPORARY_MATERIAL_BYTES）
+   * 2. 初始化上传进度状态
+   * 3. 对每个文件并行调用 uploadTemporaryMaterial()
+   *    - 上传过程追踪：聚合多文件进度为单一进度条
+   *    - 如果进度超过 60% 仍在上传状态，300ms 后自动切换为"解析中"状态
+   * 4. 上传完成后：
+   *    - 如果已存在临时资料，合并新旧资料
+   *    - 调用 updateChatSession 更新聊天状态
+   *    - 显示成功/失败提示
+   * 5. 最终状态清理（600ms 后隐藏进度条）
+   */
+  const handleUploadTemporaryMaterials = async (files: File[]) => {
+    if (files.length === 0) return
+    const tooLargeFile = files.find((file) => file.size > MAX_TEMPORARY_MATERIAL_BYTES)
+    if (tooLargeFile) {
+      const message = `${tooLargeFile.name} 超过智能问答临时资料上限 ${formatBytes(MAX_TEMPORARY_MATERIAL_BYTES)}；大文件请切换到资料问答上传，系统会在后台解析并显示进度。`
+      setTemporaryUploadError(message)
+      setTemporaryUploadProgress(null)
+      setTemporaryUploadFile(null)
+      setTemporaryUploadFiles([])
+      showToast(message)
+      return
+    }
+    setUploading(true)
+    setTemporaryUploadFile({
+      name: files.length > 1 ? `${files.length} 份临时资料` : files[0].name,
+      size: files.reduce((sum, file) => sum + file.size, 0),
+      sourceType: files.length > 1 ? 'MULTI' : inferSourceType(files[0].name),
+    })
+    setTemporaryUploadFiles([
+      ...temporaryMaterialFileItems(temporaryMaterial),
+      ...files.map((file) => ({ name: file.name, size: file.size, type: inferSourceType(file.name) })),
+    ])
+    setTemporaryUploadProgress({ phase: 'uploading', percent: 1, message: files.length > 1 ? `准备上传 ${files.length} 份资料` : '准备上传' })
+    setTemporaryUploadError(null)
+    try {
+      const progressByIndex = new Map<number, { phase: 'uploading' | 'processing'; percent: number; message?: string }>()
+      const updateAggregateProgress = () => {
+        const values = files.map((_, index) => progressByIndex.get(index) || { phase: 'uploading' as const, percent: 1 })
+        const completed = values.filter((progress) => progress.percent >= 100).length
+        const percent = Math.max(1, Math.min(99, Math.round(values.reduce((sum, progress) => sum + progress.percent, 0) / values.length)))
+        const phase = values.some((progress) => progress.phase === 'uploading') ? 'uploading' : 'processing'
+        setTemporaryUploadProgress({
+          phase,
+          percent,
+          message: files.length > 1 ? `已完成 ${completed}/${files.length} 份` : values[0]?.message || '正在处理资料',
+        })
+      }
+      const results = await Promise.allSettled(files.map((file, index) =>
+        uploadTemporaryMaterial({
+          file,
+          title: file.name,
+          sourceType: inferSourceType(file.name),
+        }, (progress) => {
+          progressByIndex.set(index, progress)
+          updateAggregateProgress()
+          if (progress.phase === 'uploading' && progress.percent >= 60) {
+            window.setTimeout(() => {
+              const current = progressByIndex.get(index)
+              if (current?.phase === 'uploading') {
+                progressByIndex.set(index, { phase: 'processing', percent: 65, message: '正在解析资料，扫描版 PDF 会进行 OCR' })
+                updateAggregateProgress()
+              }
+            }, 300)
+          }
+        })
+      ))
+      const uploaded = results
+        .filter((result): result is PromiseFulfilledResult<TemporaryMaterial> => result.status === 'fulfilled')
+        .map((result, index) => ({
+          ...result.value,
+          files: [{
+            name: result.value.originalName || result.value.title || files[index]?.name || '临时资料',
+            size: result.value.fileSize ?? files[index]?.size,
+            type: result.value.sourceType || inferSourceType(files[index]?.name || ''),
+          }],
+        }))
+      const failedCount = results.length - uploaded.length
+      if (uploaded.length === 0) {
+        throw new Error(failedCount > 0 ? `${failedCount}/${files.length} 份临时资料解析失败` : '临时资料解析失败，请重试')
+      }
+      const temporary = mergeTemporaryMaterials(temporaryMaterial ? [temporaryMaterial, ...uploaded] : uploaded)
+      setTemporaryUploadProgress({ phase: 'processing', percent: 100, message: '解析完成' })
+      updateChatSession({
+        mode: 'GENERAL',
+        temporaryMaterial: temporary,
+      })
+      if (failedCount > 0) {
+        const message = `已解析 ${uploaded.length}/${files.length} 份临时资料，${failedCount} 份失败`
+        setTemporaryUploadError(message)
+        showToast(message)
+      } else {
+        showToast(files.length > 1 ? `已解析 ${files.length} 份临时资料，可以在智能问答中提问` : '临时资料已解析，可以在智能问答中提问')
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '临时资料解析失败，请重试'
+      setTemporaryUploadError(message)
+      showToast(message)
+    } finally {
+      setUploading(false)
+      setTemporaryUploadFile(null)
+      setTemporaryUploadFiles([])
+      window.setTimeout(() => setTemporaryUploadProgress(null), 600)
+    }
+  }
+
+  /**
+   * handleSubmit -- 提交问题（核心交互入口）
+   *
+   * 流程：
+   * 1. 校验：有输入文本、不在流式中、资料模式下已选择资料
+   * 2. 构建选中文本上下文（通用模式下如果有临时资料，构建临时资料上下文）
+   * 3. 调用 startChatSessionStream() 发起 SSE 流式请求
+   *    （该函数在 chat-session.ts 中管理完整的流式接收过程）
+   * 4. 更新 URL 参数
+   */
   const handleSubmit = () => {
     const question = input.trim()
     if (!question || streaming) return
+    if (mode === 'MATERIAL' && !selectedMaterialId) {
+      showToast('请先上传或选择资料')
+      return
+    }
 
     startChatSessionStream({
       question,
       mode,
       materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
       chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
+      selectedText: mode === 'GENERAL' && temporaryMaterial
+        ? buildTemporaryMaterialContext(temporaryMaterial)
+        : null,
+      temporaryMaterial: mode === 'GENERAL' ? temporaryMaterial : null,
     })
     updateLocationForContext(mode, selectedMaterialId, selectedChunkId)
   }
@@ -423,7 +767,15 @@ export function ChatPage() {
   }
 
   const handleOpenSource = (source: RagSource) => {
-    navigate(`/workspace/reader?materialId=${encodeURIComponent(source.materialId)}&chunkId=${encodeURIComponent(source.chunkId)}`)
+    const params = new URLSearchParams()
+    params.set('materialId', String(source.materialId))
+    params.set('chunkId', String(source.chunkId))
+    navigate({ pathname: '/workspace/reader', search: params.toString() })
+  }
+
+  const handleRemoveTemporaryMaterialFile = (index: number) => {
+    const next = removeTemporaryMaterialAtIndex(temporaryMaterial, index)
+    updateChatSession({ temporaryMaterial: next })
   }
 
   const isGeneral = mode === 'GENERAL'
@@ -446,56 +798,82 @@ export function ChatPage() {
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="relative flex items-center justify-center gap-1 px-2 py-2 md:px-4">
-        <Button
-          variant={isGeneral ? 'secondary' : 'ghost'}
-          size="sm"
-          className={cn('h-8 rounded-full px-3 text-xs dark:text-slate-200 dark:hover:bg-white/[0.08] sm:px-4 sm:text-sm', isGeneral && 'bg-[#eef0f2] text-[#4b5563] hover:bg-[#e3e6e9] dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/15')}
-          onClick={() => handleModeChange('GENERAL')}
-        >
-          <Sparkles className="mr-1.5 h-4 w-4" />
-          智能问答
-        </Button>
-        <Button
-          variant={!isGeneral ? 'secondary' : 'ghost'}
-          size="sm"
-          className={cn('h-8 rounded-full px-3 text-xs dark:text-slate-200 dark:hover:bg-white/[0.08] sm:px-4 sm:text-sm', !isGeneral && 'bg-[#eef0f2] text-[#4b5563] hover:bg-[#e3e6e9] dark:bg-white/10 dark:text-slate-200 dark:hover:bg-white/15')}
-          onClick={() => handleModeChange('MATERIAL')}
-        >
-          <BookOpen className="mr-1.5 h-4 w-4" />
-          资料问答
-        </Button>
-        <div className="absolute right-8 hidden md:block">
-          <Badge variant={isGeneral ? 'secondary' : 'success'} className="text-xs">
-            {isGeneral ? '通用知识模式' : '绑定资料模式'}
-          </Badge>
+      <div className="grid h-9 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 bg-white px-3 dark:bg-[#171a21] md:px-5">
+        <div className="min-w-0">
+          <p className="truncate text-xs text-muted-foreground">
+            {isGeneral
+              ? temporaryMaterial
+                ? `已加载临时资料：${temporaryMaterial.title || temporaryMaterial.originalName || '未命名资料'}`
+                : '基于通用知识回答'
+              : selectedMaterialId
+                ? `已绑定：${materials.find((m) => m.id === selectedMaterialId)?.title || '未知资料'}`
+                : '请选择资料后提问'}
+          </p>
+        </div>
+        <div className="flex rounded-full bg-[#f2f4f7] p-0.5 dark:bg-white/[0.08]">
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'h-7 rounded-full px-3 text-[13px] font-medium text-slate-500 hover:bg-white/70 dark:text-slate-300 dark:hover:bg-white/[0.08] sm:px-3.5',
+              isGeneral && 'bg-white text-slate-900 shadow-sm hover:bg-white dark:bg-slate-900 dark:text-white',
+            )}
+            onClick={() => handleModeChange('GENERAL')}
+          >
+            <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+            智能
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'h-7 rounded-full px-3 text-[13px] font-medium text-slate-500 hover:bg-white/70 dark:text-slate-300 dark:hover:bg-white/[0.08] sm:px-3.5',
+              !isGeneral && 'bg-white text-slate-900 shadow-sm hover:bg-white dark:bg-slate-900 dark:text-white',
+            )}
+            onClick={() => handleModeChange('MATERIAL')}
+          >
+            <BookOpen className="mr-1.5 h-3.5 w-3.5" />
+            资料
+          </Button>
+        </div>
+        <div className="flex min-w-0 items-center justify-end gap-2">
+          {!isGeneral && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="hidden h-7 shrink-0 rounded-full px-2.5 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 sm:inline-flex"
+              onClick={() => setUploadDialogOpen(true)}
+            >
+              <Upload className="mr-1 h-3.5 w-3.5" />
+              上传资料
+            </Button>
+          )}
+          {!isGeneral && selectedMaterialId ? (
+            <Badge variant="outline" className="hidden shrink-0 text-[10px] font-medium sm:inline-flex">
+              {materials.find((m) => m.id === selectedMaterialId)?.chunkCount || 0} 个切片
+            </Badge>
+          ) : (
+            <Badge variant="secondary" className="hidden shrink-0 text-[10px] font-medium sm:inline-flex">
+              {isGeneral ? '通用模式' : '资料模式'}
+            </Badge>
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            title="搜索"
+            className="h-7 w-7 shrink-0 rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+            onClick={() => setSearchOpen(true)}
+          >
+            <Search className="h-4 w-4" />
+            <span className="sr-only">搜索</span>
+          </Button>
         </div>
       </div>
 
-      {!isEmptyChat && (
-        <div className="flex items-center gap-2 border-b bg-background px-4 py-2 dark:border-slate-800 dark:bg-[#171a21]">
-          {isGeneral ? (
-            <p className="text-xs text-muted-foreground">基于通用知识回答，适合概念解释和开放式讨论</p>
-          ) : (
-            <>
-              <p className="text-xs text-muted-foreground">
-                {selectedMaterialId
-                  ? `已绑定：${materials.find((m) => m.id === selectedMaterialId)?.title || '未知资料'}`
-                  : '请先在左侧选择一份资料，再发起提问'}
-              </p>
-              {selectedMaterialId && (
-                <Badge variant="outline" className="text-[10px]">
-                  {materials.find((m) => m.id === selectedMaterialId)?.chunkCount || 0} 个切片
-                </Badge>
-              )}
-            </>
-          )}
-          <div className="ml-auto" />
-        </div>
-      )}
-
       {isEmptyChat ? (
-        <div className="flex flex-1 flex-col items-center justify-center px-6 pb-20">
+        <div className="flex flex-1 flex-col items-center justify-center px-6 pb-14">
           <div className="mb-6 text-center">
             <h2 className="text-4xl font-black tracking-[0.02em] text-black dark:text-white sm:text-5xl">智能问答</h2>
             <p className="mt-3 text-sm text-muted-foreground">描述问题、上传资料或选择资料后开始提问</p>
@@ -505,26 +883,38 @@ export function ChatPage() {
               {parsedMaterials.length === 0 ? (
                 <div className="flex items-center justify-between gap-3 rounded-2xl border border-dashed border-slate-300 bg-[#fafafa] px-4 py-3 text-sm text-muted-foreground dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
                   <span>暂无已解析资料，请先导入并完成解析。</span>
-                  <Button size="sm" variant="outline" onClick={() => navigate('/workspace/materials')}>
-                    去导入资料
+                  <Button size="sm" variant="outline" onClick={() => setUploadDialogOpen(true)}>
+                    <Upload className="mr-1.5 h-3.5 w-3.5" />
+                    上传资料
                   </Button>
                 </div>
               ) : (
-                <Select value={selectedMaterialId || ''} onValueChange={handleMaterialSelect}>
-                  <SelectTrigger className="h-11 rounded-2xl border-slate-200 bg-[#fafafa] px-4 text-sm shadow-none focus:ring-1 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
-                    <SelectValue placeholder="选择一份资料开始提问" />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-72 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
-                    {parsedMaterials.map((material) => (
-                      <SelectItem key={material.id} value={material.id} className="dark:focus:bg-slate-800">
-                        <span className="mr-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-800">
-                          {material.sourceType}
-                        </span>
-                        {material.title || material.originalName}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="flex gap-2">
+                  <Select value={selectedMaterialId || ''} onValueChange={handleMaterialSelect}>
+                    <SelectTrigger className="h-11 rounded-2xl border-slate-200 bg-[#fafafa] px-4 text-sm shadow-none focus:ring-1 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+                      <SelectValue placeholder="选择一份资料开始提问" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+                      {parsedMaterials.map((material) => (
+                        <SelectItem key={material.id} value={material.id} className="dark:focus:bg-slate-800">
+                          <span className="mr-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-800">
+                            {material.sourceType}
+                          </span>
+                          {material.title || material.originalName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-11 shrink-0 rounded-2xl px-3"
+                    onClick={() => setUploadDialogOpen(true)}
+                  >
+                    <Upload className="h-4 w-4 sm:mr-1.5" />
+                    <span className="hidden sm:inline">上传</span>
+                  </Button>
+                </div>
               )}
             </div>
           )}
@@ -536,14 +926,27 @@ export function ChatPage() {
             mode={mode}
             onModeChange={handleModeChange}
             quickPrompts={quickPrompts}
-            disabled={usageExhausted || (!isGeneral && !selectedMaterialId)}
-            disabledHint={usageExhausted ? '今日问答次数已用完' : '请先选择资料'}
+            disabled={usageExhausted}
+            disabledHint="今日问答次数已用完"
             usageLabel={usageLabel}
             modelLabel={effectiveLlmConfig?.activeLabel || 'gpt5.5模型'}
             customModelEnabled={!!effectiveLlmConfig?.enabled}
             onOpenModelSettings={() => setModelDialogOpen(true)}
             images={images}
             onImagesChange={(nextImages) => updateChatSession({ images: nextImages })}
+            onOpenUploadMaterial={!isGeneral ? () => setUploadDialogOpen(true) : undefined}
+            onUploadMaterialFile={!isGeneral ? (file) => handleUploadMaterial({ file }) : undefined}
+            onUploadMaterialFiles={!isGeneral ? handleUploadMaterialFiles : undefined}
+            onUploadTemporaryMaterial={isGeneral ? handleUploadTemporaryMaterial : undefined}
+            onUploadTemporaryMaterials={isGeneral ? handleUploadTemporaryMaterials : undefined}
+            temporaryMaterialUploading={isGeneral && uploading}
+            temporaryMaterial={isGeneral ? temporaryMaterial : null}
+            temporaryUploadFile={isGeneral ? temporaryUploadFile : null}
+            temporaryUploadFiles={isGeneral ? temporaryUploadFiles : []}
+            temporaryUploadProgress={isGeneral ? temporaryUploadProgress : null}
+            temporaryUploadError={isGeneral ? temporaryUploadError : null}
+            onClearTemporaryMaterial={() => updateChatSession({ temporaryMaterial: null })}
+            onRemoveTemporaryMaterialFile={handleRemoveTemporaryMaterialFile}
             centered
           />
         </div>
@@ -558,17 +961,64 @@ export function ChatPage() {
             mode={mode}
             onModeChange={handleModeChange}
             quickPrompts={quickPrompts}
-            disabled={usageExhausted || (!isGeneral && !selectedMaterialId)}
-            disabledHint={usageExhausted ? '今日问答次数已用完' : '请先选择资料'}
+            disabled={usageExhausted}
+            disabledHint="今日问答次数已用完"
             usageLabel={usageLabel}
             modelLabel={effectiveLlmConfig?.activeLabel || 'gpt5.5模型'}
             customModelEnabled={!!effectiveLlmConfig?.enabled}
             onOpenModelSettings={() => setModelDialogOpen(true)}
             images={images}
             onImagesChange={(nextImages) => updateChatSession({ images: nextImages })}
+            onOpenUploadMaterial={!isGeneral ? () => setUploadDialogOpen(true) : undefined}
+            onUploadMaterialFile={!isGeneral ? (file) => handleUploadMaterial({ file }) : undefined}
+            onUploadMaterialFiles={!isGeneral ? handleUploadMaterialFiles : undefined}
+            onUploadTemporaryMaterial={isGeneral ? handleUploadTemporaryMaterial : undefined}
+            onUploadTemporaryMaterials={isGeneral ? handleUploadTemporaryMaterials : undefined}
+            temporaryMaterialUploading={isGeneral && uploading}
+            temporaryMaterial={isGeneral ? temporaryMaterial : null}
+            temporaryUploadFile={isGeneral ? temporaryUploadFile : null}
+            temporaryUploadFiles={isGeneral ? temporaryUploadFiles : []}
+            temporaryUploadProgress={isGeneral ? temporaryUploadProgress : null}
+            temporaryUploadError={isGeneral ? temporaryUploadError : null}
+            onClearTemporaryMaterial={() => updateChatSession({ temporaryMaterial: null })}
+            onRemoveTemporaryMaterialFile={handleRemoveTemporaryMaterialFile}
           />
         </>
       )}
+      <Dialog
+        open={uploadDialogOpen}
+        onOpenChange={(open) => {
+          if (uploading && !open) return
+          setUploadDialogOpen(open)
+        }}
+      >
+        <DialogContent className="max-w-xl overflow-hidden p-0">
+          <DialogHeader>
+            <div className="border-b bg-slate-50 px-6 py-5 dark:border-slate-800 dark:bg-slate-950/60">
+              <DialogTitle className="flex items-center gap-2">
+                <Upload className="h-5 w-5 text-slate-700 dark:text-slate-200" />
+                上传资料
+              </DialogTitle>
+              <DialogDescription className="mt-2">
+                支持 PDF、Word、PPT、Markdown、TXT 和网页文件，解析完成后会自动绑定到资料问答。
+              </DialogDescription>
+            </div>
+          </DialogHeader>
+          <div className="max-h-[72dvh] overflow-auto p-5">
+            <MaterialUploadForm
+              onSubmit={handleUploadMaterial}
+              loading={uploading}
+              progress={uploadProgress}
+              progressItems={uploadProgressItems}
+            />
+            {temporaryUploadError && (
+              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+                {temporaryUploadError}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
       <Dialog open={modelDialogOpen} onOpenChange={setModelDialogOpen}>
         <DialogContent className="max-w-3xl overflow-hidden p-0">
           <DialogHeader>
@@ -744,10 +1194,19 @@ export function ChatPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <GlobalSearch open={searchOpen} onClose={closeSearch} />
     </motion.div>
   )
 }
 
+// ========== 辅助函数 ==========
+
+/**
+ * mergeLlmConfig -- 合并 LLM 配置
+ * 将当前本地配置和服务器返回的新配置合并，
+ * 新配置优先，但保留当前配置中已有的自定义模型列表。
+ * 活跃配置排在列表最前面。
+ */
 function mergeLlmConfig(current: UserLlmConfig | null, next: UserLlmConfig): UserLlmConfig {
   if (!current) return next
   const configsById = new Map<string, UserLlmConfig['configs'][number]>()
@@ -765,4 +1224,134 @@ function mergeLlmConfig(current: UserLlmConfig | null, next: UserLlmConfig): Use
       return 0
     }),
   }
+}
+
+/** 生成文件的唯一进度条 ID */
+function uploadProgressItemId(file: File, index: number) {
+  return `${index}-${file.name}-${file.size}-${file.lastModified}`
+}
+
+/** 为多个文件创建初始进度条状态 */
+function createUploadProgressItems(files: File[]): UploadProgressItem[] {
+  return files.map((file, index) => ({
+    id: uploadProgressItemId(file, index),
+    fileName: file.name,
+    fileSize: file.size,
+    status: 'pending',
+    phase: 'uploading',
+    percent: 0,
+    uploadedChunks: 0,
+    totalChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),
+    message: '等待上传',
+  }))
+}
+
+/** 更新指定文件的进度条状态（不可变更新） */
+function updateUploadProgressItem(
+  return items.map((item) => {
+    if (item.id !== id) return item
+    if (!progress) {
+      return {
+        ...item,
+        status: status || item.status,
+        error: error || item.error,
+      }
+    }
+    return {
+      ...item,
+      ...progress,
+      status: status || (progress.phase === 'processing' ? 'processing' : 'uploading'),
+      error: null,
+    }
+  })
+}
+
+/**
+ * 将 TemporaryMaterial 转换为文件列表项
+ * 处理多文件临时资料和单文件临时资料两种情况
+ */
+function temporaryMaterialFileItems(material?: TemporaryMaterial | null): { name: string; size?: number | null; type?: string | null }[] {
+  if (!material) return []
+  if (material.files?.length) return material.files
+  const sourceType = (material.sourceType || '').toUpperCase()
+  const fallbackName = material.originalName || material.title || '临时资料'
+  if (sourceType !== 'MULTI') {
+    return [{ name: fallbackName, size: material.fileSize, type: sourceType || 'FILE' }]
+  }
+  return fallbackName
+    .split(/[、,]/)
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .map((name) => ({ name, type: 'FILE' }))
+}
+
+/**
+ * mergeTemporaryMaterials -- 合并多个临时资料为一个
+ * 将多个独立上传的临时资料合并为一个含 parts 数组的临时资料对象。
+ * 合并后的资料保留所有原始信息，文本按 "临时资料 1/2/3" 分段拼接。
+ */
+function mergeTemporaryMaterials(materials: TemporaryMaterial[]): TemporaryMaterial {
+  const parts = materials.flatMap((material) => material.parts?.length ? material.parts : [material])
+  if (parts.length === 1) return parts[0]
+  const files = parts.flatMap((material) => material.files?.length
+    ? material.files
+    : temporaryMaterialFileItems(material))
+  const names = parts.map((material) => material.originalName || material.title || '未命名资料')
+  const text = parts
+    .map((material, index) => [
+      `[临时资料 ${index + 1}] ${material.title || material.originalName || '未命名资料'}`,
+      `文件：${material.originalName || material.title || '未命名资料'}`,
+      `类型：${material.sourceType || 'UNKNOWN'}`,
+      '',
+      material.text || '',
+    ].join('\n'))
+    .join('\n\n---\n\n')
+  return {
+    id: `temporary-batch-${Date.now()}`,
+    title: `${files.length || materials.length} 份临时资料`,
+    originalName: names.join('、'),
+    sourceType: 'MULTI',
+    text,
+    excerpt: parts.map((material) => material.excerpt || '').filter(Boolean).join('\n\n').slice(0, 500),
+    fileSize: parts.reduce((sum, material) => sum + (material.fileSize || 0), 0),
+    files,
+    parts,
+  }
+}
+
+/**
+ * removeTemporaryMaterialAtIndex -- 移除临时资料中指定索引的文件
+ * 如果移除后没有剩余文件，返回 null（清除临时资料）
+ * 否则重新合并剩余的临时资料
+ */
+function removeTemporaryMaterialAtIndex(material: TemporaryMaterial | null | undefined, index: number): TemporaryMaterial | null {
+  if (!material || index < 0) return material || null
+  const parts = material.parts?.length ? material.parts : [material]
+  if (index >= parts.length) return material
+  const nextParts = parts.filter((_, partIndex) => partIndex !== index)
+  if (nextParts.length === 0) return null
+  return mergeTemporaryMaterials(nextParts)
+}
+
+/**
+ * buildTemporaryMaterialContext -- 构建临时资料的上下文字符串
+ * 用于发送给 AI 作为问答的参考上下文。
+ * 限制：原始文本截取前 20000 字符，清理后截取前 16000 字符。
+ * 过长时显示"[内容过长，已截取前 16000 字]"提示。
+ */
+function buildTemporaryMaterialContext(material: TemporaryMaterial) {
+  const title = material.title || material.originalName || '临时资料'
+  const sourceType = material.sourceType || 'UNKNOWN'
+  const rawText = material.text || ''
+  const slicedText = rawText.length > 20000 ? rawText.slice(0, 20000) : rawText
+  const text = cleanTemporaryMaterialText(slicedText)
+  return [
+    `[临时资料] ${title}`,
+    `文件：${material.originalName || title}`,
+    `类型：${sourceType}`,
+    '',
+    rawText.length > slicedText.length || text.length > 16000
+      ? `${text.slice(0, 16000)}\n\n[内容过长，已截取前 16000 字]`
+      : text,
+  ].join('\n')
 }

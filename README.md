@@ -1,6 +1,6 @@
-# Learning Assistant
+# 智学引擎
 
-Learning Assistant 是一个面向学习资料管理、阅读和智能问答的全栈应用。系统支持资料上传解析、原文预览、边读边问、通用问答、图片问答、RAG 检索增强、使用记录统计、管理员后台和可切换大模型配置。
+智学引擎是一个面向学习资料管理、阅读和智能问答的全栈应用。系统支持资料上传解析、原文预览、边读边问、通用问答、图片问答、RAG 检索增强、使用记录统计、管理员后台和可切换大模型配置。
 
 项目采用 Spring Boot 后端和 React + Vite 前端，生产环境当前以 Docker Compose 部署到轻量应用服务器。
 
@@ -21,6 +21,7 @@ Learning Assistant 是一个面向学习资料管理、阅读和智能问答的�
 - 系统日志：保留后台系统行为日志，使用记录独立展示
 - RAG 评估：支持管理员维护评估集、运行评估、查看评估结果
 - 向量检索：预留 Qdrant 向量库部署配置和 rerank 能力
+- 安全加固：接口限流、登录验证码、HTTP 安全头、SSRF 防护、Token 版本失效、BCrypt 密码加密
 
 ## 技术栈
 
@@ -131,6 +132,8 @@ LLM_TIMEOUT=60s
 - `responses`：OpenAI Responses API 兼容接口
 
 用户自定义模型配置会保存在数据库中，前端不回显完整 API Key，只显示是否已保存。
+
+管理员账号通过 `APP_ADMIN_BOOTSTRAP_ENABLED=true` 和 `APP_ADMIN_PASSWORD` 配置创建（密码需至少 12 位）。
 
 前端生产构建默认使用：
 
@@ -258,3 +261,6 @@ curl http://127.0.0.1/api/health
 - 服务器升级时不要删除 `/opt/learning-assistant/mysql-data` 和 `/opt/learning-assistant/app-data`
 - 如果修改了 `LLM_API_KEY`、`LLM_MODEL` 或 `LLM_API_FORMAT`，需要重启后端容器
 - 浏览器上线验证时建议使用 `Ctrl + F5` 强制刷新前端静态资源
+- 管理员账号通过 `APP_ADMIN_BOOTSTRAP_ENABLED=true` 和 `APP_ADMIN_PASSWORD` 配置创建
+- `APP_AUTH_SECRET` 必须使用长随机字符串，Token 中包含 tokenVersion 用于密码修改后使旧 Token 失效
+- 接口限流配置在 `app.security.rate-limit.*` 下，可按需调整
