@@ -422,6 +422,18 @@ public class RagController {
         return ApiResponse.ok(ragService.summaryHistory(currentUserId, materialId));
     }
 
+    /**
+     * 更新某条摘要的用户整理版。
+     */
+    @PatchMapping("/summaries/{summaryId}/note")
+    public ApiResponse<RagSummaryResponse> updateSummaryNote(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("summaryId") long summaryId,
+        @RequestBody UpdateSummaryNoteRequest request
+    ) {
+        return ApiResponse.ok(ragService.updateSummaryNote(currentUserId, summaryId, request));
+    }
+
     private String rateIdentity(long currentUserId, HttpServletRequest request) {
         return currentUserId + ":" + clientIp(request);
     }

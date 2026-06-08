@@ -24,7 +24,7 @@ import { ChatAttachmentCards } from './ChatAttachmentCards'
  * 【主要功能】
  * - 多行文本输入（自动调整高度，最大 180px）
  * - 快捷提示词芯片（点击直接填入输入框）
- * - 图片上传（点击按钮或粘贴截图，最多 4 张，自动压缩）
+ * - 图片上传（点击按钮或粘贴截图，最多 8 张，自动压缩）
  * - 文件附件上传（PDF/Word/PPT/TXT/MD/HTML）
  * - 模型切换按钮（显示当前使用的模型名）
  * - 发送按钮（有内容时高亮，loading 时显示旋转动画）
@@ -32,8 +32,8 @@ import { ChatAttachmentCards } from './ChatAttachmentCards'
  * - 使用量提示（显示剩余问答次数）
  */
 
-/** 常量：最多 4 张图片 */
-const MAX_IMAGES = 4
+/** 常量：最多 8 张图片 */
+const MAX_IMAGES = 8
 /** 常量：图片最大边长 1280px（超过会自动压缩） */
 const MAX_IMAGE_EDGE = 1280
 /** 常量：JPEG 压缩质量 0.82（平衡画质与文件大小） */
@@ -330,7 +330,7 @@ export function ChatComposer({
               <input
                 ref={attachmentInputRef}
                 type="file"
-                accept="image/*,.pdf,.docx,.pptx,.txt,.md,.html,.htm"
+                accept="image/*,.pdf,.doc,.docx,.pptx,.txt,.md,.html,.htm"
                 multiple
                 className="hidden"
                 onChange={(e) => {

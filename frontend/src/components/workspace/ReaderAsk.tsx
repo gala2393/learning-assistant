@@ -58,7 +58,7 @@ interface ReaderAskProps {
   chunks?: MaterialChunk[]
   currentPageNo?: number | null
   currentPageChunkIds?: Array<string | number>
-  onNavigateToChunk?: (chunkIndex: number) => void
+  onNavigateToChunk?: (chunkIndex: number, options?: { view?: 'smart' | 'original' }) => void
   className?: string
 }
 
@@ -211,7 +211,7 @@ export function ReaderAsk({
     (source: RagSource) => {
       const idx = chunkIndexById.get(String(source.chunkId))
       if (idx !== undefined) {
-        onNavigateToChunk?.(idx)
+        onNavigateToChunk?.(idx, { view: 'smart' })
       }
     },
     [chunkIndexById, onNavigateToChunk],
@@ -529,6 +529,7 @@ export function ReaderAsk({
             const params = new URLSearchParams()
             if (material?.id) params.set('materialId', material.id)
             if (chunk?.id) params.set('chunkId', chunk.id)
+            if (currentPageNo && currentPageNo > 0) params.set('pageNo', String(currentPageNo))
             navigate(`/workspace/chat?${params.toString()}`)
           }}
         >

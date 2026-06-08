@@ -139,6 +139,53 @@ public class ThirdPartyLlmClient {
     }
 
     /**
+     * 通用结构化资料总结。输入通常是按章节/标题压缩后的全量资料概览。
+     */
+    public Optional<LlmCompletion> summarizeStructured(String materialTitle, String summaryType, List<String> sectionBriefs) {
+        return summarizeStructured(materialTitle, summaryType, sectionBriefs, List.of());
+    }
+
+    /**
+     * 通用结构化资料总结。可附带页面原图，用于扫描版 PDF 或文本不可抽取的资料。
+     */
+    public Optional<LlmCompletion> summarizeStructured(String materialTitle, String summaryType, List<String> sectionBriefs, List<LlmImage> images) {
+        if (sectionBriefs == null || sectionBriefs.isEmpty()) return Optional.empty();
+        List<LlmImage> safeImages = images == null ? List.of() : images;
+        String systemPrompt = """
+            你是通用资料整理助手。资料可能是学习材料、会议纪要、产品文档、规范、报告、网页或其他文本。
+            请基于给定的章节/标题概览生成结构化总结；如果用户消息附带页面图片，必须结合图片内容识别和总结。
+            要求：
+            - 不要假设资料一定用于学习，使用通用表达。
+            - 覆盖整份资料，不要只总结开头。
+            - 不要编造资料中没有的信息。
+            - 如果文本不可抽取但有页面图片，请直接阅读图片中的题目、表格、图示或正文，不要只总结“暂无可抽取文本”。
+            - 保留专有名词、数字、流程、限制、风险、结论和行动项。
+            - 只输出 JSON，不要 Markdown，不要代码块。
+            JSON 格式：
+            {
+              "summary": "一段 120-240 字的总览",
+              "sections": [
+                {"title": "核心摘要", "items": ["..."]},
+                {"title": "关键要点", "items": ["..."]},
+                {"title": "结构脉络", "items": ["..."]},
+                {"title": "风险与限制", "items": ["..."]},
+                {"title": "后续行动/可追问问题", "items": ["..."]}
+              ]
+            }
+            """;
+        String userPrompt = "资料标题：%s\n总结类型：%s\n\n按章节/标题整理后的资料概览：\n%s".formatted(
+            nullToEmpty(materialTitle),
+            nullToEmpty(summaryType),
+            String.join("\n\n", sectionBriefs)
+        );
+        if (!safeImages.isEmpty()) {
+            userPrompt += "\n\n已附带页面原图，请按上方概览中的页码顺序阅读图片并总结。";
+        }
+        return llmClient.chat(systemPrompt, userPrompt, safeImages)
+            .map(result -> new LlmCompletion(result.content(), result.modelName()));
+    }
+
+    /**
      * 查询扩展 — 为 RAG 检索生成 2-4 个变体查询。
      * 包含关键词查询和 HyDE 假设性答案短句。
      */

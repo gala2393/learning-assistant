@@ -372,6 +372,8 @@ export function ChatPage() {
       // 带上首个来源，聊天页恢复历史时也能同步左侧资料/片段上下文。
       nextParams.set('materialId', source.materialId)
       nextParams.set('chunkId', source.chunkId)
+      if (source.pageNo && source.pageNo > 0) nextParams.set('pageNo', String(source.pageNo))
+      nextParams.set('view', 'smart')
     }
     setSearchParams(nextParams, { replace: true })
   }
@@ -816,6 +818,8 @@ export function ChatPage() {
     const params = new URLSearchParams()
     params.set('materialId', String(source.materialId))
     params.set('chunkId', String(source.chunkId))
+    if (source.pageNo && source.pageNo > 0) params.set('pageNo', String(source.pageNo))
+    params.set('view', 'smart')
     navigate({ pathname: '/workspace/reader', search: params.toString() })
   }
 

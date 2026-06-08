@@ -110,6 +110,8 @@ export function HistoryPage() {
       // 带上首个来源，聊天页恢复会话时可以同时定位到相关资料片段。
       params.set('materialId', source.materialId)
       params.set('chunkId', source.chunkId)
+      if (source.pageNo && source.pageNo > 0) params.set('pageNo', String(source.pageNo))
+      params.set('view', 'smart')
     }
     navigate(`/workspace/chat?${params.toString()}`)
   }

@@ -71,6 +71,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import type { MaterialChunk, MaterialPage } from '@/types'
 
 /** 右侧问答栏的默认宽度（像素） */
 const DEFAULT_ASK_WIDTH = 480
@@ -114,9 +115,20 @@ export function ReaderPage() {
   // === URL 参数解析 ===
   const materialParam = searchParams.get('materialId')
   const chunkParam = searchParams.get('chunkId')
+  const pageParam = searchParams.get('pageNo')
+  const viewParam = searchParams.get('view')
+  const requestedViewMode = viewParam === 'smart' || viewParam === 'original' ? viewParam : null
+  const requestedPageNo = parsePositiveInt(pageParam)
   /** 根据 URL 中的 chunkId 查找对应的片段索引 */
   const requestedChunkIndex = chunkParam
     ? chunks.findIndex((chunk) => String(chunk.id) === chunkParam)
+    : -1
+  const requestedPageChunkIndex = requestedPageNo
+    ? chunks.findIndex((chunk) => {
+      if (Number(chunk.pageNo) === requestedPageNo) return true
+      const page = pages.find((candidate) => candidate.pageNo === requestedPageNo)
+      return !!page?.chunkIds.map(String).includes(String(chunk.id))
+    })
     : -1
 
   // === 派生值 ===
@@ -124,13 +136,15 @@ export function ReaderPage() {
   const selectedMaterial = materials.find((m) => m.id === selectedMaterialId) || null
   /** 当前选中的片段对象 */
   const currentChunk = chunks[selectedChunkIndex] || null
+  const firstContentPage = pages.find((page) => page.chunkIds.length > 0) || pages[0]
+  const currentChunkPageNo = pageNoForChunk(currentChunk, selectedChunkIndex, chunks, pages)
   /**
    * 当前页面对象
    * 优先按片段的 pageNo 匹配，其次按 chunkId 包含关系匹配，最后取第一页
    */
-  const currentPage = pages.find((page) => page.pageNo === currentChunk?.pageNo)
-    || pages.find((page) => page.chunkIds.map(String).includes(String(currentChunk?.id)))
-    || pages[0]
+  const currentPage = pages.find((page) => page.pageNo === currentChunkPageNo)
+    || (requestedPageNo ? pages.find((page) => page.pageNo === requestedPageNo && page.chunkIds.length > 0) : null)
+    || firstContentPage
 
   // === 副作用：URL 参数同步 ===
 
@@ -157,19 +171,36 @@ export function ReaderPage() {
     }
   }, [chunkParam, requestedChunkIndex, selectedChunkIndex])
 
+  useEffect(() => {
+    if (requestedChunkIndex >= 0 || requestedPageChunkIndex < 0) return
+    if (requestedPageChunkIndex !== selectedChunkIndex) {
+      setSelectedChunkIndex(requestedPageChunkIndex)
+    }
+  }, [requestedChunkIndex, requestedPageChunkIndex, selectedChunkIndex])
+
   /**
    * 将当前选中的资料和片段同步到 URL 参数
    * 使用 replace 模式避免产生浏览器历史记录
    */
   useEffect(() => {
     if (!selectedMaterialId || !currentChunk) return
+    const currentPageNo = pageNoForChunk(currentChunk, selectedChunkIndex, chunks, pages)
+      || currentPage?.pageNo
+      || null
     // 避免不必要的 URL 更新（如果参数已经一致则跳过）
     if (materialParam && materialParam !== selectedMaterialId) return
     if (chunkParam && chunkParam !== String(currentChunk.id) && requestedChunkIndex >= 0) return
-    if (materialParam === selectedMaterialId && chunkParam === String(currentChunk.id)) return
+    if (
+      materialParam === selectedMaterialId
+      && chunkParam === String(currentChunk.id)
+      && (!currentPageNo || pageParam === String(currentPageNo))
+    ) return
     // replace 同步内部阅读位置，避免翻片段时污染浏览器返回栈。
-    setSearchParams({ materialId: selectedMaterialId, chunkId: String(currentChunk.id) }, { replace: true })
-  }, [chunkParam, currentChunk, materialParam, requestedChunkIndex, selectedMaterialId, setSearchParams])
+    const nextParams = new URLSearchParams({ materialId: selectedMaterialId, chunkId: String(currentChunk.id) })
+    if (currentPageNo && currentPageNo > 0) nextParams.set('pageNo', String(currentPageNo))
+    if (requestedViewMode) nextParams.set('view', requestedViewMode)
+    setSearchParams(nextParams, { replace: true })
+  }, [chunkParam, chunks, currentChunk, currentPage, materialParam, pageParam, pages, requestedChunkIndex, requestedViewMode, selectedChunkIndex, selectedMaterialId, setSearchParams])
 
   // === 副作用：右侧面板宽度调整 ===
 
@@ -236,13 +267,17 @@ export function ReaderPage() {
   }
 
   /** 选择片段：更新片段索引，关闭移动端面板，更新 URL */
-  const handleSelectChunk = (index: number) => {
+  const handleSelectChunk = (index: number, options?: { view?: 'smart' | 'original' }) => {
     setSelectedChunkIndex(index)
     setMobilePanel(null)
     const targetChunk = chunks[index]
     if (selectedMaterialId && targetChunk) {
       // 用户主动点目录时使用 push，保留可后退的阅读路径。
-      setSearchParams({ materialId: selectedMaterialId, chunkId: String(targetChunk.id) }, { replace: false })
+      const nextParams = new URLSearchParams({ materialId: selectedMaterialId, chunkId: String(targetChunk.id) })
+      const nextPageNo = pageNoForChunk(targetChunk, index, chunks, pages)
+      if (nextPageNo && nextPageNo > 0) nextParams.set('pageNo', String(nextPageNo))
+      if (options?.view) nextParams.set('view', options.view)
+      setSearchParams(nextParams, { replace: false })
     }
   }
 
@@ -356,6 +391,8 @@ export function ReaderPage() {
             onNext={handleNext}
             onSelectChunk={handleSelectChunk}
             onOpenFile={selectedMaterial ? handleOpenFile : undefined}
+            targetPageNo={currentChunkPageNo ?? currentPage?.pageNo ?? requestedPageNo ?? null}
+            initialViewMode={requestedViewMode}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -490,4 +527,25 @@ function clampAskWidth(width: number, tocOpen: boolean) {
   const maxWidth = Math.min(760, Math.max(340, window.innerWidth - reservedWidth))
   const minWidth = Math.min(360, maxWidth)
   return Math.max(minWidth, Math.min(maxWidth, Math.round(width)))
+}
+
+function parsePositiveInt(value: string | null) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function pageNoForChunk(
+  chunk: MaterialChunk | null,
+  chunkIndex: number,
+  chunks: MaterialChunk[],
+  pages: MaterialPage[],
+) {
+  if (!chunk) return null
+  const directPageNo = Number(chunk.pageNo)
+  if (Number.isFinite(directPageNo) && directPageNo > 0) return directPageNo
+  const mappedPage = pages.find((page) => page.chunkIds.map(String).includes(String(chunk.id)))
+  if (mappedPage?.pageNo) return mappedPage.pageNo
+  if (!pages.length || !chunks.length || chunkIndex < 0) return null
+  const pageIndex = Math.min(pages.length - 1, Math.floor((chunkIndex * pages.length) / chunks.length))
+  return pages[pageIndex]?.pageNo ?? null
 }

@@ -1,5 +1,7 @@
 package com.mytext.learningassistant.rag;
 
+import java.util.List;
+
 /**
  * RAG 学习资料摘要的响应体。
  * <p>
@@ -22,6 +24,9 @@ public record RagSummaryResponse(
     String summaryType,
     String modelName,
     Integer sourceCount,
-    String createdAt
+    String createdAt,
+    List<SummarySectionResponse> sections,
+    List<SummarySourceResponse> sources,
+    String userNote
 ) {
 }

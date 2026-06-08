@@ -4,6 +4,11 @@
 
 项目采用 Spring Boot 后端和 React + Vite 前端，生产环境当前以 Docker Compose 部署到轻量应用服务器。
 
+## 最近更新
+
+- 首页新增产品介绍页，未登录用户打开站点会先看到产品能力预览，可直接进入工作区或登录页。
+- 资料总结升级为通用结构化摘要，支持摘要类型选择、来源跳转和用户整理版保存。
+
 ## 主要功能
 
 - 账号体系：登录、注册、找回密码、个人信息、头像和密码修改
@@ -49,6 +54,7 @@ learning-assistant/
 普通用户：
 
 - `/login`、`/register`、`/forgot-password`：认证页面
+- `/`：产品介绍首页
 - `/workspace/chat`：智能问答和资料问答
 - `/workspace/materials`：资料管理
 - `/workspace/reader`：资料阅读与边读边问

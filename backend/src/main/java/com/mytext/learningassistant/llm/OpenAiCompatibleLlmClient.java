@@ -14,6 +14,8 @@ import java.util.function.Consumer;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 兼容 OpenAI 接口的 LLM 客户端实现
@@ -26,6 +28,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * 支持同步和流式两种对话方式，以及多模态（文本+图片）输入。
  */
 public class OpenAiCompatibleLlmClient implements LlmClient {
+
+    private static final Logger log = LoggerFactory.getLogger(OpenAiCompatibleLlmClient.class);
 
     /** LLM 配置属性 */
     private final LlmProperties properties;
@@ -91,6 +95,15 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
 
             // 检查 HTTP 状态码是否成功（2xx）
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.warn(
+                    "LLM request failed status={} uri={} model={} apiFormat={} images={} body={}",
+                    response.statusCode(),
+                    request.uri(),
+                    properties.model(),
+                    properties.apiFormat(),
+                    safeImages.size(),
+                    abbreviate(response.body(), 800)
+                );
                 return Optional.empty();
             }
 
@@ -107,6 +120,14 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
 
             // 如果内容为空，返回空结果
             if (content.isBlank()) {
+                log.warn(
+                    "LLM response content is blank uri={} model={} apiFormat={} images={} body={}",
+                    request.uri(),
+                    properties.model(),
+                    properties.apiFormat(),
+                    safeImages.size(),
+                    abbreviate(response.body(), 800)
+                );
                 return Optional.empty();
             }
 
@@ -123,6 +144,13 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             ));
         } catch (Exception exception) {
             // 发生任何异常都返回空结果
+            log.warn(
+                "LLM request exception model={} apiFormat={} images={} message={}",
+                properties.model(),
+                properties.apiFormat(),
+                safeImages.size(),
+                exception.getMessage()
+            );
             return Optional.empty();
         }
     }
@@ -162,6 +190,14 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
 
             // 检查 HTTP 状态码
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.warn(
+                    "LLM stream request failed status={} uri={} model={} apiFormat={} images={}",
+                    response.statusCode(),
+                    request.uri(),
+                    properties.model(),
+                    properties.apiFormat(),
+                    safeImages.size()
+                );
                 return "";
             }
 
@@ -230,6 +266,13 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             }
             return fullContent.toString();
         } catch (Exception e) {
+            log.warn(
+                "LLM stream request exception model={} apiFormat={} images={} message={}",
+                properties.model(),
+                properties.apiFormat(),
+                safeImages.size(),
+                e.getMessage()
+            );
             return "";
         }
     }
@@ -666,6 +709,14 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
         }
         return baseUrl;
+    }
+
+    private String abbreviate(String value, int maxLength) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= maxLength ? normalized : normalized.substring(0, maxLength) + "...";
     }
 
     /**

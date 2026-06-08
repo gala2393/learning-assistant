@@ -11,6 +11,7 @@ import jakarta.validation.constraints.NotNull;
  */
 public record SummarizeRequest(
     @NotNull(message = "materialId is required")
-    Long materialId
+    Long materialId,
+    String summaryType
 ) {
 }

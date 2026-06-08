@@ -374,7 +374,7 @@ public class MaterialService {
         }
         MaterialSourceType sourceType = parseSourceType(sourceTypeValue, file.getOriginalFilename());
         String originalName = file.getOriginalFilename() == null ? "unknown" : file.getOriginalFilename();
-        rejectLegacyOfficeFile(originalName);
+        rejectUnsupportedLegacyOfficeFile(originalName);
         Path storagePath = resolveStoragePath(ownerId, originalName);
         try {
             Files.createDirectories(storagePath.getParent());
@@ -398,7 +398,7 @@ public class MaterialService {
         }
         MaterialSourceType sourceType = parseSourceType(sourceTypeValue, file.getOriginalFilename());
         String originalName = file.getOriginalFilename() == null ? "temporary-material" : file.getOriginalFilename();
-        rejectLegacyOfficeFile(originalName);
+        rejectUnsupportedLegacyOfficeFile(originalName);
         Path storagePath = resolveTemporaryStoragePath(ownerId, originalName);
         try {
             Files.createDirectories(storagePath.getParent());
@@ -702,10 +702,11 @@ public class MaterialService {
         if (previewPath == null || !Files.exists(previewPath) || !Files.isRegularFile(previewPath)) {
             return List.of();
         }
-        Map<Integer, List<Long>> pageChunks = chunksByPage(materialId);
         try (var document = Loader.loadPDF(previewPath.toFile())) {
+            int pageCount = document.getNumberOfPages();
+            Map<Integer, List<Long>> pageChunks = chunksByPage(materialId, pageCount);
             List<MaterialPageResponse> pages = new ArrayList<>();
-            for (int pageIndex = 0; pageIndex < document.getNumberOfPages(); pageIndex++) {
+            for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
                 int pageNo = pageIndex + 1;
                 PDRectangle mediaBox = document.getPage(pageIndex).getMediaBox();
                 String imageName = pageImageName(pageNo);
@@ -1593,7 +1594,7 @@ public class MaterialService {
      *
      * <p>如果显式指定了 sourceTypeValue，直接解析枚举值；
      * 否则根据文件扩展名自动推断：.md -> MD、.txt -> TXT、.html/.htm -> HTML、
-     * .docx -> DOCX、.pptx -> PPTX、.pdf -> PDF，其他默认为 TXT。
+     * .doc/.docx -> WORD/DOCX、.pptx -> PPTX、.pdf -> PDF，其他默认为 TXT。
      *
      * @param sourceTypeValue 来源类型字符串（可选）
      * @param originalName    原始文件名（用于推断类型）
@@ -1617,6 +1618,9 @@ public class MaterialService {
         }
         if (lowerName.endsWith(".html") || lowerName.endsWith(".htm")) {
             return MaterialSourceType.HTML;
+        }
+        if (lowerName.endsWith(".doc")) {
+            return MaterialSourceType.WORD;
         }
         if (lowerName.endsWith(".docx")) {
             return MaterialSourceType.DOCX;
@@ -1857,16 +1861,16 @@ public class MaterialService {
     }
 
     /**
-     * 拒绝旧版 Office 格式（.doc、.ppt），仅支持新格式（.docx、.pptx）。
-     * 旧版格式是二进制格式，解析困难且安全性差。
+     * 拒绝当前仍无法稳定解析的旧版 Office 格式。
+     * 旧版 Word (.doc) 会先交给 LibreOffice 转 PDF 后解析；旧版 PPT 暂不放开。
      *
      * @param originalName 原始文件名
      * @throws BusinessException 文件为旧版格式时抛出 400
      */
-    private void rejectLegacyOfficeFile(String originalName) {
+    private void rejectUnsupportedLegacyOfficeFile(String originalName) {
         String lowerName = originalName == null ? "" : originalName.toLowerCase(Locale.ROOT);
-        if (lowerName.endsWith(".doc") || lowerName.endsWith(".ppt")) {
-            throw new BusinessException(400, "Legacy .doc/.ppt files are not supported");
+        if (lowerName.endsWith(".ppt")) {
+            throw new BusinessException(400, "旧版 .ppt 文件暂不支持，请另存为 .pptx 后上传");
         }
     }
 
@@ -1911,7 +1915,8 @@ public class MaterialService {
             }
             return switch (sourceType) {
                 case TXT, MD, HTML, WEB -> ParsedMaterial.single(readTextFile(storedFile));
-                case DOCX, WORD -> parseWord(storedFile);
+                case DOCX -> parseWord(storedFile);
+                case WORD -> parseLegacyWord(storedFile, progressListener);
                 case PPTX, PPT -> parsePowerPoint(storedFile);
                 case PDF -> parsePdf(storedFile, preparePdfProcessingFile(storedFile), progressListener);
             };
@@ -2401,6 +2406,20 @@ public class MaterialService {
             }
             return ParsedMaterial.single(builder.toString().trim());
         }
+    }
+
+    /**
+     * 解析旧版 Word (.doc) 文件。
+     *
+     * <p>.doc 是二进制 Office 格式，不能像 .docx 一样直接解 ZIP 读取 XML。
+     * 这里复用服务器上的 LibreOffice/soffice 先转成 PDF，再走已有 PDF 文本提取流程。
+     */
+    private ParsedMaterial parseLegacyWord(Path file, ParseProgressListener progressListener) throws IOException {
+        Path convertedPdf = convertOfficeToPdf(file);
+        if (convertedPdf == null) {
+            throw new BusinessException(400, "旧版 .doc 文件需要服务器安装 LibreOffice/soffice 才能解析，请安装后重试，或先另存为 .docx 再上传");
+        }
+        return parsePdf(file, convertedPdf, progressListener);
     }
 
     private boolean containsWordDrawing(String xml) {
@@ -2918,13 +2937,24 @@ public class MaterialService {
         return resolveAssetPath(sourceFile, fileName) != null;
     }
 
-    private Map<Integer, List<Long>> chunksByPage(long materialId) {
+    private Map<Integer, List<Long>> chunksByPage(long materialId, int pageCount) {
         Map<Integer, List<Long>> result = new LinkedHashMap<>();
-        for (MaterialChunkEntity chunk : materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(materialId)) {
+        List<MaterialChunkEntity> chunks = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(materialId);
+        for (MaterialChunkEntity chunk : chunks) {
             if (chunk.getPageNo() == null || chunk.getId() == null) {
                 continue;
             }
             result.computeIfAbsent(chunk.getPageNo(), ignored -> new ArrayList<>()).add(chunk.getId());
+        }
+        if (result.isEmpty() && pageCount > 0 && !chunks.isEmpty()) {
+            for (int index = 0; index < chunks.size(); index++) {
+                MaterialChunkEntity chunk = chunks.get(index);
+                if (chunk.getId() == null) {
+                    continue;
+                }
+                int pageNo = Math.min(pageCount, Math.max(1, (index * pageCount) / chunks.size() + 1));
+                result.computeIfAbsent(pageNo, ignored -> new ArrayList<>()).add(chunk.getId());
+            }
         }
         return result;
     }

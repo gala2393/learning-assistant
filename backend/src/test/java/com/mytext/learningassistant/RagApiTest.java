@@ -67,6 +67,8 @@ class RagApiTest {
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean(), any())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.summarize(anyString(), anyList())).thenReturn(Optional.empty());
+        when(thirdPartyLlmClient.summarizeStructured(anyString(), anyString(), anyList())).thenReturn(Optional.empty());
+        when(thirdPartyLlmClient.summarizeStructured(anyString(), anyString(), anyList(), anyList())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.expandQuery(anyString())).thenReturn(Optional.empty());
         when(thirdPartyLlmClient.generateHydeAnswer(anyString())).thenReturn(Optional.empty());
     }
@@ -545,8 +547,18 @@ class RagApiTest {
 
     @Test
     void chatUsesMaterialSummaryAsHierarchicalSeedBeforeChunkRetrieval() throws Exception {
-        when(thirdPartyLlmClient.summarize(anyString(), anyList()))
-            .thenReturn(Optional.of(new LlmCompletion("AuroraGraph explains layered graph planning and retrieval routing.", "mock-model")));
+        when(thirdPartyLlmClient.summarizeStructured(anyString(), anyString(), anyList(), anyList()))
+            .thenReturn(Optional.of(new LlmCompletion("""
+                {
+                  "summary": "AuroraGraph explains layered graph planning and retrieval routing.",
+                  "sections": [
+                    {
+                      "title": "核心摘要",
+                      "items": ["AuroraGraph explains layered graph planning and retrieval routing."]
+                    }
+                  ]
+                }
+                """, "mock-model")));
         String token = registerAndLogin(uniqueName("summary-seed-user"));
         Long materialId = uploadMaterialAndReturnId(
             token,
@@ -653,7 +665,7 @@ class RagApiTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.materialId").value(materialId.intValue()))
             .andExpect(jsonPath("$.data.summary").isNotEmpty())
-            .andExpect(jsonPath("$.data.summaryType").value("AUTO"))
+            .andExpect(jsonPath("$.data.summaryType").value("GENERAL"))
             .andExpect(jsonPath("$.data.modelName").value("local-rag-demo"))
             .andExpect(jsonPath("$.data.sourceCount").value(1));
     }
@@ -703,8 +715,18 @@ class RagApiTest {
 
     @Test
     void summarizeUsesThirdPartySummaryWhenLlmClientSucceeds() throws Exception {
-        when(thirdPartyLlmClient.summarize(anyString(), anyList()))
-            .thenReturn(Optional.of(new LlmCompletion("Provider summary", "mock-model")));
+        when(thirdPartyLlmClient.summarizeStructured(anyString(), anyString(), anyList(), anyList()))
+            .thenReturn(Optional.of(new LlmCompletion("""
+                {
+                  "summary": "Provider summary",
+                  "sections": [
+                    {
+                      "title": "核心摘要",
+                      "items": ["Provider summary"]
+                    }
+                  ]
+                }
+                """, "mock-model")));
         String token = registerAndLogin(uniqueName("summary-llm-user"));
         Long materialId = uploadMaterialAndReturnId(token);
 

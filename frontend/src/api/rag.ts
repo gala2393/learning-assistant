@@ -6,6 +6,7 @@ import type {
   ChatPayload, HistoryItem, RagEvaluationSuiteDetail, RagEvaluationSuitePayload,
   RagEvaluationSuiteResult, RagEvaluationSuiteRun, RagEvaluationSuiteSavePayload,
   RagEvaluationSuiteSummary, StreamChatPayload, SummaryResult, RagSource, RagUsage,
+  SummaryType,
 } from '@/types'
 
 /**
@@ -165,11 +166,19 @@ export async function clearHistory(): Promise<void> { await api.delete('/rag/his
 // ===== 资料摘要 =====
 
 /** 为资料生成 AI 摘要 */
-export async function summarizeMaterial(materialId: string): Promise<SummaryResult> { const { data } = await api.post('/rag/summarize', { materialId }); return data }
+export async function summarizeMaterial(payload: { materialId: string; summaryType?: SummaryType }): Promise<SummaryResult> {
+  const { data } = await api.post('/rag/summarize', payload)
+  return normalizeSummary(data)
+}
 /** 获取资料的最新摘要 */
-export async function getMaterialSummary(materialId: string): Promise<SummaryResult> { const { data } = await api.get(`/rag/summaries/${materialId}`); return data }
+export async function getMaterialSummary(materialId: string): Promise<SummaryResult> { const { data } = await api.get(`/rag/summaries/${materialId}`); return normalizeSummary(data) }
 /** 获取资料的所有历史摘要版本 */
-export async function listMaterialSummaries(materialId: string): Promise<SummaryResult[]> { const { data } = await api.get(`/rag/summaries/${materialId}/history`); return data }
+export async function listMaterialSummaries(materialId: string): Promise<SummaryResult[]> { const { data } = await api.get(`/rag/summaries/${materialId}/history`); return (data || []).map(normalizeSummary) }
+/** 更新用户整理版 */
+export async function updateSummaryNote(summaryId: string, userNote: string): Promise<SummaryResult> {
+  const { data } = await api.patch(`/rag/summaries/${summaryId}/note`, { userNote })
+  return normalizeSummary(data)
+}
 
 // ===== RAG 评估套件 =====
 
@@ -178,6 +187,30 @@ export async function runEvaluationSuite(payload: RagEvaluationSuitePayload): Pr
 function normalizeEvaluationSuiteSummary(item: RagEvaluationSuiteSummary): RagEvaluationSuiteSummary { return { ...item, id: String(item.id) } }
 function normalizeEvaluationSuiteRun(item: RagEvaluationSuiteRun): RagEvaluationSuiteRun { return { ...item, id: String(item.id), suiteId: String(item.suiteId) } }
 function normalizeEvaluationSuiteDetail(item: RagEvaluationSuiteDetail): RagEvaluationSuiteDetail { return { ...item, id: String(item.id), latestRun: item.latestRun ? normalizeEvaluationSuiteRun(item.latestRun) : null } }
+function normalizeSummary(item: SummaryResult): SummaryResult {
+  return {
+    ...item,
+    summaryId: String(item.summaryId),
+    materialId: String(item.materialId),
+    sources: (item.sources || []).map((source) => ({
+      ...source,
+      materialId: String(source.materialId),
+      chunkId: String(source.chunkId),
+      pageNo: source.pageNo ?? null,
+      chunkIndex: source.chunkIndex ?? null,
+    })),
+    sections: (item.sections || []).map((section) => ({
+      ...section,
+      sources: (section.sources || []).map((source) => ({
+        ...source,
+        materialId: String(source.materialId),
+        chunkId: String(source.chunkId),
+        pageNo: source.pageNo ?? null,
+        chunkIndex: source.chunkIndex ?? null,
+      })),
+    })),
+  }
+}
 /** 获取已保存的评估套件列表 */
 export async function listEvaluationSuites(): Promise<RagEvaluationSuiteSummary[]> { const { data } = await api.get('/rag/evaluation-suites'); return (data || []).map(normalizeEvaluationSuiteSummary) }
 /** 获取单个评估套件详情（含用例） */
@@ -251,9 +284,12 @@ export function useClearHistory() { return useMutation({ mutationFn: clearHistor
   // 清空历史后收藏列表中可能还有指向历史的问题，需要一并刷新。
   queryClient.invalidateQueries({ queryKey: ['history'] }); queryClient.invalidateQueries({ queryKey: ['favorites'] })
 } }) }
-export function useSummarizeMaterial() { return useMutation({ mutationFn: summarizeMaterial, onSuccess: (_d, materialId) => { queryClient.invalidateQueries({ queryKey: ['summaries', materialId] }) } }) }
+export function useSummarizeMaterial() { return useMutation({ mutationFn: summarizeMaterial, onSuccess: (_d, payload) => { queryClient.invalidateQueries({ queryKey: ['summaries', payload.materialId] }) } }) }
 export function useMaterialSummary(materialId: string | null) { return useQuery({ queryKey: ['summaries', materialId], queryFn: () => getMaterialSummary(materialId!), enabled: !!materialId && hasStoredSession() }) }
 export function useMaterialSummaryHistory(materialId: string | null) { return useQuery({ queryKey: ['summaries', materialId, 'history'], queryFn: () => listMaterialSummaries(materialId!), enabled: !!materialId && hasStoredSession() }) }
+export function useUpdateSummaryNote() { return useMutation({ mutationFn: ({ summaryId, userNote }: { summaryId: string; userNote: string }) => updateSummaryNote(summaryId, userNote), onSuccess: (summary) => {
+  queryClient.invalidateQueries({ queryKey: ['summaries', summary.materialId] })
+} }) }
 export function useRunEvaluationSuite() { return useMutation({ mutationFn: runEvaluationSuite }) }
 export function useEvaluationSuites() { return useQuery({ queryKey: ['rag-evaluation-suites'], queryFn: listEvaluationSuites }) }
 export function useEvaluationSuiteDetail(id: string | null) { return useQuery({ queryKey: ['rag-evaluation-suites', id], queryFn: () => getEvaluationSuite(id!), enabled: !!id }) }

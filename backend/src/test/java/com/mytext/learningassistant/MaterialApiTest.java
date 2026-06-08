@@ -818,8 +818,8 @@ class MaterialApiTest {
     }
 
     /**
-     * 测试场景：上传旧版 Office 格式（.doc）文件。
-     * 预期结果：返回 400，错误消息提示 ".doc/.ppt" 格式不受支持。
+     * 测试场景：上传当前仍不支持的旧版 PPT 文件。
+     * 预期结果：返回 400，错误消息提示需要另存为 .pptx。
      */
     @Test
     void rejectsLegacyOfficeFormatsWithClearMessage() throws Exception {
@@ -827,19 +827,19 @@ class MaterialApiTest {
 
         MockMultipartFile file = new MockMultipartFile(
             "file",
-            "legacy.doc",
-            "application/msword",
+            "legacy.ppt",
+            "application/vnd.ms-powerpoint",
             "legacy binary office content".getBytes(StandardCharsets.UTF_8)
         );
 
         mockMvc.perform(multipart("/api/materials")
                 .file(file)
                 .header("Authorization", "Bearer " + token)
-            .param("title", "Legacy Word")
-            .param("sourceType", "WORD"))
+            .param("title", "Legacy PowerPoint")
+            .param("sourceType", "PPT"))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.code").value(400))
-            .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(".doc/.ppt")));
+            .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(".pptx")));
     }
 
     /**

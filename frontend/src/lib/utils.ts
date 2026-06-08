@@ -115,6 +115,7 @@ export function buildUploadChunks(file: File, chunkSize = 5 * 1024 * 1024): Blob
 export function inferSourceType(fileName: string): string {
   const lower = fileName.toLowerCase()
   if (lower.endsWith('.pdf')) return 'PDF'
+  if (lower.endsWith('.doc')) return 'WORD'
   if (lower.endsWith('.docx')) return 'WORD'
   if (lower.endsWith('.pptx')) return 'PPT'
   if (lower.endsWith('.md')) return 'MD'

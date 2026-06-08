@@ -73,6 +73,9 @@ type OriginalDownloadProgress = {
 
 /** 文本分段预览的每段大小（512KB，避免一次渲染整篇导致页面卡死） */
 const TEXT_PREVIEW_BYTES = 512 * 1024
+/** 文本原文定位时最多完整解码的大小；更大的文件使用片段序号估算窗口位置。 */
+const TEXT_LOCATE_MAX_BYTES = 8 * 1024 * 1024
+const TEXT_LOCATE_LEAD_BYTES = 2048
 
 /** 从本地存储获取 JWT 认证令牌（用于请求需要认证的图片/文件） */
 function getAuthToken(): string {
@@ -94,11 +97,16 @@ function sourceTypeOf(material: Material | null) {
   return String(material?.sourceType || '').toUpperCase()
 }
 
+function isLegacyWordMaterial(material: Material | null) {
+  const originalName = String(material?.originalName || material?.title || '').toLowerCase()
+  return sourceTypeOf(material) === 'WORD' && originalName.endsWith('.doc')
+}
+
 function originalPreviewKind(material: Material | null): OriginalPreviewKind {
   const type = sourceTypeOf(material)
   if (type === 'PDF') return 'pdf'
   if (type === 'MD' || type === 'TXT') return 'text'
-  if (type === 'DOCX' || type === 'WORD') return 'office'
+  if (type === 'DOCX' || type === 'WORD') return material?.previewStatus === 'READY' ? 'office' : 'unsupported'
   return 'unsupported'
 }
 
@@ -108,6 +116,8 @@ function supportsOriginalPreview(material: Material | null) {
 
 function defaultReaderViewMode(material: Material | null): ReaderViewMode {
   const kind = originalPreviewKind(material)
+  // 旧版 .doc 的浏览器原文预览依赖服务器转换结果，移动端默认进入更稳定的智慧阅读文本。
+  if (isLegacyWordMaterial(material)) return 'smart'
   return kind === 'pdf' || kind === 'office' ? 'original' : 'smart'
 }
 
@@ -174,6 +184,84 @@ function decodeTextWindow(buffer: ArrayBuffer, contentType: string) {
   } catch {
     return new TextDecoder('utf-8').decode(bytes)
   }
+}
+
+function fallbackTextWindowOffset(blobSize: number, chunk: MaterialChunk, chunks: MaterialChunk[]) {
+  if (blobSize <= TEXT_PREVIEW_BYTES) return 0
+  const chunkIndex = Math.max(0, chunks.findIndex((candidate) => String(candidate.id) === String(chunk.id)))
+  const ratio = chunks.length > 1 ? chunkIndex / Math.max(1, chunks.length - 1) : 0
+  const maxOffset = Math.max(0, blobSize - TEXT_PREVIEW_BYTES)
+  return Math.min(maxOffset, Math.max(0, Math.floor(maxOffset * ratio)))
+}
+
+async function locateTextWindowOffset(blob: Blob, chunk: MaterialChunk, chunks: MaterialChunk[]) {
+  if (!chunk?.chunkText?.trim()) return fallbackTextWindowOffset(blob.size, chunk, chunks)
+  if (blob.size > TEXT_LOCATE_MAX_BYTES) return fallbackTextWindowOffset(blob.size, chunk, chunks)
+  const buffer = await blob.arrayBuffer()
+  const sourceText = decodeTextWindow(buffer, blob.type)
+  const textIndex = findChunkTextIndex(sourceText, chunk)
+  if (textIndex < 0 || sourceText.length === 0) return fallbackTextWindowOffset(blob.size, chunk, chunks)
+  const approximateByteOffset = Math.floor((textIndex / sourceText.length) * blob.size)
+  const maxOffset = Math.max(0, blob.size - TEXT_PREVIEW_BYTES)
+  return Math.min(maxOffset, Math.max(0, approximateByteOffset - TEXT_LOCATE_LEAD_BYTES))
+}
+
+function findChunkTextIndex(sourceText: string, chunk: MaterialChunk) {
+  const candidates = chunkTextCandidates(chunk)
+  for (const candidate of candidates) {
+    const index = sourceText.indexOf(candidate)
+    if (index >= 0) return index
+  }
+  const compactSource = compactTextWithMap(sourceText)
+  for (const candidate of candidates) {
+    const compactCandidate = compactText(candidate)
+    if (compactCandidate.length < 24) continue
+    const compactIndex = compactSource.text.indexOf(compactCandidate.slice(0, 240))
+    if (compactIndex >= 0) return compactSource.map[compactIndex] ?? -1
+  }
+  return -1
+}
+
+function chunkTextCandidates(chunk: MaterialChunk) {
+  const values = [chunk.chunkText, chunk.excerpt, chunk.summary]
+  const candidates: string[] = []
+  for (const value of values) {
+    const normalized = (value || '').trim()
+    if (!normalized) continue
+    for (const length of [500, 300, 160, 80]) {
+      const candidate = normalized.slice(0, length).trim()
+      if (candidate.length >= 24 && !candidates.includes(candidate)) candidates.push(candidate)
+    }
+    for (const line of normalized.split(/\r?\n+/)) {
+      const candidate = line.trim()
+      if (candidate.length >= 32 && !candidates.includes(candidate)) candidates.push(candidate.slice(0, 240))
+    }
+  }
+  return candidates
+}
+
+function compactText(value: string) {
+  return value.replace(/\s+/g, '').toLowerCase()
+}
+
+function compactTextWithMap(value: string) {
+  let text = ''
+  const map: number[] = []
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]
+    if (/\s/.test(char)) continue
+    text += char.toLowerCase()
+    map.push(index)
+  }
+  return { text, map }
+}
+
+function fallbackChunkRangeForPage(page: MaterialPage, pages: MaterialPage[], chunkCount: number) {
+  if (!page || pages.length === 0 || chunkCount <= 0) return null
+  const pageIndex = Math.max(0, pages.findIndex((candidate) => candidate.pageNo === page.pageNo))
+  const start = Math.floor((pageIndex * chunkCount) / pages.length)
+  const end = Math.max(start + 1, Math.floor(((pageIndex + 1) * chunkCount) / pages.length))
+  return { start: Math.min(chunkCount - 1, start), end: Math.min(chunkCount, end) }
 }
 
 async function fetchBlobWithProgress(
@@ -441,6 +529,8 @@ interface ReaderPaperProps {
   chunks: MaterialChunk[]        // 所有片段列表
   pages: MaterialPage[]          // 页面列表（用于页面预览模式）
   material: Material | null      // 当前资料
+  targetPageNo?: number | null   // URL 或外部来源指定的目标页码
+  initialViewMode?: ReaderViewMode | null
   progress: number               // 阅读进度（0~1）
   canPrev?: boolean              // 是否可以向前翻
   canNext?: boolean              // 是否可以向后翻
@@ -455,6 +545,8 @@ export function ReaderPaper({
   chunks,
   pages,
   material,
+  targetPageNo,
+  initialViewMode,
   progress,
   canPrev = true,
   canNext = true,
@@ -508,8 +600,10 @@ export function ReaderPaper({
   const isOriginalView = viewMode === 'original' && hasOriginalPreview
   /** 是否使用页面图片预览模式（有页面图片 + 预览就绪 + 未失败） */
   const hasPagePreview = !!material?.id && pages.length > 0 && material.previewStatus === 'READY' && !pagePreviewFailed
-  /** 是否显示页面控制（缩放、页码标签等，仅页面预览模式且非原文模式时显示） */
-  const showPageControls = hasPagePreview && !isOriginalView
+  /** 是否使用页面图片承载当前视图；PDF 原文预览也走页面图，避免浏览器 PDF viewer 记忆滚动到末页。 */
+  const usesPageCanvas = hasPagePreview && (!isOriginalView || previewKind === 'pdf')
+  /** 是否显示页面控制（缩放、页码标签等，仅页面预览模式时显示） */
+  const showPageControls = usesPageCanvas
   /** 原文模式下是否支持片段导航（PDF 和 Office 模式支持） */
   const originalChunkNavigationEnabled = !isOriginalView || previewKind === 'pdf' || previewKind === 'office'
   const chunkPageNo = useMemo(() => {
@@ -517,16 +611,26 @@ export function ReaderPaper({
     if (Number.isFinite(directPageNo) && directPageNo > 0) return directPageNo
     const chunkId = String(chunk.id)
     // 旧数据可能没有 pageNo，只能反查页面的 chunkIds 来定位当前片段所在页。
-    return pages.find((page) => page.chunkIds.map(String).includes(chunkId))?.pageNo || null
-  }, [chunk.id, chunk.pageNo, pages])
-  // 当前页码：优先覆盖值 > 片段页码 > 第一页
-  const currentPageNo = currentPageOverride || chunkPageNo || pages[0]?.pageNo || 1
-  const currentPage = pages.find((page) => page.pageNo === currentPageNo) || pages[0]
+    const mappedPageNo = pages.find((page) => page.chunkIds.map(String).includes(chunkId))?.pageNo
+    if (mappedPageNo) return mappedPageNo
+    const chunkIndex = chunks.findIndex((candidate) => String(candidate.id) === chunkId)
+    if (chunkIndex >= 0 && pages.length > 0 && chunks.length > 0) {
+      const pageIndex = Math.min(pages.length - 1, Math.floor((chunkIndex * pages.length) / chunks.length))
+      return pages[pageIndex]?.pageNo || null
+    }
+    return null
+  }, [chunk.id, chunk.pageNo, chunks, pages])
+  const validTargetPageNo = Number.isFinite(Number(targetPageNo)) && Number(targetPageNo) > 0 ? Number(targetPageNo) : null
+  // 当前页码：优先覆盖值 > 片段页码 > 外部目标页码 > 第一页
+  const currentPageNo = currentPageOverride || chunkPageNo || validTargetPageNo || pages[0]?.pageNo || 1
+  const firstContentPage = pages.find((page) => page.chunkIds.length > 0) || pages[0]
+  const currentPage = pages.find((page) => page.pageNo === currentPageNo && page.chunkIds.length > 0)
+    || firstContentPage
   const currentPageIndex = currentPage ? pages.findIndex((page) => page.pageNo === currentPage.pageNo) : -1
   const originalProgressPercent = originalProgress.total
     ? Math.min(100, Math.round((originalProgress.loaded / originalProgress.total) * 100))
     : null
-  const originalFrameUrl = useMemo(() => pdfPageUrl(originalUrl, chunkPageNo), [chunkPageNo, originalUrl])
+  const originalFrameUrl = useMemo(() => pdfPageUrl(originalUrl, currentPageNo), [currentPageNo, originalUrl])
   const textWindowEnd = textPreviewBlob
     ? Math.min(textPreviewBlob.size, textWindowOffset + TEXT_PREVIEW_BYTES)
     : 0
@@ -538,10 +642,17 @@ export function ReaderPaper({
     if (!currentPage) return []
     const ids = new Set(currentPage.chunkIds.map(String))
     // 生成当前页的片段索引列表，供页预览下方的片段标签和问答上下文复用。
-    return chunks
+    const mappedIndexes = chunks
       .map((candidate, index) => (ids.has(String(candidate.id)) ? index : -1))
       .filter((index) => index >= 0)
-  }, [chunks, currentPage])
+    if (mappedIndexes.length > 0) return mappedIndexes
+    const fallbackRange = fallbackChunkRangeForPage(currentPage, pages, chunks.length)
+    if (!fallbackRange) return []
+    return Array.from(
+      { length: fallbackRange.end - fallbackRange.start },
+      (_, index) => fallbackRange.start + index,
+    )
+  }, [chunks, currentPage, pages])
 
   // === 副作用 ===
 
@@ -553,7 +664,7 @@ export function ReaderPaper({
 
   /** 资料切换时重置所有原文预览相关状态 */
   useEffect(() => {
-    setViewMode(defaultReaderViewMode(material))
+    setViewMode(initialViewMode || defaultReaderViewMode(material))
     setOriginalUrl('')
     setOriginalLoading(false)
     setOriginalProgress({ loaded: 0, total: null })
@@ -567,6 +678,10 @@ export function ReaderPaper({
       originalObjectUrlRef.current = null
     }
   }, [material?.id, material?.sourceType])
+
+  useEffect(() => {
+    if (initialViewMode) setViewMode(initialViewMode)
+  }, [initialViewMode])
 
 /**
  * 原文预览文件加载效果
@@ -595,6 +710,13 @@ export function ReaderPaper({
     setTextPreviewBlob(null)
     setTextWindowOffset(0)
     setTextWindowText('')
+    if (previewKind === 'pdf' && hasPagePreview) {
+      setOriginalLoading(false)
+      return () => {
+        cancelled = true
+        controller.abort()
+      }
+    }
     createMaterialFileTicket(material.id)
       .then(async (ticket) => {
         if (cancelled) return
@@ -631,7 +753,7 @@ export function ReaderPaper({
         originalObjectUrlRef.current = null
       }
     }
-  }, [hasOriginalPreview, material?.id, previewKind, viewMode])
+  }, [hasOriginalPreview, hasPagePreview, material?.id, previewKind, viewMode])
 
   useEffect(() => {
     if (!textPreviewBlob || previewKind !== 'text') return
@@ -663,6 +785,21 @@ export function ReaderPaper({
       cancelled = true
     }
   }, [previewKind, textPreviewBlob, textWindowOffset])
+
+  useEffect(() => {
+    if (!isOriginalView || previewKind !== 'text' || !textPreviewBlob) return
+    let cancelled = false
+    locateTextWindowOffset(textPreviewBlob, chunk, chunks)
+      .then((offset) => {
+        if (!cancelled) setTextWindowOffset(offset)
+      })
+      .catch(() => {
+        if (!cancelled) setTextWindowOffset(fallbackTextWindowOffset(textPreviewBlob.size, chunk, chunks))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [chunk.id, chunks, isOriginalView, previewKind, textPreviewBlob])
 
   // 切换内容时自动滚回顶部
   useEffect(() => {
@@ -701,12 +838,19 @@ export function ReaderPaper({
    */
   const handlePageStep = (direction: -1 | 1) => {
     if (!pages.length || currentPageIndex < 0) return
-    const nextPage = pages[currentPageIndex + direction]
+    const nextPage = direction > 0
+      ? pages.slice(currentPageIndex + 1).find((page) => page.chunkIds.length > 0) || pages[currentPageIndex + direction]
+      : pages.slice(0, currentPageIndex).reverse().find((page) => page.chunkIds.length > 0) || pages[currentPageIndex + direction]
     if (!nextPage) return
     setCurrentPageOverride(nextPage.pageNo)
-    const nextChunkIndex = chunks.findIndex((candidate) => Number(candidate.pageNo) === nextPage.pageNo)
+    const nextPageChunkIds = new Set(nextPage.chunkIds.map(String))
+    const fallbackChunkRange = fallbackChunkRangeForPage(nextPage, pages, chunks.length)
+    const nextChunkIndex = chunks.findIndex((candidate) => (
+      Number(candidate.pageNo) === nextPage.pageNo || nextPageChunkIds.has(String(candidate.id))
+    ))
     // 翻页后同步到该页首个片段，让目录高亮和右侧问答上下文跟随页面变化。
     if (nextChunkIndex >= 0) onSelectChunk?.(nextChunkIndex)
+    else if (fallbackChunkRange) onSelectChunk?.(fallbackChunkRange.start)
   }
 
   /**
@@ -814,11 +958,29 @@ export function ReaderPaper({
       )
     }
 
+    if (previewKind === 'pdf' && hasPagePreview && currentPage) {
+      return (
+        <ScrollArea className="flex-1 bg-[#eceff1]" viewportRef={scrollViewportRef}>
+          <PagePreviewCanvas
+            materialId={material.id}
+            currentPage={currentPage}
+            zoom={zoom}
+            pageChunkIndexes={pageChunkIndexes}
+            chunks={chunks}
+            activeChunkId={chunk.id}
+            onSelectChunk={onSelectChunk}
+            onError={() => setPagePreviewFailed(true)}
+          />
+        </ScrollArea>
+      )
+    }
+
     if (previewKind === 'pdf' || previewKind === 'office') {
       return (
         <div className="flex-1 bg-[#2f3338]">
           {originalUrl ? (
             <iframe
+              key={`${material.id}-${previewKind}-${currentPageNo}-${originalUrl}`}
               title={material.title || material.originalName || '原文预览'}
               src={originalFrameUrl}
               className="h-full w-full border-0 bg-white"
@@ -886,8 +1048,8 @@ export function ReaderPaper({
           {!showPageControls && !isOriginalView && chunkPageNo && (
             <Badge variant="outline" className="text-xs">P{chunkPageNo}</Badge>
           )}
-          {isOriginalView && (previewKind === 'pdf' || previewKind === 'office') && chunkPageNo && (
-            <Badge variant="outline" className="text-xs">P{chunkPageNo}</Badge>
+          {!showPageControls && isOriginalView && (previewKind === 'pdf' || previewKind === 'office') && currentPageNo && (
+            <Badge variant="outline" className="text-xs">P{currentPageNo}</Badge>
           )}
           {isOriginalView && previewKind === 'pdf' && (
             <Badge variant="outline" className="text-xs">
@@ -1020,8 +1182,8 @@ export function ReaderPaper({
           {showPageControls && currentPage
             ? `第 ${currentPage.pageNo} 页 / 共 ${pages.length} 页`
             : isOriginalView
-              ? chunkPageNo
-                ? `第 ${chunkPageNo} 页 · 片段 #${chunk.chunkIndex}`
+              ? currentPageNo
+                ? `第 ${currentPageNo} 页 · 片段 #${chunk.chunkIndex}`
                 : '原文预览中，当前片段暂无页码映射'
               : `片段 #${chunk.chunkIndex}`}
         </span>

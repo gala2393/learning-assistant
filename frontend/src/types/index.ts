@@ -357,15 +357,36 @@ export interface RagEvaluationSuiteDetail {
 
 // ==================== 知识总结 ====================
 
+export type SummaryType = 'GENERAL' | 'BRIEF' | 'DETAILED' | 'OUTLINE' | 'REVIEW' | 'ACTION'
+
+export interface SummarySource {
+  materialId: string
+  chunkId: string
+  title: string
+  pageNo: number | null
+  chunkIndex: number | null
+  excerpt: string
+}
+
+export interface SummarySection {
+  title: string
+  items: string[]
+  sources?: SummarySource[]
+}
+
 /** AI 知识总结结果 */
 export interface SummaryResult {
   summaryId: string           // 总结 ID
   materialId: string          // 资料 ID
   materialTitle: string       // 资料标题
   summary: string             // 总结内容
+  summaryType?: SummaryType | string // 总结类型
   modelName: string           // 使用的模型名称
   sourceCount: number         // 引用来源数
   createdAt: string           // 生成时间
+  sections?: SummarySection[] // 结构化摘要区块
+  sources?: SummarySource[]   // 可跳转来源
+  userNote?: string | null    // 用户整理版
 }
 
 // ==================== 管理员后台相关 ====================

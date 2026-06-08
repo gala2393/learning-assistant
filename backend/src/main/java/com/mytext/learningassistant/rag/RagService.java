@@ -18,6 +18,7 @@ import java.util.Comparator;
 import javax.imageio.ImageIO;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -57,6 +58,8 @@ import com.mytext.learningassistant.vector.VectorStoreClient;
 
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.rendering.PDFRenderer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -95,6 +98,8 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class RagService {
 
+    private static final Logger log = LoggerFactory.getLogger(RagService.class);
+
     // ========== 常量定义 ==========
 
     /** 日期时间格式化器，用于将 LocalDateTime 格式化为 "yyyy-MM-dd HH:mm:ss" */
@@ -116,10 +121,16 @@ public class RagService {
     private static final int USER_DAILY_CHAT_LIMIT = 100;
 
     /** 每次请求用户最多上传的图片数量 */
-    private static final int MAX_USER_IMAGES_PER_REQUEST = 4;
+    private static final int MAX_USER_IMAGES_PER_REQUEST = 8;
 
     /** 单张用户图片 Base64 编码的最大字符数（约 2MB 图片大小） */
     private static final int MAX_USER_IMAGE_BASE64_CHARS = 2_800_000;
+
+    /** 结构化总结发送给模型的最大字符数，避免长资料撑爆上下文 */
+    private static final int MAX_SUMMARY_INPUT_CHARS = 32_000;
+
+    /** 扫描版资料生成总结时最多附带的页面图片数，和普通问答图片上限分开控制。 */
+    private static final int MAX_SUMMARY_IMAGES_PER_REQUEST = 20;
     // ========== 正则匹配模式：用于问题意图识别 ==========
 
     /**
@@ -729,7 +740,7 @@ public class RagService {
 
     /**
      * 从用户请求中提取并验证上传的图片。
-     * 限制：最多 4 张图片，每张不超过约 2MB，仅支持 JPG/PNG/WEBP/GIF 格式。
+     * 限制：最多 8 张图片，每张不超过约 2MB，仅支持 JPG/PNG/WEBP/GIF 格式。
      *
      * @param request 问答请求（可能包含图片数据）
      * @return 验证通过的图片列表
@@ -740,7 +751,7 @@ public class RagService {
             return List.of();
         }
         if (request.images().size() > MAX_USER_IMAGES_PER_REQUEST) {
-            throw new BusinessException(400, "一次最多上传 4 张图片");
+            throw new BusinessException(400, "一次最多上传 8 张图片");
         }
         List<LlmImage> images = new ArrayList<>();
         for (ChatImage image : request.images()) {
@@ -2728,14 +2739,10 @@ public class RagService {
     // ========== 资料摘要 ==========
 
     /**
-     * 为学习资料生成摘要。
+     * 为资料生成通用结构化总结。
      * <p>
-     * 流程：提取资料的前 8 个片段 -> 调用 LLM 生成摘要 -> 保存到数据库。
-     * 如果 LLM 调用失败，使用本地规则生成基础摘要。
-     *
-     * @param userId  用户 ID
-     * @param request 摘要请求（包含资料 ID）
-     * @return 摘要响应（包含摘要文本、来源数量等）
+     * 流程：按章节/标题聚合所有片段 -> 压缩为全量章节概览 -> 调用 LLM 生成结构化总结 -> 保存。
+     * 如果 LLM 调用失败或未返回 JSON，使用本地规则生成可读的结构化总结。
      */
     @Transactional
     public RagSummaryResponse summarize(long userId, SummarizeRequest request) {
@@ -2750,31 +2757,34 @@ public class RagService {
             throw new BusinessException(400, "material has no chunks to summarize");
         }
 
+        String summaryType = normalizeSummaryType(request.summaryType());
+        List<SummaryGroup> groups = buildSummaryGroups(chunks);
+        List<String> sectionBriefs = buildSectionBriefs(groups);
+        List<SummarySourceResponse> sources = buildSummarySources(material, groups);
+        List<LlmImage> summaryImages = loadSummaryImages(material, chunks);
+        log.info(
+            "Generating material summary materialId={} type={} groups={} briefs={} sources={} images={}",
+            material.getId(), summaryType, groups.size(), sectionBriefs.size(), sources.size(), summaryImages.size()
+        );
         LlmCompletion completion = thirdPartyLlmClient
-            .summarize(material.getTitle(), chunks.stream().limit(8).map(chunk -> excerpt(chunk.getChunkText())).toList())
+            .summarizeStructured(material.getTitle(), summaryTypeLabel(summaryType), sectionBriefs, summaryImages)
             .orElseGet(() -> new LlmCompletion(buildCleanSummary(material, chunks), "local-rag-demo"));
+        StructuredSummary structured = parseStructuredSummary(completion.content(), material, groups, sources);
 
         MaterialSummaryEntity entity = new MaterialSummaryEntity();
         entity.setMaterialId(material.getId());
         entity.setUserId(userId);
-        entity.setSummaryText(completion.content());
-        entity.setSummaryType("AUTO");
+        entity.setSummaryText(structured.summary());
+        entity.setSummaryType(summaryType);
         entity.setModelName(completion.modelName());
+        entity.setStructuredJson(writeJson(structured.sections()));
+        entity.setSourcesJson(writeJson(sources));
         MaterialSummaryEntity saved = materialSummaryRepository.save(entity);
 
         material.setSummaryStatus(MaterialSummaryStatus.SUCCESS);
         learningMaterialRepository.save(material);
 
-        return new RagSummaryResponse(
-            saved.getId(),
-            material.getId(),
-            material.getTitle(),
-            saved.getSummaryText(),
-            saved.getSummaryType(),
-            saved.getModelName(),
-            chunks.size(),
-            saved.getCreatedAt() == null ? null : saved.getCreatedAt().format(DATETIME_FORMATTER)
-        );
+        return toSummaryResponse(material, saved, sources.size());
     }
 
     /** 获取资料的最新摘要 */
@@ -2784,7 +2794,43 @@ public class RagService {
             .orElseThrow(() -> new BusinessException(404, "material not found"));
         MaterialSummaryEntity summary = materialSummaryRepository.findFirstByMaterialIdAndUserIdOrderByCreatedAtDesc(materialId, userId)
             .orElseThrow(() -> new BusinessException(404, "summary not found"));
-        int sourceCount = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(materialId).size();
+        return toSummaryResponse(material, summary, null);
+    }
+
+    /** 获取资料的摘要历史列表（可能有多次生成的摘要） */
+    @Transactional(readOnly = true)
+    public List<RagSummaryResponse> summaryHistory(long userId, long materialId) {
+        LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
+            .orElseThrow(() -> new BusinessException(404, "material not found"));
+        return materialSummaryRepository.findByMaterialIdAndUserIdOrderByCreatedAtDesc(materialId, userId).stream()
+            .map(summary -> toSummaryResponse(material, summary, null))
+            .toList();
+    }
+
+    /** 更新用户整理版摘要 */
+    @Transactional
+    public RagSummaryResponse updateSummaryNote(long userId, long summaryId, UpdateSummaryNoteRequest request) {
+        MaterialSummaryEntity summary = materialSummaryRepository.findById(summaryId)
+            .filter(item -> item.getUserId() != null && item.getUserId().longValue() == userId)
+            .orElseThrow(() -> new BusinessException(404, "summary not found"));
+        LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(summary.getMaterialId(), userId)
+            .orElseThrow(() -> new BusinessException(404, "material not found"));
+        summary.setUserNote(request == null || request.userNote() == null ? "" : request.userNote());
+        MaterialSummaryEntity saved = materialSummaryRepository.save(summary);
+        return toSummaryResponse(material, saved, null);
+    }
+
+    private RagSummaryResponse toSummaryResponse(
+        LearningMaterialEntity material,
+        MaterialSummaryEntity summary,
+        Integer sourceCountOverride
+    ) {
+        List<SummarySourceResponse> sources = readSummarySources(summary.getSourcesJson());
+        List<SummarySectionResponse> sections = readSummarySections(summary.getStructuredJson(), sources);
+        int sourceCount = sourceCountOverride == null ? sources.size() : sourceCountOverride;
+        if (sourceCount <= 0) {
+            sourceCount = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId()).size();
+        }
         return new RagSummaryResponse(
             summary.getId(),
             material.getId(),
@@ -2793,28 +2839,298 @@ public class RagService {
             summary.getSummaryType(),
             summary.getModelName(),
             sourceCount,
-            summary.getCreatedAt() == null ? null : summary.getCreatedAt().format(DATETIME_FORMATTER)
+            summary.getCreatedAt() == null ? null : summary.getCreatedAt().format(DATETIME_FORMATTER),
+            sections,
+            sources,
+            summary.getUserNote()
         );
     }
 
-    /** 获取资料的摘要历史列表（可能有多次生成的摘要） */
-    @Transactional(readOnly = true)
-    public List<RagSummaryResponse> summaryHistory(long userId, long materialId) {
-        LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
-            .orElseThrow(() -> new BusinessException(404, "material not found"));
-        int sourceCount = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(materialId).size();
-        return materialSummaryRepository.findByMaterialIdAndUserIdOrderByCreatedAtDesc(materialId, userId).stream()
-            .map(summary -> new RagSummaryResponse(
-                summary.getId(),
-                material.getId(),
-                material.getTitle(),
-                summary.getSummaryText(),
-                summary.getSummaryType(),
-                summary.getModelName(),
-                sourceCount,
-                summary.getCreatedAt() == null ? null : summary.getCreatedAt().format(DATETIME_FORMATTER)
-            ))
+    private String normalizeSummaryType(String value) {
+        String normalized = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "BRIEF", "DETAILED", "OUTLINE", "REVIEW", "ACTION" -> normalized;
+            default -> "GENERAL";
+        };
+    }
+
+    private String summaryTypeLabel(String summaryType) {
+        return switch (summaryType) {
+            case "BRIEF" -> "简洁摘要";
+            case "DETAILED" -> "详细总结";
+            case "OUTLINE" -> "章节/标题提纲";
+            case "REVIEW" -> "复习巩固版";
+            case "ACTION" -> "行动清单/决策版";
+            default -> "通用结构化总结";
+        };
+    }
+
+    private List<SummaryGroup> buildSummaryGroups(List<MaterialChunkEntity> chunks) {
+        Map<String, SummaryGroupBuilder> groups = new LinkedHashMap<>();
+        for (MaterialChunkEntity chunk : chunks) {
+            String title = summaryGroupTitle(chunk);
+            SummaryGroupBuilder builder = groups.computeIfAbsent(title, SummaryGroupBuilder::new);
+            builder.chunks().add(chunk);
+        }
+        return groups.values().stream()
+            .map(builder -> new SummaryGroup(builder.title(), List.copyOf(builder.chunks())))
             .toList();
+    }
+
+    private String summaryGroupTitle(MaterialChunkEntity chunk) {
+        String hierarchy = firstNonBlank(chunk.getHierarchyPath(), chunk.getSectionTitle());
+        if (hierarchy != null) {
+            return hierarchy.length() <= 120 ? hierarchy : hierarchy.substring(0, 120);
+        }
+        int index = chunk.getChunkIndex() == null ? 0 : chunk.getChunkIndex();
+        return "片段 " + (index + 1);
+    }
+
+    private List<String> buildSectionBriefs(List<SummaryGroup> groups) {
+        List<String> briefs = new ArrayList<>();
+        int usedChars = 0;
+        for (SummaryGroup group : groups) {
+            String joined = group.chunks().stream()
+                .map(chunk -> firstNonBlank(chunk.getSummary(), chunk.getChunkText()))
+                .filter(text -> text != null && !text.isBlank())
+                .map(this::summaryExcerpt)
+                .limit(4)
+                .collect(Collectors.joining("\n"));
+            if (joined.isBlank()) {
+                continue;
+            }
+            String brief = "【" + group.title() + "】\n" + joined;
+            if (usedChars + brief.length() > MAX_SUMMARY_INPUT_CHARS) {
+                int remaining = Math.max(0, MAX_SUMMARY_INPUT_CHARS - usedChars);
+                if (remaining < 240) {
+                    break;
+                }
+                brief = brief.substring(0, Math.min(brief.length(), remaining));
+            }
+            briefs.add(brief);
+            usedChars += brief.length();
+        }
+        return briefs;
+    }
+
+    private List<SummarySourceResponse> buildSummarySources(LearningMaterialEntity material, List<SummaryGroup> groups) {
+        List<SummarySourceResponse> sources = new ArrayList<>();
+        for (SummaryGroup group : groups) {
+            group.chunks().stream()
+                .filter(chunk -> chunk.getChunkText() != null && !chunk.getChunkText().isBlank())
+                .limit(2)
+                .map(chunk -> new SummarySourceResponse(
+                    material.getId(),
+                    chunk.getId(),
+                    group.title(),
+                    chunk.getPageNo(),
+                    chunk.getChunkIndex(),
+                    summaryExcerpt(chunk.getChunkText())
+                ))
+                .forEach(sources::add);
+        }
+        return sources;
+    }
+
+    private List<LlmImage> loadSummaryImages(LearningMaterialEntity material, List<MaterialChunkEntity> chunks) {
+        if (material.getStoragePath() == null) {
+            return List.of();
+        }
+        boolean needsImages = chunks.stream().anyMatch(chunk -> isTextExtractionPlaceholder(chunk.getChunkText()));
+        if (!needsImages && material.getSourceType() != MaterialSourceType.PDF) {
+            return List.of();
+        }
+        List<LlmImage> images = new ArrayList<>();
+        Set<Integer> pageNos = chunks.stream()
+            .map(MaterialChunkEntity::getPageNo)
+            .filter(pageNo -> pageNo != null && pageNo > 0)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        Path sourcePath = resolveStoredPath(material.getStoragePath());
+        for (Integer pageNo : pageNos) {
+            if (images.size() >= MAX_SUMMARY_IMAGES_PER_REQUEST) {
+                break;
+            }
+            LlmImage image = loadImage(renderPdfPageAsset(sourcePath, "page-" + pageNo + ".png"));
+            if (image != null) {
+                images.add(image);
+            }
+        }
+        return images;
+    }
+
+    private String summaryExcerpt(String text) {
+        String cleaned = cleanExcerptText(text)
+            .replaceAll("第\\s*\\d+\\s*页暂无可抽取文本[；;，,。]?.*", "")
+            .replaceAll("原页图片将在预览或多模态问答时按需生成[。]?.*", "")
+            .replaceAll("已保留原页预览用于阅读和问答依据[。]?.*", "")
+            .trim();
+        if (cleaned.isBlank() && isTextExtractionPlaceholder(text)) {
+            Integer pageNo = extractPlaceholderPageNo(text);
+            return pageNo == null ? "该页为图片页面，需结合页面原图总结。" : "第 " + pageNo + " 页为图片页面，需结合页面原图总结。";
+        }
+        return cleaned.length() <= 160 ? cleaned : cleaned.substring(0, 160) + "...";
+    }
+
+    private boolean isTextExtractionPlaceholder(String text) {
+        String value = text == null ? "" : text;
+        return value.contains("暂无可抽取文本") || value.contains("无可抽取文本");
+    }
+
+    private Integer extractPlaceholderPageNo(String text) {
+        Matcher matcher = Pattern.compile("第\\s*(\\d+)\\s*页").matcher(text == null ? "" : text);
+        return matcher.find() ? Integer.parseInt(matcher.group(1)) : null;
+    }
+
+    private StructuredSummary parseStructuredSummary(
+        String content,
+        LearningMaterialEntity material,
+        List<SummaryGroup> groups,
+        List<SummarySourceResponse> sources
+    ) {
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(extractJsonObject(content));
+            String summary = root.path("summary").asText("");
+            List<SummarySectionResponse> sections = new ArrayList<>();
+            JsonNode sectionNodes = root.path("sections");
+            if (sectionNodes.isArray()) {
+                for (JsonNode node : sectionNodes) {
+                    String title = node.path("title").asText("").trim();
+                    List<String> items = new ArrayList<>();
+                    JsonNode itemNodes = node.path("items");
+                    if (itemNodes.isArray()) {
+                        for (JsonNode item : itemNodes) {
+                            String text = item.asText("").trim();
+                            if (!text.isBlank()) {
+                                items.add(text);
+                            }
+                        }
+                    }
+                    if (!title.isBlank() && !items.isEmpty()) {
+                        sections.add(new SummarySectionResponse(title, items, sectionSources(title, sources)));
+                    }
+                }
+            }
+            if (!summary.isBlank() && !sections.isEmpty()) {
+                return new StructuredSummary(cleanAnswerText(summary), sections);
+            }
+        } catch (Exception ignored) {
+            // LLM 偶尔会返回非 JSON；下面使用本地结构化兜底。
+        }
+        return fallbackStructuredSummary(material, groups, sources, content);
+    }
+
+    private StructuredSummary fallbackStructuredSummary(
+        LearningMaterialEntity material,
+        List<SummaryGroup> groups,
+        List<SummarySourceResponse> sources,
+        String rawContent
+    ) {
+        String summary = cleanAnswerText(rawContent);
+        if (summary.isBlank()) {
+            summary = buildCleanSummary(material, groups.stream().flatMap(group -> group.chunks().stream()).toList());
+        }
+        List<String> structureItems = groups.stream()
+            .limit(8)
+            .map(group -> group.title() + "：" + group.chunks().stream()
+                .findFirst()
+                .map(chunk -> excerpt(firstNonBlank(chunk.getSummary(), chunk.getChunkText())))
+                .orElse(""))
+            .filter(item -> !item.isBlank())
+            .toList();
+        List<SummarySectionResponse> sections = List.of(
+            new SummarySectionResponse("核心摘要", List.of(summary), sources.stream().limit(3).toList()),
+            new SummarySectionResponse("结构脉络", structureItems, sources.stream().limit(8).toList())
+        );
+        return new StructuredSummary(summary, sections);
+    }
+
+    private String extractJsonObject(String content) {
+        String value = content == null ? "" : content.trim();
+        int start = value.indexOf('{');
+        int end = value.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            return value.substring(start, end + 1);
+        }
+        return value;
+    }
+
+    private List<SummarySourceResponse> sectionSources(String title, List<SummarySourceResponse> sources) {
+        if (sources.isEmpty()) {
+            return List.of();
+        }
+        String normalized = title == null ? "" : title.toLowerCase(Locale.ROOT);
+        if (normalized.contains("结构") || normalized.contains("章节") || normalized.contains("脉络")) {
+            return sources.stream().limit(8).toList();
+        }
+        return sources.stream().limit(4).toList();
+    }
+
+    private List<SummarySourceResponse> readSummarySources(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(json);
+            if (!root.isArray()) {
+                return List.of();
+            }
+            List<SummarySourceResponse> sources = new ArrayList<>();
+            for (JsonNode node : root) {
+                sources.add(new SummarySourceResponse(
+                    node.path("materialId").isMissingNode() ? null : node.path("materialId").asLong(),
+                    node.path("chunkId").isMissingNode() ? null : node.path("chunkId").asLong(),
+                    node.path("title").asText(null),
+                    node.path("pageNo").isNull() || node.path("pageNo").isMissingNode() ? null : node.path("pageNo").asInt(),
+                    node.path("chunkIndex").isNull() || node.path("chunkIndex").isMissingNode() ? null : node.path("chunkIndex").asInt(),
+                    node.path("excerpt").asText("")
+                ));
+            }
+            return sources;
+        } catch (Exception exception) {
+            return List.of();
+        }
+    }
+
+    private List<SummarySectionResponse> readSummarySections(String json, List<SummarySourceResponse> fallbackSources) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(json);
+            if (!root.isArray()) {
+                return List.of();
+            }
+            List<SummarySectionResponse> sections = new ArrayList<>();
+            for (JsonNode node : root) {
+                String title = node.path("title").asText("").trim();
+                List<String> items = new ArrayList<>();
+                JsonNode itemNodes = node.path("items");
+                if (itemNodes.isArray()) {
+                    for (JsonNode item : itemNodes) {
+                        String text = item.asText("").trim();
+                        if (!text.isBlank()) {
+                            items.add(text);
+                        }
+                    }
+                }
+                if (!title.isBlank() && !items.isEmpty()) {
+                    sections.add(new SummarySectionResponse(title, items, sectionSources(title, fallbackSources)));
+                }
+            }
+            return sections;
+        } catch (Exception exception) {
+            return List.of();
+        }
+    }
+
+    private String firstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first.trim();
+        }
+        if (second != null && !second.isBlank()) {
+            return second.trim();
+        }
+        return null;
     }
 
     // ========== 收藏管理 ==========
@@ -3915,7 +4231,7 @@ public class RagService {
     /** 每个片段最多加载的图片数量 */
     private static final int MAX_IMAGES_PER_CHUNK = 3;
     /** 每次请求最多发送给 LLM 的图片总数 */
-    private static final int MAX_IMAGES_PER_REQUEST = 5;
+    private static final int MAX_IMAGES_PER_REQUEST = 10;
     /** 图片发送给 LLM 前的最大边长（像素），超过会等比缩放 */
     private static final int MAX_IMAGE_SIDE = 768;
     /** 资源文件夹后缀（如 xxx.pdf.assets 存放 PDF 提取的图片） */
@@ -4280,6 +4596,21 @@ public class RagService {
 
     /** 资料及其片段的组合，用于批量处理 */
     private record MaterialChunks(LearningMaterialEntity material, List<MaterialChunkEntity> chunks) {
+    }
+
+    /** 摘要生成时按章节/标题聚合出的分组 */
+    private record SummaryGroup(String title, List<MaterialChunkEntity> chunks) {
+    }
+
+    /** 摘要分组构建器 */
+    private record SummaryGroupBuilder(String title, List<MaterialChunkEntity> chunks) {
+        private SummaryGroupBuilder(String title) {
+            this(title, new ArrayList<>());
+        }
+    }
+
+    /** 解析后的结构化摘要 */
+    private record StructuredSummary(String summary, List<SummarySectionResponse> sections) {
     }
 
     /** BM25 索引缓存条目，包含预构建的 BM25 评分器 */

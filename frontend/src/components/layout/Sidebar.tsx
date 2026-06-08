@@ -276,12 +276,12 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'flex h-screen shrink-0 flex-col bg-[#f5f6f8] py-4 transition-[width] duration-200 dark:bg-[#111318]',
+        'flex h-[100dvh] min-h-0 shrink-0 flex-col bg-[#f5f6f8] py-3 transition-[width] duration-200 dark:bg-[#111318] lg:py-4',
         collapsed ? 'w-[76px] px-2' : 'w-[286px] px-3',
       )}
     >
       {/* ========== 顶部 Logo + 折叠按钮 ========== */}
-      <div className="mb-5 flex items-center justify-between px-1">
+      <div className="mb-3 flex shrink-0 items-center justify-between px-1 lg:mb-5">
         {/* 品牌 Logo 按钮，点击回到首页 */}
         <button
           className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#111318] text-sm font-black text-white shadow-sm dark:bg-white dark:text-[#111318]"
@@ -309,7 +309,7 @@ export function Sidebar() {
         <Button
           variant="outline"
           size="icon"
-          className="mb-4 h-10 w-10 self-center rounded-xl border-[#e1e4e8] bg-white shadow-sm hover:bg-white dark:border-slate-800 dark:bg-[#171a21]"
+          className="mb-3 h-10 w-10 shrink-0 self-center rounded-xl border-[#e1e4e8] bg-white shadow-sm hover:bg-white dark:border-slate-800 dark:bg-[#171a21] lg:mb-4"
           onClick={() => navigate('/workspace/chat?new=1')}
           title="新建会话"
         >
@@ -319,7 +319,7 @@ export function Sidebar() {
         // 展开状态：显示图标 + 文字 + 快捷键提示
         <Button
           variant="outline"
-          className="mb-4 h-11 justify-start gap-2 rounded-xl border-[#e1e4e8] bg-white px-3 text-sm font-medium shadow-sm hover:bg-white dark:border-slate-800 dark:bg-[#171a21]"
+          className="mb-3 h-10 shrink-0 justify-start gap-2 rounded-xl border-[#e1e4e8] bg-white px-3 text-sm font-medium shadow-sm hover:bg-white dark:border-slate-800 dark:bg-[#171a21] lg:mb-4 lg:h-11"
           onClick={() => navigate('/workspace/chat?new=1')}
         >
           <Plus className="h-4 w-4" />
@@ -329,7 +329,7 @@ export function Sidebar() {
       )}
 
       {/* ========== 导航菜单区域（可滚动） ========== */}
-      <nav className="flex-1 overflow-y-auto">
+      <nav className="min-h-0 flex-1 overflow-y-auto pr-1">
         {/* 区域标题 */}
         <div className={cn('mb-2 px-2 text-xs font-medium text-muted-foreground', collapsed && 'sr-only')}>
           {isAdminRoute ? '管理后台' : '工作区'}
@@ -505,7 +505,7 @@ export function Sidebar() {
       </nav>
 
       {/* ========== 底部区域 ========== */}
-      <div className="space-y-3 pt-4">
+      <div className="shrink-0 space-y-2 border-t border-slate-200/70 pt-2 dark:border-slate-800 lg:space-y-3 lg:pt-3">
         {/* LLM 模型状态指示器（仅展开状态显示） */}
         {!collapsed && (isAuthenticated ? llmStatus : true) && (
           <div
@@ -528,7 +528,7 @@ export function Sidebar() {
               type="button"
               onClick={() => setTheme('light')}
               className={cn(
-                'flex h-8 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition-colors',
+                'flex h-7 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition-colors lg:h-8',
                 theme === 'light' ? 'bg-white text-foreground shadow-sm dark:bg-slate-900' : 'text-muted-foreground',
               )}
             >
@@ -539,7 +539,7 @@ export function Sidebar() {
               type="button"
               onClick={() => setTheme('dark')}
               className={cn(
-                'flex h-8 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition-colors',
+                'flex h-7 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition-colors lg:h-8',
                 theme === 'dark' ? 'bg-white text-foreground shadow-sm dark:bg-slate-900' : 'text-muted-foreground',
               )}
             >
@@ -550,7 +550,7 @@ export function Sidebar() {
         )}
 
         {/* 用户信息 + 设置 + 登出 */}
-        <div className={cn('flex items-center gap-2 rounded-lg px-1 py-2', collapsed && 'justify-center px-0')}>
+        <div className={cn('flex items-center gap-2 rounded-lg px-1 py-1.5 lg:py-2', collapsed && 'justify-center px-0')}>
           {/* 用户头像和名称，点击打开个人资料 */}
           <button
             type="button"

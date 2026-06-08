@@ -18,6 +18,14 @@ import {
 } from 'lucide-react'
 
 type PreviewSlide = 'chat' | 'materials' | 'summary'
+type IntroTargetMetrics = {
+  titleX: number
+  titleY: number
+  titleScale: number
+  subtitleX: number
+  subtitleY: number
+  subtitleScale: number
+}
 
 const previewSlides: Array<{ id: PreviewSlide; title: string; desc: string }> = [
   { id: 'chat', title: '智能问答工作台', desc: '围绕资料提问，答案带来源引用' },
@@ -56,8 +64,108 @@ const navItems = [
 
 const TRACK_TRANSITION_MS = 1450
 const CAROUSEL_INTERVAL_MS = 3500
+const INTRO_STORAGE_KEY = 'landing-intro-seen'
+const INTRO_DURATION_MS = 2600
+const DEFAULT_INTRO_TARGET: IntroTargetMetrics = {
+  titleX: 0,
+  titleY: -170,
+  titleScale: 0.72,
+  subtitleX: 0,
+  subtitleY: 34,
+  subtitleScale: 0.86,
+}
 
 const landingAnimationCss = `
+@keyframes introOverlayExit {
+  0%, 86% { opacity: 1; }
+  100% { opacity: 0; visibility: hidden; }
+}
+
+@keyframes introSceneRise {
+  from { opacity: 0; transform: translateY(18px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes introTitleSettle {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 42px, 0) scale(1.18);
+  }
+  16%, 44% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1.18);
+  }
+  78%, 100% {
+    opacity: 1;
+    transform: translate3d(var(--intro-title-x), var(--intro-title-y), 0) scale(var(--intro-title-scale));
+  }
+}
+
+@keyframes introSubtitleSettle {
+  0%, 18% {
+    opacity: 0;
+    transform: translate3d(0, 24px, 0) scale(1.05);
+  }
+  36%, 48% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1.05);
+  }
+  78%, 100% {
+    opacity: 1;
+    transform: translate3d(var(--intro-subtitle-x), var(--intro-subtitle-y), 0) scale(var(--intro-subtitle-scale));
+  }
+}
+
+@keyframes introFragmentGather {
+  0% {
+    opacity: 0;
+    transform: translate3d(var(--fragment-start-x), var(--fragment-start-y), 0) scale(.92);
+  }
+  20%, 48% {
+    opacity: 1;
+    transform: translate3d(var(--fragment-mid-x), var(--fragment-mid-y), 0) scale(1);
+  }
+  74%, 100% {
+    opacity: 0;
+    transform: translate3d(var(--fragment-end-x), var(--fragment-end-y), 0) scale(.72);
+  }
+}
+
+@keyframes introLineTrace {
+  0%, 22% { stroke-dashoffset: 180; opacity: 0; }
+  42%, 64% { stroke-dashoffset: 0; opacity: .55; }
+  100% { stroke-dashoffset: 0; opacity: 0; }
+}
+
+@keyframes introNodePulse {
+  0%, 100% { opacity: .5; transform: scale(.88); }
+  50% { opacity: 1; transform: scale(1.12); }
+}
+
+@keyframes introScan {
+  0% { transform: translateX(-130%); opacity: 0; }
+  18% { opacity: .85; }
+  100% { transform: translateX(130%); opacity: 0; }
+}
+
+@keyframes introPageReveal {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes introRealTitleReveal {
+  0%, 78% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
 @keyframes landingFloat {
   0%, 100% { transform: translate3d(0, 0, 0); }
   50% { transform: translate3d(0, -10px, 0); }
@@ -156,6 +264,56 @@ const landingAnimationCss = `
   --pointer-x: 50%;
   --pointer-y: 28%;
   --carousel-overlap: 180px;
+}
+
+.intro-overlay {
+  animation: introOverlayExit 2.6s cubic-bezier(.22, 1, .36, 1) forwards;
+}
+
+.intro-stage {
+  animation: introSceneRise .42s cubic-bezier(.22, 1, .36, 1) both;
+}
+
+.intro-title-ghost {
+  transform-origin: center center;
+  animation: introTitleSettle 2.6s cubic-bezier(.2, .82, .18, 1) forwards;
+}
+
+.intro-subtitle-ghost {
+  transform-origin: center center;
+  animation: introSubtitleSettle 2.6s cubic-bezier(.2, .82, .18, 1) forwards;
+}
+
+.intro-fragment {
+  animation: introFragmentGather 2.6s cubic-bezier(.22, 1, .36, 1) forwards;
+}
+
+.intro-network {
+  animation: introSceneRise .58s cubic-bezier(.22, 1, .36, 1) .38s both;
+}
+
+.intro-line {
+  stroke-dasharray: 180;
+  animation: introLineTrace 2.6s cubic-bezier(.22, 1, .36, 1) forwards;
+}
+
+.intro-node-dot {
+  animation: introNodePulse 1.15s ease-in-out infinite;
+}
+
+.intro-stage {
+  min-height: min(760px, calc(100vh - 96px));
+}
+
+.intro-real-title,
+.intro-real-subtitle {
+  opacity: 0;
+  animation: introRealTitleReveal .28s ease 2.18s forwards;
+}
+
+.intro-page-reveal {
+  opacity: 0;
+  animation: introPageReveal .64s cubic-bezier(.22, 1, .36, 1) forwards;
 }
 
 .landing-bg::before {
@@ -489,10 +647,17 @@ const landingAnimationCss = `
   .carousel-panel {
     transition: none !important;
   }
+
 }
+
 `
 
 export function ProductLandingPage() {
+  const [showIntro, setShowIntro] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return window.sessionStorage.getItem(INTRO_STORAGE_KEY) !== '1'
+  })
+  const [introFinished, setIntroFinished] = useState(false)
   const [activeSlide, setActiveSlide] = useState(0)
   const [trackIndex, setTrackIndex] = useState(2)
   const [trackTransitionEnabled, setTrackTransitionEnabled] = useState(true)
@@ -503,6 +668,9 @@ export function ProductLandingPage() {
   const trackIndexRef = useRef(2)
   const isTrackAnimatingRef = useRef(false)
   const resetTimerRef = useRef<number | null>(null)
+  const heroTitleRef = useRef<HTMLHeadingElement | null>(null)
+  const heroSubtitleRef = useRef<HTMLParagraphElement | null>(null)
+  const [introTarget, setIntroTarget] = useState<IntroTargetMetrics>(DEFAULT_INTRO_TARGET)
 
   const carouselItems = useMemo(() => {
     const lastIndex = previewSlides.length - 1
@@ -529,6 +697,30 @@ export function ProductLandingPage() {
     }) as CSSProperties,
     [carouselOverlap, pointer],
   )
+
+  const measureIntroTarget = () => {
+    const titleRect = heroTitleRef.current?.getBoundingClientRect()
+    const subtitleRect = heroSubtitleRef.current?.getBoundingClientRect()
+    if (!titleRect || !subtitleRect) return
+
+    // 开屏标题先在视口中心出现，再移动到真实 H1 / 副标题的中心点。
+    const viewportCenterX = window.innerWidth / 2
+    const titleStartCenterY = window.innerHeight * 0.42
+    const subtitleStartCenterY = window.innerHeight * 0.62
+    const titleCenterX = titleRect.left + titleRect.width / 2
+    const titleCenterY = titleRect.top + titleRect.height / 2
+    const subtitleCenterX = subtitleRect.left + subtitleRect.width / 2
+    const subtitleCenterY = subtitleRect.top + subtitleRect.height / 2
+
+    setIntroTarget({
+      titleX: Math.round(titleCenterX - viewportCenterX),
+      titleY: Math.round(titleCenterY - titleStartCenterY),
+      titleScale: Number(Math.min(1, Math.max(0.42, titleRect.width / Math.min(window.innerWidth * 0.9, 980))).toFixed(3)),
+      subtitleX: Math.round(subtitleCenterX - viewportCenterX),
+      subtitleY: Math.round(subtitleCenterY - subtitleStartCenterY),
+      subtitleScale: Number(Math.min(1, Math.max(0.62, subtitleRect.width / Math.min(window.innerWidth * 0.78, 760))).toFixed(3)),
+    })
+  }
 
   const startSlideChange = (nextSlide: number, nextTrackIndex: number) => {
     if (isTrackAnimatingRef.current) return
@@ -598,6 +790,28 @@ export function ProductLandingPage() {
     return () => clearCarouselTimers()
   }, [])
 
+  useEffect(() => {
+    if (!showIntro) return
+
+    measureIntroTarget()
+    window.addEventListener('resize', measureIntroTarget)
+
+    return () => window.removeEventListener('resize', measureIntroTarget)
+  }, [showIntro])
+
+  const finishIntro = () => {
+    // 同一个浏览器会话只播放一次，跳过和自然播放结束都写入这个标记。
+    window.sessionStorage.setItem(INTRO_STORAGE_KEY, '1')
+    setIntroFinished(true)
+    setShowIntro(false)
+  }
+
+  const introClass = (introAnimation: string, defaultAnimation: string) => {
+    // 开屏结束后直接显示最终首页，避免从 intro 状态切回 rise-in 时二次淡入。
+    if (showIntro) return introAnimation
+    return introFinished ? '' : defaultAnimation
+  }
+
   return (
     <main
       className="landing-page min-h-screen overflow-hidden bg-[#eef3f7] text-[#222833]"
@@ -609,6 +823,7 @@ export function ProductLandingPage() {
       }}
     >
       <style>{landingAnimationCss}</style>
+      {showIntro && <LandingIntroOverlay target={introTarget} onFinish={finishIntro} />}
 
       <div className="landing-bg pointer-events-none fixed inset-0">
         <LandingMotionCanvas />
@@ -621,7 +836,7 @@ export function ProductLandingPage() {
       </div>
 
       <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col px-5 py-6 sm:px-8 lg:px-10">
-        <header className="rise-in flex items-center justify-between gap-4">
+        <header className={`${introClass('intro-page-reveal [animation-delay:2.06s]', 'rise-in')} flex items-center justify-between gap-4`}>
           <Link to="/" className="flex min-w-0 items-center gap-3">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl border border-white bg-white shadow-[0_18px_45px_rgba(34,40,51,0.10)]">
               <BrainCircuit className="h-5 w-5 text-[#222833]" />
@@ -655,7 +870,7 @@ export function ProductLandingPage() {
         </header>
 
         <section className="flex flex-1 flex-col items-center pb-10 pt-9 text-center sm:pt-12">
-          <div className="rise-in inline-flex items-center gap-2 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_50px_rgba(34,40,51,0.08)] [animation-delay:.06s]">
+          <div className={`${introClass('intro-page-reveal [animation-delay:1.9s]', 'rise-in [animation-delay:.06s]')} inline-flex items-center gap-2 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_50px_rgba(34,40,51,0.08)]`}>
             <span className="relative flex h-2 w-2">
               <span className="pulse-node absolute inline-flex h-full w-full rounded-full bg-slate-500 opacity-40" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-slate-700" />
@@ -663,19 +878,25 @@ export function ProductLandingPage() {
             资料驱动的 AI 学习工作台
           </div>
 
-          <h1 className="rise-in mt-6 max-w-5xl text-4xl font-black leading-[1.08] tracking-normal text-[#1f2933] sm:text-6xl lg:text-7xl [animation-delay:.12s]">
+          <h1
+            ref={heroTitleRef}
+            className={`${introClass('intro-real-title', 'rise-in [animation-delay:.12s]')} mt-6 max-w-5xl text-4xl font-black leading-[1.08] tracking-normal text-[#1f2933] sm:text-6xl lg:text-7xl`}
+          >
             <span className="hidden sm:inline">让每份资料都变成</span>
             <span className="block sm:hidden">让资料变成</span>
             <span className="block text-slate-500">可追问的学习助手</span>
           </h1>
 
-          <div className="hero-rule rise-in mt-5 [animation-delay:.15s]" />
+          <div className={`hero-rule mt-5 ${introClass('intro-page-reveal [animation-delay:2.2s]', 'rise-in [animation-delay:.15s]')}`} />
 
-          <p className="rise-in mt-4 max-w-2xl text-base leading-8 text-slate-500 sm:text-lg [animation-delay:.18s]">
-            上传文档、切换资料问答、查看来源引用和自动总结。首页预览直接模拟项目工作台，展示用户真正会用到的学习流程。
+          <p
+            ref={heroSubtitleRef}
+            className={`${introClass('intro-real-subtitle', 'rise-in [animation-delay:.18s]')} mt-4 max-w-3xl text-base leading-8 text-slate-500 sm:text-lg`}
+          >
+            上传文档后自动构建 RAG 知识索引，支持资料问答、来源引用、临时附件追问和自动总结。首页预览模拟真实工作台，展示从资料管理到智能问答的完整学习流程。
           </p>
 
-          <div className="rise-in mt-6 flex w-full flex-col items-center justify-center gap-3 sm:flex-row [animation-delay:.24s]">
+          <div className={`${introClass('intro-page-reveal [animation-delay:2.28s]', 'rise-in [animation-delay:.24s]')} mt-6 flex w-full flex-col items-center justify-center gap-3 sm:flex-row`}>
             <Link
               to="/workspace/chat?new=1"
               className="inline-flex h-12 w-full max-w-[220px] items-center justify-center gap-2 rounded-full bg-[#222833] px-7 text-sm font-black text-white shadow-[0_20px_50px_rgba(34,40,51,0.22)] transition hover:-translate-y-0.5 hover:bg-[#111827]"
@@ -691,7 +912,7 @@ export function ProductLandingPage() {
             </Link>
           </div>
 
-          <section id="preview" className="rise-in mt-7 w-full max-w-6xl text-left sm:mt-8 [animation-delay:.3s]">
+          <section id="preview" className={`${introClass('intro-page-reveal [animation-delay:2.38s]', 'rise-in [animation-delay:.3s]')} mt-7 w-full max-w-6xl text-left sm:mt-8`}>
             <div className="preview-shell rounded-[20px] bg-white p-3 shadow-[0_34px_90px_rgba(34,40,51,0.16)]">
               <span className="corner-glow" aria-hidden="true" />
               <div className="relative overflow-visible">
@@ -943,6 +1164,160 @@ function LandingMotionCanvas() {
   }, [])
 
   return <canvas ref={canvasRef} className="landing-motion-canvas absolute inset-0 h-full w-full opacity-55" aria-hidden="true" />
+}
+
+function LandingIntroOverlay({
+  target,
+  onFinish,
+}: {
+  target: IntroTargetMetrics
+  onFinish: () => void
+}) {
+  const finishRef = useRef(onFinish)
+
+  useEffect(() => {
+    finishRef.current = onFinish
+  }, [onFinish])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => finishRef.current(), INTRO_DURATION_MS)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  const fragments = [
+    {
+      label: '上传文档',
+      startX: '-38vw',
+      startY: '-26vh',
+      midX: '-29vw',
+      midY: '-15vh',
+      endX: '-12vw',
+      endY: '-6vh',
+    },
+    {
+      label: 'RAG 知识索引',
+      startX: '36vw',
+      startY: '-24vh',
+      midX: '25vw',
+      midY: '-13vh',
+      endX: '10vw',
+      endY: '-5vh',
+    },
+    {
+      label: '来源引用',
+      startX: '-36vw',
+      startY: '24vh',
+      midX: '-27vw',
+      midY: '13vh',
+      endX: '-10vw',
+      endY: '5vh',
+    },
+    {
+      label: '自动总结',
+      startX: '34vw',
+      startY: '24vh',
+      midX: '25vw',
+      midY: '14vh',
+      endX: '11vw',
+      endY: '5vh',
+    },
+  ]
+
+  // 动画标题以真实首页标题的测量结果为终点，结束时由真实标题接管画面。
+  const overlayStyle = {
+    '--intro-title-x': `${target.titleX}px`,
+    '--intro-title-y': `${target.titleY}px`,
+    '--intro-title-scale': target.titleScale,
+    '--intro-subtitle-x': `${target.subtitleX}px`,
+    '--intro-subtitle-y': `${target.subtitleY}px`,
+    '--intro-subtitle-scale': target.subtitleScale,
+  } as CSSProperties
+
+  return (
+    <div
+      className="intro-overlay fixed inset-0 z-[80] overflow-hidden bg-[#eef3f7] px-5 text-[#222833] sm:px-8 lg:px-10"
+      style={overlayStyle}
+      aria-label="正在展示首页标题归位动画"
+      role="status"
+    >
+      <div className="pointer-events-none absolute inset-0">
+        <div className="landing-bg absolute inset-0" />
+        <div className="bg-flow-line top-[36%]" />
+        <div className="bg-flow-line top-[70%]" />
+        <div className="absolute inset-x-0 top-0 h-48 bg-gradient-to-b from-white/85 to-transparent" />
+      </div>
+
+      <button
+        type="button"
+        className="absolute right-5 top-5 z-10 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_48px_rgba(34,40,51,0.12)] backdrop-blur transition hover:bg-white focus:outline-none focus:ring-2 focus:ring-slate-400"
+        onClick={onFinish}
+      >
+        跳过
+      </button>
+
+      <section className="intro-stage relative z-10 mx-auto h-screen w-full max-w-7xl py-7 sm:py-9">
+        <div className="pointer-events-none absolute inset-x-0 top-7 flex justify-center sm:top-9">
+          <div className="inline-flex items-center gap-2 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_48px_rgba(34,40,51,0.08)] backdrop-blur">
+            <span className="intro-node-dot h-2 w-2 rounded-full bg-slate-700" />
+            正在构建 RAG 知识索引
+          </div>
+        </div>
+
+        <div className="relative h-full">
+          <svg
+            className="intro-network pointer-events-none absolute left-1/2 top-1/2 h-[min(560px,78vh)] w-[min(980px,96vw)] -translate-x-1/2 -translate-y-1/2"
+            viewBox="0 0 980 560"
+            aria-hidden="true"
+          >
+            <path className="intro-line" d="M490 280 C386 220 312 176 220 150" fill="none" stroke="rgba(34,40,51,.24)" strokeWidth="2" />
+            <path className="intro-line" d="M490 280 C586 214 676 170 780 146" fill="none" stroke="rgba(34,40,51,.24)" strokeWidth="2" />
+            <path className="intro-line" d="M490 280 C394 340 312 392 220 424" fill="none" stroke="rgba(34,40,51,.24)" strokeWidth="2" />
+            <path className="intro-line" d="M490 280 C584 348 672 392 790 424" fill="none" stroke="rgba(34,40,51,.24)" strokeWidth="2" />
+            <path className="intro-line" d="M300 178 C410 158 570 158 690 178" fill="none" stroke="rgba(34,40,51,.16)" strokeWidth="1.5" />
+            <path className="intro-line" d="M298 404 C410 430 586 430 700 402" fill="none" stroke="rgba(34,40,51,.16)" strokeWidth="1.5" />
+            <circle cx="490" cy="280" r="42" fill="rgba(34,40,51,.08)" />
+            <circle className="intro-node-dot" cx="490" cy="280" r="8" fill="rgba(34,40,51,.78)" />
+            <circle cx="220" cy="150" r="10" fill="rgba(34,40,51,.18)" />
+            <circle cx="780" cy="146" r="10" fill="rgba(34,40,51,.18)" />
+            <circle cx="220" cy="424" r="10" fill="rgba(34,40,51,.18)" />
+            <circle cx="790" cy="424" r="10" fill="rgba(34,40,51,.18)" />
+          </svg>
+
+          {fragments.map((fragment, index) => (
+            <div
+              key={fragment.label}
+              className="intro-fragment absolute left-1/2 top-1/2 rounded-full border border-white bg-white/88 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_54px_rgba(34,40,51,.11)] backdrop-blur sm:px-5 sm:py-2.5 sm:text-sm"
+              style={{
+                '--fragment-start-x': fragment.startX,
+                '--fragment-start-y': fragment.startY,
+                '--fragment-mid-x': fragment.midX,
+                '--fragment-mid-y': fragment.midY,
+                '--fragment-end-x': fragment.endX,
+                '--fragment-end-y': fragment.endY,
+                animationDelay: `${index * 70}ms`,
+              } as CSSProperties}
+            >
+              {fragment.label}
+            </div>
+          ))}
+
+          <div className="pointer-events-none absolute left-1/2 top-[42%] w-[min(980px,90vw)] -translate-x-1/2 -translate-y-1/2 text-center">
+            <div className="intro-title-ghost text-[2.35rem] font-black leading-[1.03] tracking-normal text-[#1f2933] sm:text-7xl lg:text-8xl">
+              <span className="hidden sm:inline">让每份资料都变成</span>
+              <span className="block sm:hidden">让资料变成</span>
+              <span className="block text-slate-500">可追问的学习助手</span>
+            </div>
+          </div>
+
+          <div className="pointer-events-none absolute left-1/2 top-[62%] w-[min(760px,84vw)] -translate-x-1/2 -translate-y-1/2 text-center">
+            <p className="intro-subtitle-ghost text-base font-bold leading-8 text-slate-500 sm:text-xl sm:leading-9">
+              上传文档后自动构建 RAG 知识索引，支持资料问答、来源引用、临时附件追问和自动总结。首页预览模拟真实工作台，展示从资料管理到智能问答的完整学习流程。
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
 }
 
 function PreviewFrame({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {

@@ -44,6 +44,18 @@ public class MaterialSummaryEntity {
     @Column(name = "summary_type", nullable = false, length = 40)
     private String summaryType;
 
+    /** 结构化摘要 JSON，包含通用要点、章节脉络等 */
+    @Column(name = "structured_json", columnDefinition = "LONGTEXT")
+    private String structuredJson;
+
+    /** 摘要来源 JSON，包含可跳转 chunk/page 信息 */
+    @Column(name = "sources_json", columnDefinition = "LONGTEXT")
+    private String sourcesJson;
+
+    /** 用户在 AI 摘要基础上整理后的个人版本 */
+    @Column(name = "user_note", columnDefinition = "TEXT")
+    private String userNote;
+
     /** 生成摘要所使用的模型名称 */
     @Column(name = "model_name", nullable = false, length = 80)
     private String modelName;
@@ -96,6 +108,30 @@ public class MaterialSummaryEntity {
 
     public void setSummaryType(String summaryType) {
         this.summaryType = summaryType;
+    }
+
+    public String getStructuredJson() {
+        return structuredJson;
+    }
+
+    public void setStructuredJson(String structuredJson) {
+        this.structuredJson = structuredJson;
+    }
+
+    public String getSourcesJson() {
+        return sourcesJson;
+    }
+
+    public void setSourcesJson(String sourcesJson) {
+        this.sourcesJson = sourcesJson;
+    }
+
+    public String getUserNote() {
+        return userNote;
+    }
+
+    public void setUserNote(String userNote) {
+        this.userNote = userNote;
     }
 
     public String getModelName() {

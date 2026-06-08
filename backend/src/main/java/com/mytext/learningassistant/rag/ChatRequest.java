@@ -18,7 +18,7 @@ import jakarta.validation.constraints.Size;
  * @param currentPageNo      当前正在阅读的页码（可选，用于获取同页上下文）
  * @param currentPageChunkIds 当前页面包含的所有 chunk ID 列表（可选，用于精确定位当前页内容）
  * @param selectedText       用户选中的原文文本（可选，选中后基于选中内容回答）
- * @param images             用户上传的图片列表（可选，最多 4 张，用于多模态问答）
+ * @param images             用户上传的图片列表（可选，最多 8 张，用于多模态问答）
  * @param temporaryMaterial  用户上传的临时资料附件（可选，仅随对话历史保存）
  * @param answerStyle        回答风格（可选）："STUDY" 学习模式、"HOMEWORK" 作业模式
  * @param history            对话历史列表（可选，用于多轮对话上下文）
