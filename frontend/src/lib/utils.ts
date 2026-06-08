@@ -29,6 +29,7 @@ export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB']
+  // 通过对数定位单位层级，避免手写多段 if/else。
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
 }
@@ -49,6 +50,7 @@ export function formatDate(value: string | Date): string {
   }
   // 有时区信息的字符串或 Date 对象，格式化输出
   const date = value instanceof Date ? value : new Date(value)
+  // 这里使用本地时区展示带时区数据，符合浏览器用户的实际时间感知。
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
@@ -81,6 +83,7 @@ export function sanitizeAiText(text: string): string {
 export function cleanTemporaryMaterialText(text: string): string {
   if (!text) return ''
   return text
+    // 临时资料没有持久化图片资源，移除内部图片占位符避免泄漏实现细节。
     .replace(/\[\[material-image:[^\]]+\]\]\s*/g, '')
     .replace(/^\[image ocr:[^\]]+\]\s*$/gim, '')
     .replace(/^第\s*\d+\s*页暂无可抽取文本；.*$/gm, '')
@@ -99,6 +102,7 @@ export function cleanTemporaryMaterialText(text: string): string {
 export function buildUploadChunks(file: File, chunkSize = 5 * 1024 * 1024): Blob[] {
   const chunks: Blob[] = []
   for (let offset = 0; offset < file.size; offset += chunkSize) {
+    // slice 只创建 Blob 视图，不会一次性复制整份文件内容。
     chunks.push(file.slice(offset, Math.min(file.size, offset + chunkSize)))
   }
   return chunks

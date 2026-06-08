@@ -163,8 +163,10 @@ public class RateLimitService {
             return;
         }
         // 构建键名并递增计数，TTL 到期自动归零
+        // identity 先标准化再入 key，防止大小写或空白字符绕过同一限流桶。
         long count = stateStore.incrementAndGet("rate:" + bucket + ":" + normalize(identity), WINDOW_TTL);
         if (count > limit) {
+            // 统一抛 429，让控制层和前端可以按 HTTP 语义处理重试。
             throw new BusinessException(429, "请求过于频繁，请稍后再试");
         }
     }

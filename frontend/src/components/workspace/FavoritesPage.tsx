@@ -25,10 +25,15 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog'
 import { formatDate, truncate } from '@/lib/utils'
+import { useAuth } from '@/context/AuthContext'
+import { useToast } from '@/components/ui/toast'
+import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
 import { Search, Star, Trash2, Eye } from 'lucide-react'
 import type { FavoriteItem } from '@/types'
 
 export function FavoritesPage() {
+  const { isAuthenticated } = useAuth()
+  const { showToast } = useToast()
   // 获取收藏列表数据和加载状态
   const { data: items = [], isLoading } = useFavorites()
   // 删除收藏的 mutation，调用 mutate(id) 即可触发
@@ -47,6 +52,7 @@ export function FavoritesPage() {
   // 根据关键词过滤收藏列表：同时匹配问题和回答内容
   const filtered = debouncedKeyword
     ? items.filter((f) =>
+        // 收藏页只做本地模糊搜索，问题和回答任一命中即可展示。
         f.question.toLowerCase().includes(debouncedKeyword.toLowerCase()) ||
         f.answer.toLowerCase().includes(debouncedKeyword.toLowerCase())
       )
@@ -54,7 +60,13 @@ export function FavoritesPage() {
 
   // 确认删除收藏的回调
   const handleDeleteConfirm = () => {
+    if (!isAuthenticated) {
+      showToast(LOGIN_REQUIRED_MESSAGE, 2000)
+      redirectToLogin()
+      return
+    }
     if (deleteTarget) {
+      // 删除成功后只关闭确认弹窗，列表刷新由 useDeleteFavorite 的缓存失效逻辑处理。
       deleteMutation.mutate(deleteTarget, {
         onSuccess: () => setDeleteTarget(null), // 删除成功后关闭弹窗
       })

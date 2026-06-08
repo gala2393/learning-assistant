@@ -97,6 +97,7 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
         try {
             List<Map<String, Object>> points = new ArrayList<>();
             for (MaterialChunkEntity chunk : chunks) {
+                // 只写入已经持久化且有向量的 chunk，避免 Qdrant payload 指向不存在的数据库记录。
                 // 跳过尚未持久化（无 ID）的文本块
                 if (chunk.getId() == null) {
                     continue;
@@ -127,6 +128,7 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
                 return;
             }
             // 批量写入 Qdrant，wait=true 表示等待写入完成
+            // 使用 upsert 的确定性 pointId，重复解析同一 chunk 会覆盖旧点而不是制造重复向量。
             Map<String, Object> body = Map.of("points", points);
             sendJson("PUT", collectionUri("/points?wait=true"), body);
         } catch (Exception ignored) {
@@ -174,6 +176,7 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
         try {
             // 确保集合存在
             ensureCollection(queryEmbedding.size());
+            // 搜索必须带 user/material 过滤条件，防止跨用户资料在向量相似度结果中串出。
             // 构造搜索请求体
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("vector", queryEmbedding);     // 查询向量
@@ -224,6 +227,7 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
             return;
         }
         // 检查集合是否已存在
+        // 本地缓存只能减少重复检查；真实存在性仍以 Qdrant 响应为准。
         HttpResponse<String> existing = send("GET", collectionUri(""), null);
         if (existing.statusCode() >= 200 && existing.statusCode() < 300) {
             ensuredDimensions.add(vectorSize);

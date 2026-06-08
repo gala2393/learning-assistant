@@ -154,12 +154,14 @@ export function EvaluationPage() {
   const { data: suiteRuns = [] } = useEvaluationSuiteRuns(selectedSuiteId)
 
   const parsedMaterials = useMemo(
+    // 评估只允许选择已解析成功的资料，避免运行时 RAG 检索不到 chunk。
     () => materials.filter((material) => material.parseStatus === 'SUCCESS' || material.parseStatus === 'PARSED'),
     [materials],
   )
 
   useEffect(() => {
     if (!suiteDetail) return
+    // 切换已保存套件时，用服务端详情覆盖本地草稿，避免继续编辑上一套件残留字段。
     setSuiteName(suiteDetail.name)
     setSuiteDescription(suiteDetail.description || '')
     setScheduled(suiteDetail.scheduled)
@@ -179,6 +181,7 @@ export function EvaluationPage() {
   const buildPayload = () => ({
     cases: readyCases.map((item) => ({
       question: item.question.trim(),
+      // GENERAL_SCOPE 是前端哨兵值，提交给后端时还原为 null 表示通用检索范围。
       materialId: item.materialId === GENERAL_SCOPE ? null : item.materialId,
       expectedAnswerTerms: parseTerms(item.expectedAnswerTerms),
       expectedSourceTerms: parseTerms(item.expectedSourceTerms),
@@ -190,6 +193,7 @@ export function EvaluationPage() {
   }
 
   const removeCase = (id: string) => {
+    // 至少保留一个空用例，避免表单区域被删空后用户找不到新增入口。
     setCases((current) => (current.length === 1 ? [emptyCase()] : current.filter((item) => item.id !== id)))
   }
 
@@ -205,6 +209,7 @@ export function EvaluationPage() {
 
   const handleRunAdHoc = () => {
     if (!canRun) {
+      // 即时运行不要求保存套件，但必须至少有一个有效问题。
       showToast('请先添加至少一个评估问题。')
       return
     }
@@ -231,6 +236,7 @@ export function EvaluationPage() {
     }
 
     if (selectedSuiteId) {
+      // 已选中套件时走更新接口，保持运行历史和定时配置关联在同一个 suiteId 下。
       updateSuite.mutate(
         { id: selectedSuiteId, payload },
         {
@@ -281,6 +287,7 @@ export function EvaluationPage() {
 
   const handleScheduleUpdate = () => {
     if (!selectedSuiteId) {
+      // 定时回归必须绑定持久化套件，临时草稿无法被后台调度任务引用。
       showToast('请先保存套件，再启用定时回归。')
       return
     }
@@ -305,6 +312,7 @@ export function EvaluationPage() {
 
   const exportResult = () => {
     if (!result) return
+    // 导出当前即时/最新结果，生成临时 ObjectURL 后立即释放，避免长期占用内存。
     const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')

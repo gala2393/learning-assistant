@@ -7,6 +7,7 @@ import { RegisterForm } from '@/components/auth/RegisterForm'
 import { AppShell } from '@/components/layout/AppShell'
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute'
 import { RouteFallback } from '@/components/layout/RouteFallback'
+import { ProductLandingPage } from '@/components/landing/ProductLandingPage'
 import { ChatPage } from '@/components/workspace/ChatPage'
 import { MaterialsPage } from '@/components/workspace/MaterialsPage'
 import { ReaderPage } from '@/components/workspace/ReaderPage'
@@ -52,7 +53,7 @@ export const router = createBrowserRouter([
     element: <App />,  // App 是根组件（ToastProvider + Outlet）
     children: [
       // 根路径重定向到登录页
-      { index: true, element: <Navigate to="/login" replace /> },
+      { index: true, element: <ProductLandingPage /> },
 
       // ===== 认证页面（不需要登录） =====
       {
@@ -67,7 +68,7 @@ export const router = createBrowserRouter([
       // ===== 工作区（需要登录） =====
       {
         path: 'workspace',
-        element: <ProtectedRoute />,  // 路由守卫：未登录则跳转到 /login
+        element: <ProtectedRoute allowGuest />,  // 工作区允许游客预览；具体功能入口再提示登录
         children: [
           {
             element: <AppShell />,  // AppShell 提供侧边栏 + 顶栏 + 内容区布局

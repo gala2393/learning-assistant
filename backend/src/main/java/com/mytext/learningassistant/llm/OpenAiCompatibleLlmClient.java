@@ -98,6 +98,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             JsonNode root = objectMapper.readTree(response.body());
 
             // 根据 API 格式提取内容
+            // 三种兼容接口返回结构不同，统一提取为业务层只关心的纯文本。
             String content = properties.responsesApi()
                 ? responsesContent(root)
                 : isAnthropicCompatible()
@@ -187,11 +188,13 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
                         String delta = parseResponsesDelta(json);
                         if (!delta.isEmpty()) {
                             fullContent.append(delta);
+                            // 回调只推送增量文本，完整内容由 fullContent 同步累积。
                             onChunk.accept(delta);  // 回调通知调用方
                         }
                     } else if (anthropic) {
                         // 处理 Anthropic Messages API 格式
                         if (line.startsWith("event: ")) {
+                            // Anthropic 的 SSE 事件类型和 data 分两行到达，需要暂存事件名。
                             pendingEventType = line.substring(7).trim();
                             continue;
                         }
@@ -219,6 +222,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
                         String delta = parseOpenAiDelta(json);
                         if (!delta.isEmpty()) {
                             fullContent.append(delta);
+                            // Chat Completions 流只从 choices[0].delta.content 取文本增量。
                             onChunk.accept(delta);  // 回调通知调用方
                         }
                     }
@@ -492,6 +496,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         }
 
         // 根据是否有图片选择不同的输入格式
+        // Responses API 多模态输入必须包成 role/content 数组，纯文本则可直接作为 input。
         Object input = images.isEmpty()
             ? nullToEmpty(userPrompt)
             : List.of(Map.of(
@@ -618,6 +623,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         Integer completionTokens = intOrNull(usage, "completion_tokens");
 
         // 如果 OpenAI 格式没有，尝试 Anthropic 格式
+        // Anthropic 使用 input/output 字段名，这里转成统一的 prompt/completion 口径。
         if (promptTokens == null) {
             promptTokens = intOrNull(usage, "input_tokens");
         }

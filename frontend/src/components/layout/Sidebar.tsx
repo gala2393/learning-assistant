@@ -68,6 +68,7 @@ import { useHistory, useDeleteHistory, useRenameHistory, useTogglePinHistory } f
 import { useToast } from '@/components/ui/toast'
 import { queryClient } from '@/lib/query-client'
 import { useAddFavorite, useDeleteFavorite, useFavorites } from '@/api/favorites'
+import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
 
 /**
  * 图标名称到组件的映射表
@@ -89,7 +90,7 @@ const iconMap: Record<string, React.ElementType> = {
 export function Sidebar() {
   const location = useLocation()
   const navigate = useNavigate()
-  const { session, isAdmin, logout } = useAuth()
+  const { session, isAuthenticated, isAdmin, logout } = useAuth()
   const { showToast } = useToast()
   // LLM 模型连接状态
   const [llmStatus, setLlmStatus] = useState<LlmStatus | null>(null)
@@ -131,10 +132,14 @@ export function Sidebar() {
    * 通过 GET /llm/status 接口查询
    */
   useEffect(() => {
+    if (!isAuthenticated) {
+      setLlmStatus(null)
+      return
+    }
     api.get('/llm/status')
       .then((res) => setLlmStatus(res.data))
       .catch(() => setLlmStatus(null))
-  }, [])
+  }, [isAuthenticated])
 
   /**
    * 主题切换副作用：
@@ -158,19 +163,29 @@ export function Sidebar() {
   // 从 URL 参数中获取当前选中的历史会话 ID
   const selectedHistoryId = new URLSearchParams(location.search).get('historyId')
   // LLM 是否已配置（优先使用用户自定义配置，其次使用全局配置）
-  const effectiveLlmConfigured = Boolean(llmStatus?.configured || userLlmConfig?.enabled)
+  const effectiveLlmConfigured = isAuthenticated && Boolean(llmStatus?.configured || userLlmConfig?.enabled)
   // LLM 状态显示文案
-  const effectiveLlmLabel = userLlmConfig?.enabled
+  const effectiveLlmLabel = !isAuthenticated
+    ? 'LLM 未连接'
+    : userLlmConfig?.enabled
     ? `${userLlmConfig.activeLabel || '自定义模型'} 已连接`
     : llmStatus?.configured
       ? 'LLM 已连接'
-      : 'LLM 未配置'
+      : 'LLM 未连接'
+
+  const requireLogin = () => {
+    if (isAuthenticated) return true
+    showToast(LOGIN_REQUIRED_MESSAGE, 2000)
+    redirectToLogin()
+    return false
+  }
 
   /**
    * 打开指定的历史会话
    * @param item - 历史会话记录
    */
   const openHistory = (item: HistoryItem) => {
+    if (!requireLogin()) return
     navigate(`/workspace/chat?historyId=${encodeURIComponent(String(item.id))}`)
   }
 
@@ -187,6 +202,7 @@ export function Sidebar() {
    * 弹出浏览器原生 prompt 输入新名称，确认后调用 API
    */
   const handleRename = (item: HistoryItem) => {
+    if (!requireLogin()) return
     const next = window.prompt('重命名会话', item.title || item.question)
     if (!next || !next.trim()) return
     renameHistoryMutation.mutate(
@@ -206,6 +222,7 @@ export function Sidebar() {
    * 切换历史会话的置顶状态
    */
   const handleTogglePin = (item: HistoryItem) => {
+    if (!requireLogin()) return
     togglePinHistoryMutation.mutate(String(item.id), {
       onSuccess: () => {
         showToast(item.pinned ? '已取消置顶' : '已置顶')
@@ -219,6 +236,7 @@ export function Sidebar() {
    * 删除历史会话
    */
   const handleDelete = (item: HistoryItem) => {
+    if (!requireLogin()) return
     deleteHistoryMutation.mutate(String(item.id), {
       onSuccess: () => {
         showToast('会话已删除')
@@ -234,6 +252,7 @@ export function Sidebar() {
    * - 未收藏 → 调用添加收藏 API
    */
   const handleToggleFavorite = (item: HistoryItem) => {
+    if (!requireLogin()) return
     const favoriteId = getFavoriteId(item)
     if (favoriteId) {
       deleteFavoriteMutation.mutate(favoriteId, {
@@ -488,7 +507,7 @@ export function Sidebar() {
       {/* ========== 底部区域 ========== */}
       <div className="space-y-3 pt-4">
         {/* LLM 模型状态指示器（仅展开状态显示） */}
-        {!collapsed && llmStatus && (
+        {!collapsed && (isAuthenticated ? llmStatus : true) && (
           <div
             className={cn(
               'flex items-center gap-2 rounded-lg px-3 py-2 text-xs',
@@ -539,26 +558,32 @@ export function Sidebar() {
               'flex min-w-0 items-center gap-3 rounded-lg px-1 py-1 text-left transition-colors hover:bg-[#eceef1] dark:hover:bg-white/[0.08]',
               collapsed ? 'justify-center' : 'flex-1',
             )}
-            onClick={() => setProfileOpen(true)}
-            title="修改个人资料"
+            onClick={() => {
+              if (!isAuthenticated) {
+                redirectToLogin(0)
+                return
+              }
+              setProfileOpen(true)
+            }}
+            title={isAuthenticated ? '修改个人资料' : '点击登录'}
           >
             <UserAvatar session={session} />
             {/* 展开状态下显示用户名和角色 */}
             {!collapsed && (
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{session?.nickname || session?.username}</div>
-                <div className="text-xs text-muted-foreground">{session?.role === 'ADMIN' ? '管理员' : '普通用户'}</div>
+                <div className="truncate text-sm font-medium">{session?.nickname || session?.username || '未登录'}</div>
+                <div className="text-xs text-muted-foreground">{session ? (session.role === 'ADMIN' ? '管理员' : '普通用户') : '点击登录'}</div>
               </div>
             )}
           </button>
           {/* 设置按钮（仅展开状态显示） */}
-          {!collapsed && (
+          {!collapsed && isAuthenticated && (
             <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setProfileOpen(true)} title="修改资料">
               <Settings className="h-4 w-4" />
             </Button>
           )}
           {/* 登出按钮（仅展开状态显示） */}
-          {!collapsed && (
+          {!collapsed && isAuthenticated && (
             <Button variant="ghost" size="icon" className="h-8 w-8" onClick={logout} title="退出登录">
               <LogOut className="h-4 w-4" />
             </Button>

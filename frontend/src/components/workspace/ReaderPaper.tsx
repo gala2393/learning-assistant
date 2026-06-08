@@ -516,6 +516,7 @@ export function ReaderPaper({
     const directPageNo = Number(chunk.pageNo)
     if (Number.isFinite(directPageNo) && directPageNo > 0) return directPageNo
     const chunkId = String(chunk.id)
+    // 旧数据可能没有 pageNo，只能反查页面的 chunkIds 来定位当前片段所在页。
     return pages.find((page) => page.chunkIds.map(String).includes(chunkId))?.pageNo || null
   }, [chunk.id, chunk.pageNo, pages])
   // 当前页码：优先覆盖值 > 片段页码 > 第一页
@@ -536,6 +537,7 @@ export function ReaderPaper({
   const pageChunkIndexes = useMemo(() => {
     if (!currentPage) return []
     const ids = new Set(currentPage.chunkIds.map(String))
+    // 生成当前页的片段索引列表，供页预览下方的片段标签和问答上下文复用。
     return chunks
       .map((candidate, index) => (ids.has(String(candidate.id)) ? index : -1))
       .filter((index) => index >= 0)
@@ -551,6 +553,20 @@ export function ReaderPaper({
 
   /** 资料切换时重置所有原文预览相关状态 */
   useEffect(() => {
+    setViewMode(defaultReaderViewMode(material))
+    setOriginalUrl('')
+    setOriginalLoading(false)
+    setOriginalProgress({ loaded: 0, total: null })
+    setOriginalError('')
+    setTextPreviewBlob(null)
+    setTextWindowOffset(0)
+    setTextWindowText('')
+    setTextWindowLoading(false)
+    if (originalObjectUrlRef.current) {
+      URL.revokeObjectURL(originalObjectUrlRef.current)
+      originalObjectUrlRef.current = null
+    }
+  }, [material?.id, material?.sourceType])
 
 /**
  * 原文预览文件加载效果
@@ -568,6 +584,7 @@ export function ReaderPaper({
     let cancelled = false
     const controller = new AbortController()
     if (originalObjectUrlRef.current) {
+      // 切换资料或预览类型前释放旧 ObjectURL，避免 iframe 资源泄漏。
       URL.revokeObjectURL(originalObjectUrlRef.current)
       originalObjectUrlRef.current = null
     }
@@ -587,6 +604,7 @@ export function ReaderPaper({
         })
         if (cancelled) return
         if (previewKind === 'text') {
+          // 文本文件不直接创建 iframe，先保存 Blob，再由下方窗口化读取 effect 分段解码。
           setTextWindowLoading(true)
           setTextPreviewBlob(blob)
           return
@@ -623,6 +641,7 @@ export function ReaderPaper({
     const end = Math.min(textPreviewBlob.size, start + TEXT_PREVIEW_BYTES)
 
     setTextWindowLoading(true)
+    // 大文本按固定字节窗口读取，避免一次解码整份资料造成页面卡顿。
     textPreviewBlob
       .slice(start, end)
       .arrayBuffer()
@@ -669,6 +688,7 @@ export function ReaderPaper({
     const headers: HeadersInit | undefined = token ? { Authorization: `Bearer ${token}` } : undefined
     const neighbors = [pages[currentPageIndex - 1], pages[currentPageIndex + 1]].filter(Boolean)
     neighbors.forEach((page) => {
+      // 预加载失败不影响当前阅读，只用于提升下一页/上一页的响应速度。
       fetch(imageUrl(material.id, page.imageName), { headers }).catch(() => undefined)
     })
   }, [currentPage, currentPageIndex, hasPagePreview, material?.id, pages])
@@ -685,6 +705,7 @@ export function ReaderPaper({
     if (!nextPage) return
     setCurrentPageOverride(nextPage.pageNo)
     const nextChunkIndex = chunks.findIndex((candidate) => Number(candidate.pageNo) === nextPage.pageNo)
+    // 翻页后同步到该页首个片段，让目录高亮和右侧问答上下文跟随页面变化。
     if (nextChunkIndex >= 0) onSelectChunk?.(nextChunkIndex)
   }
 

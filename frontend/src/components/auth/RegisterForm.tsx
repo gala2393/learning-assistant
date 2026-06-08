@@ -7,7 +7,7 @@
  *
  * 【核心流程】
  * 1. 用户填写邮箱地址（QQ 邮箱或 163 邮箱）
- * 2. 填写用户名（3-32 位，实时校验是否可用）
+ * 2. 填写用户名（1-32 位，实时校验是否可用）
  * 3. 设置密码并确认密码
  * 4. 发送并填写邮箱验证码
  * 5. 提交注册，成功后自动跳转到工作台
@@ -43,7 +43,7 @@ import { normalizeEmail, providerForEmail } from '@/lib/email'
  * 注册表单校验规则（Zod schema）
  * - emailPrefix: 邮箱前缀，1-64 字符
  * - emailDomain: 邮箱域名，只允许 qq.com 和 163.com
- * - username: 用户名，3-32 位
+ * - username: 用户名，1-32 位
  * - password: 密码，8-64 位
  * - confirmPassword: 确认密码，必须与 password 一致
  * - code: 6 位数字邮箱验证码
@@ -52,7 +52,7 @@ const registerSchema = z
   .object({
     emailPrefix: z.string().min(1, '请输入邮箱地址').max(64, '邮箱地址过长'),
     emailDomain: z.enum(['qq.com', '163.com']),
-    username: z.string().min(3, '用户名至少 3 位').max(32, '用户名最多 32 位'),
+    username: z.string().min(1, '请输入用户名').max(32, '用户名最多 32 位'),
     password: z.string().min(8, '密码至少 8 位').max(64, '密码最多 64 位'),
     confirmPassword: z.string(),
     code: z.string().regex(/^\d{6}$/, '请输入 6 位数字验证码'),
@@ -107,8 +107,8 @@ export function RegisterForm() {
 
   // 用户名防抖：输入停止 500ms 后才发起校验请求，避免频繁请求
   const debouncedUsername = useDebounce(username, 500)
-  // 用户名至少 3 位时才触发校验
-  const shouldCheck = debouncedUsername.length >= 3
+  // 用户名至少 1 位时触发校验
+  const shouldCheck = debouncedUsername.trim().length >= 1
   // 调用后端接口检查用户名是否可用
   const { data: usernameStatus, isLoading: checkingUsername } = useCheckUsername(debouncedUsername, shouldCheck)
 
@@ -200,8 +200,9 @@ export function RegisterForm() {
         <div className="absolute -bottom-28 -right-20 h-64 w-64 rounded-full border border-slate-300/60" />
         <div className="relative z-10">
           {/* 品牌 Logo */}
-          <div className="mx-auto mb-6 flex h-14 w-24 items-center justify-center rounded-2xl bg-[#e7edf3] px-4 text-base font-black text-[#222833] shadow-[8px_8px_18px_rgba(174,185,197,0.8),-8px_-8px_18px_rgba(255,255,255,0.9)]">
-            智学引擎
+          <div className="mx-auto mb-6 flex h-20 w-20 flex-col items-center justify-center rounded-2xl bg-[#e7edf3] text-base font-black leading-tight text-[#222833] shadow-[8px_8px_18px_rgba(174,185,197,0.8),-8px_-8px_18px_rgba(255,255,255,0.9)]">
+            <span>智学</span>
+            <span>引擎</span>
           </div>
           <h1 className="text-3xl font-black tracking-normal">加入学习空间</h1>
           <p className="mx-auto mt-5 max-w-[260px] text-sm leading-6 text-slate-400">

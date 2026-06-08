@@ -13,8 +13,8 @@ public record RegisterRequest(
     @Size(max = 128, message = "邮箱长度不能超过128个字符")
     String email,
 
-    /** 用户登录名，可选，长度需在3到64位之间（用于用户名注册方式） */
-    @Size(min = 3, max = 64, message = "用户名长度需要在3到64位之间")
+    /** 用户登录名，可选，长度需在1到64位之间（用于用户名注册方式） */
+    @Size(min = 1, max = 64, message = "用户名长度需要在1到64位之间")
     String username,
 
     /** 注册密码，可选，长度需在8到64位之间 */

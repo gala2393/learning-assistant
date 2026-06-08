@@ -632,7 +632,7 @@ class RagApiTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.question").value("Explain orbital mechanics for satellites."))
             .andExpect(jsonPath("$.data.answer").isNotEmpty())
-            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("当前资料未检索到足够页码")))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("当前资料里没有检索到足够依据")))
             .andExpect(jsonPath("$.data.sources").isEmpty());
     }
 
@@ -741,10 +741,10 @@ class RagApiTest {
                     {
                       "question": "Explain orbital mechanics for satellites."
                     }
-                    """))
+            """))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
-            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("当前资料未检索到足够页码")))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("当前资料里没有检索到足够依据")))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("General AI answer"))))
             .andExpect(jsonPath("$.data.sources").isEmpty());
     }
@@ -770,7 +770,7 @@ class RagApiTest {
                     """))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
-            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("当前资料未检索到足够页码"))))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("当前资料里没有检索到足够依据"))))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Normal AI answer")))
             .andExpect(jsonPath("$.data.sources").isEmpty());
     }

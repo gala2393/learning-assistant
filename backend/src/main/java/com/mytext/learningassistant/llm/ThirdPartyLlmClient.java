@@ -110,6 +110,7 @@ public class ThirdPartyLlmClient {
             return answerGeneralFast(userId, question);
         }
 
+        // 统一在这里构造 prompt，避免不同入口对资料片段和作业模式使用不一致的模板。
         PromptPair prompts = buildAnswerPrompts(userId, question, safeExcerpts, general, answerStyle);
 
         // 解析使用哪个 LLM 客户端（用户自定义 or 系统默认）
@@ -194,6 +195,7 @@ public class ThirdPartyLlmClient {
         if (isModelIdentityQuestion(question)) { String answer = currentModelAnswer(userId); onChunk.accept(answer); return answer; }
         if (general && safeImages.isEmpty() && safeExcerpts.isEmpty()) { return answerGeneralFastStream(userId, question, onChunk); }
 
+        // 流式和非流式共用 prompt 构造，确保同一问题不会因输出方式改变回答约束。
         PromptPair prompts = buildAnswerPrompts(userId, question, safeExcerpts, general, answerStyle);
 
         return resolveClient(userId).client().chatStream(prompts.systemPrompt(), prompts.userPrompt(), safeImages, onChunk);
@@ -295,6 +297,7 @@ public class ThirdPartyLlmClient {
     private ResolvedLlmClient resolveClient(Long userId) {
         return activeUserConfig(userId)
             .<ResolvedLlmClient>map(config -> new ResolvedLlmClient(
+                // 用户自定义配置只在请求期临时实例化，避免把个人 API Key 注入系统默认客户端。
                 new OpenAiCompatibleLlmClient(new LlmProperties(
                     true, config.getBaseUrl(), config.getApiKey(), config.getModel(),
                     "chat-completions", properties.timeout()

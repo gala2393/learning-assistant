@@ -51,6 +51,7 @@ public class LoginCaptchaService {
     public LoginCaptchaResponse createChallenge(String attemptKey) {
         String challengeId = UUID.randomUUID().toString();
         String code = randomCode();
+        // challenge 同时绑定 attemptKey 和验证码，避免拿别人的 challenge 复用到当前登录尝试。
         stateStore.put(challengeKey(challengeId), attemptKey + "\n" + code.toLowerCase(Locale.ROOT), ttl);
         return new LoginCaptchaResponse(
             challengeId,
@@ -64,6 +65,7 @@ public class LoginCaptchaService {
             return false;
         }
         if (user != null && user.getRole() == UserRole.ADMIN) {
+            // 管理员账号始终要求验证码，提高高权限入口的防护强度。
             return true;
         }
         return parseLong(stateStore.get(failureKey(attemptKey))) >= failureThreshold;
@@ -82,6 +84,7 @@ public class LoginCaptchaService {
         String expected = attemptKey + "\n" + submittedCode.toLowerCase(Locale.ROOT);
         String actual = stateStore.getAndDelete(challengeKey(challengeId));
         if (!expected.equals(actual)) {
+            // getAndDelete 保证即使输错也会消费 challenge，降低暴力试探收益。
             throw captchaRequired();
         }
     }

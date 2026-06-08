@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 class ThirdPartyLlmClientTest {
 
     /**
-     * 测试场景：通用聊天模式（isGeneralChat=true）下不注入资料上下文。
+     * 测试场景：通用聊天模式（isGeneralChat=true）且没有临时资料上下文时使用快速提示词。
      * 预期结果：userPrompt 包含用户问题但不包含资料摘要；
      *           systemPrompt 包含"高质量 AI 助手"和"不编造事实"，但不包含"学习助手"。
      */
@@ -32,7 +32,7 @@ class ThirdPartyLlmClientTest {
         CapturingLlmClient llmClient = new CapturingLlmClient();
         ThirdPartyLlmClient client = new ThirdPartyLlmClient(llmClient);
 
-        Optional<LlmCompletion> completion = client.answer("Explain spaced repetition", List.of("unused excerpt"), List.of(), true);
+        Optional<LlmCompletion> completion = client.answer("Explain spaced repetition", List.of(), List.of(), true);
 
         assertTrue(completion.isPresent());
         assertTrue(llmClient.userPrompt.contains("Explain spaced repetition"));

@@ -576,6 +576,7 @@ public class RagService {
             ? thirdPartyLlmClient.answerStream(userId, llmQuestion, excerpts, images, trackedChunk, generalChat, request.answerStyle())
             : thirdPartyLlmClient.answerStream(userId, llmQuestion, excerpts, images, trackedChunk, generalChat, "STUDY");
         if (answer.isBlank()) {
+            // LLM 流式调用失败时回退到本地生成，保证 SSE 至少能返回完整答案。
             answer = generalChat
                 ? buildGeneralFallbackAnswer(request.question())
                 : buildCleanAnswer(request.question(), selectedChunks, request.answerStyle());
@@ -583,6 +584,7 @@ public class RagService {
             customModel = false;
         }
         if (!streamedAnyChunk.get() && !answer.isBlank()) {
+            // 部分兼容接口会一次性返回全文，这里补发小块以维持前端流式体验。
             streamAnswerInSmallChunks(answer, onChunk);
         }
 
@@ -965,6 +967,7 @@ public class RagService {
         String cacheKey = retrievalCacheKey(userId, materialId, question, materials);
         List<ScoredChunk> cachedChunks = cachedRetrievalChunks(cacheKey, userId);
         if (cachedChunks != null) {
+            // 相同资料版本和查询命中缓存时，跳过向量、BM25 和 rerank 的重复计算。
             return cachedChunks;
         }
 
@@ -978,6 +981,7 @@ public class RagService {
             String query = queries.get(i);
             // 主查询权重为 1.0，扩展查询权重递减为 0.82
             double weight = i == 0 ? 1.0 : 0.82;
+            // 改写查询降权参与召回，避免扩展词压过用户原始问题。
             // 向量语义检索：计算问题向量与片段向量的余弦相似度
             vectorChunks.addAll(weightedChunks(findVectorScoredChunks(userId, query, materialId), weight));
             // BM25 关键词检索：基于倒排索引的词频统计匹配
@@ -986,6 +990,7 @@ public class RagService {
         // HyDE（假设性文档嵌入）检索：让 LLM 生成假设性回答，用它做向量检索
         // 原理：假设性回答的向量通常比问题的向量更接近真实答案所在片段的向量
         hydeRetrievalQuery(question).ifPresent(hydeQuery ->
+            // HyDE 只作为语义召回补充，不参与 BM25，避免假设答案污染精确关键词匹配。
             vectorChunks.addAll(weightedChunks(
                 findVectorScoredChunks(userId, hydeQuery, materialId),
                 queryExpansionProperties.hydeWeight()
@@ -1151,11 +1156,13 @@ public class RagService {
         for (CachedScoredChunk cachedChunk : cached.chunks()) {
             MaterialChunkEntity chunk = materialChunkRepository.findById(cachedChunk.chunkId()).orElse(null);
             if (chunk == null) {
+                // 片段被删除后立即丢弃缓存，避免返回悬空来源。
                 retrievalResultCache.remove(cacheKey);
                 return null;
             }
             LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(chunk.getMaterialId(), userId).orElse(null);
             if (material == null || material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+                // 资料归属或解析状态变化时，缓存结果不再可信。
                 retrievalResultCache.remove(cacheKey);
                 return null;
             }
@@ -1169,6 +1176,7 @@ public class RagService {
             return;
         }
         if (retrievalResultCache.size() >= RETRIEVAL_CACHE_MAX_ENTRIES) {
+            // 简单全量清空比维护 LRU 更轻量，缓存只用于短期加速。
             retrievalResultCache.clear();
         }
         retrievalResultCache.put(cacheKey, new RetrievalCacheEntry(
@@ -1219,6 +1227,7 @@ public class RagService {
         }
         for (ScoredChunk chunk : bm25Chunks) {
             HybridCandidate candidate = candidates.computeIfAbsent(chunk.chunk().getId(), ignored -> new HybridCandidate(chunk));
+            // 同一片段可能被多个扩展查询命中，只保留该路最高分。
             candidate.bm25Score = Math.max(candidate.bm25Score, chunk.score());
             if (candidate.highlightTerms.isEmpty()) {
                 candidate.highlightTerms = chunk.highlightTerms();
@@ -1226,6 +1235,7 @@ public class RagService {
         }
         for (ScoredChunk chunk : summarySeedChunks) {
             HybridCandidate candidate = candidates.computeIfAbsent(chunk.chunk().getId(), ignored -> new HybridCandidate(chunk));
+            // 摘要种子用于把整篇相关的资料前几个片段拉入候选池。
             candidate.summaryScore = Math.max(candidate.summaryScore, chunk.score());
             if (candidate.highlightTerms.isEmpty()) {
                 candidate.highlightTerms = chunk.highlightTerms();
@@ -1280,6 +1290,7 @@ public class RagService {
             .toList();
         List<RerankedCandidate> rerankedCandidates = rerankerClient.rerank(question, candidates);
         if (rerankedCandidates.isEmpty()) {
+            // 外部重排不可用或无有效结果时，保留融合分数排序。
             return chunks;
         }
 
@@ -1301,6 +1312,7 @@ public class RagService {
         }
         for (ScoredChunk chunk : chunks) {
             if (seen.add(chunk.chunk().getId())) {
+                // Reranker 未覆盖的候选保留在末尾，避免召回结果被意外丢弃。
                 reranked.add(chunk);
             }
         }
@@ -3592,9 +3604,11 @@ public class RagService {
         String cacheKey = bm25CacheKey(userId, materialId, materialChunks);
         Bm25IndexCacheEntry cached = bm25IndexCache.get(cacheKey);
         if (cached != null) {
+            // BM25 构建成本高，资料版本未变时直接复用倒排统计。
             return cached.scorer();
         }
         if (bm25IndexCache.size() >= BM25_CACHE_MAX_ENTRIES) {
+            // 缓存空间达到上限时整体清空，避免长期持有旧资料索引。
             bm25IndexCache.clear();
         }
         return bm25IndexCache.computeIfAbsent(

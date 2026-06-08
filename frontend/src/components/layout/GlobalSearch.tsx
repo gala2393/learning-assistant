@@ -67,6 +67,7 @@ export function GlobalSearch({ open, onClose }: GlobalSearchProps) {
   const filtered = keyword
     ? historyItems
         .filter((item) =>
+          // 全局搜索只做本地历史匹配，不额外调用后端，保证弹窗输入即时响应。
           item.question.toLowerCase().includes(keyword) ||
           item.answer.toLowerCase().includes(keyword)
         )
@@ -78,6 +79,7 @@ export function GlobalSearch({ open, onClose }: GlobalSearchProps) {
    * 跳转到对应的聊天页面，清空关键词，关闭弹窗
    */
   const handleSelect = (item: HistoryItem) => {
+    // 路径中保留 historyId 和首个来源定位信息，聊天页可恢复对应上下文。
     navigate(buildHistoryPath(item))
     setQuery('')
     onClose()

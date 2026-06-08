@@ -81,6 +81,29 @@ class AuthApiTest {
             .andExpect(jsonPath("$.data.permissions[?(@ == 'ADMIN_CONSOLE')]").doesNotExist());
     }
 
+    @Test
+    void registerAcceptsSingleCharacterUsername() throws Exception {
+        String username = "学";
+        String email = emailFor("single_char_" + uniqueName("user"));
+        sendEmailCode(email);
+        String code = latestEmailCode(email);
+
+        mockMvc.perform(post("/api/auth/register")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "email": "%s",
+                      "username": "%s",
+                      "password": "12345678",
+                      "confirmPassword": "12345678",
+                      "code": "%s"
+                    }
+                    """.formatted(email, username, code)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.username").value(username));
+    }
+
     /**
      * 测试场景：密码登录后调用 /api/auth/me 获取当前用户信息。
      * 预期结果：返回的用户资料符合普通用户控制台契约（canAccessAdminConsole=false）。

@@ -38,9 +38,12 @@ import { cn, formatDate, truncate } from '@/lib/utils'
 import { Search, Eye, Trash2, Clock, MessageSquare, Star } from 'lucide-react'
 import type { HistoryItem } from '@/types'
 import { useToast } from '@/components/ui/toast'
+import { useAuth } from '@/context/AuthContext'
+import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
 
 export function HistoryPage() {
   const navigate = useNavigate()
+  const { isAuthenticated } = useAuth()
   // 获取历史记录和收藏数据
   const { data: items = [], isLoading } = useHistory()
   const { data: favorites = [] } = useFavorites()
@@ -50,6 +53,13 @@ export function HistoryPage() {
   const addFavoriteMutation = useAddFavorite()     // 添加收藏
   const deleteFavoriteMutation = useDeleteFavorite()  // 取消收藏
   const { showToast } = useToast()
+
+  const requireLogin = () => {
+    if (isAuthenticated) return true
+    showToast(LOGIN_REQUIRED_MESSAGE, 2000)
+    redirectToLogin()
+    return false
+  }
 
   // ---- 状态管理 ----
   const [keyword, setKeyword] = useState('')                         // 搜索关键词
@@ -82,6 +92,7 @@ export function HistoryPage() {
   useEffect(() => {
     const validIds = new Set(items.map((item) => String(item.id)))
     setSelectedIds((prev) => {
+      // 删除、清空或搜索刷新后，批量选择集合只保留仍存在的历史记录。
       const next = new Set(Array.from(prev).filter((id) => validIds.has(id)))
       return next.size === prev.size ? prev : next
     })
@@ -92,9 +103,11 @@ export function HistoryPage() {
    * 携带 historyId 参数，并附带第一个来源的 materialId 和 chunkId
    */
   const openHistory = (item: HistoryItem) => {
+    if (!requireLogin()) return
     const params = new URLSearchParams({ historyId: String(item.id) })
     const source = item.sources?.[0]
     if (source) {
+      // 带上首个来源，聊天页恢复会话时可以同时定位到相关资料片段。
       params.set('materialId', source.materialId)
       params.set('chunkId', source.chunkId)
     }
@@ -122,6 +135,7 @@ export function HistoryPage() {
   const toggleFilteredSelection = (checked: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev)
+      // 全选只作用于当前过滤结果，不影响其他搜索条件下已经勾选的项。
       filteredIds.forEach((id) => {
         if (checked) next.add(id)
         else next.delete(id)
@@ -134,6 +148,7 @@ export function HistoryPage() {
 
   /** 确认单条删除 */
   const handleDeleteConfirm = () => {
+    if (!requireLogin()) return
     if (!deleteTarget) return
     deleteMutation.mutate(deleteTarget, {
       onSuccess: () => {
@@ -154,6 +169,7 @@ export function HistoryPage() {
 
   /** 确认批量删除 - 并行执行所有删除请求 */
   const handleBatchDeleteConfirm = async () => {
+    if (!requireLogin()) return
     if (selectedCount === 0) return
     const ids = Array.from(selectedIds)
     // 并行发送所有删除请求，使用 allSettled 确保部分失败不影响其他
@@ -164,6 +180,7 @@ export function HistoryPage() {
     // 从选中集合中移除已成功删除的 ID
     setSelectedIds((prev) => {
       const next = new Set(prev)
+      // 失败项保持选中，方便用户再次尝试批量删除。
       successIds.forEach((id) => next.delete(id))
       return next
     })
@@ -178,6 +195,7 @@ export function HistoryPage() {
 
   /** 确认清空全部历史 */
   const handleClearConfirm = () => {
+    if (!requireLogin()) return
     clearMutation.mutate(undefined, {
       onSuccess: () => {
         setViewTarget(null)
@@ -192,8 +210,10 @@ export function HistoryPage() {
 
   /** 切换收藏状态（已收藏则取消，未收藏则添加） */
   const handleToggleFavorite = (item: HistoryItem) => {
+    if (!requireLogin()) return
     const favoriteId = getFavoriteId(item)
     if (favoriteId) {
+      // 收藏状态由收藏列表和历史项冗余字段共同判断，删除时使用解析出的 favoriteId。
       deleteFavoriteMutation.mutate(favoriteId, {
         onSuccess: () => showToast('已取消收藏'),
         onError: (error) => showToast(error instanceof Error ? error.message : '取消收藏失败'),

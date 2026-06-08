@@ -18,11 +18,11 @@
  * 【技术细节】
  * - 使用两套独立的 react-hook-form 实例分别管理密码登录和验证码登录表单
  * - 表单校验使用 zod schema
- * - 403 状态码会提示"无权访问"的特殊错误信息
+ * - 登录失败时显示后端提示或通用账号状态提示
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Mail, KeyRound, RefreshCw } from 'lucide-react'
@@ -57,11 +57,26 @@ type CaptchaState = {
   challengeId: string
   imageDataUrl: string
 }
+const REMEMBERED_LOGIN_KEY = 'learning-assistant.remembered-login'
+
+function loadRememberedLogin() {
+  if (typeof window === 'undefined') return { username: '', password: '', remember: true }
+  try {
+    const raw = localStorage.getItem(REMEMBERED_LOGIN_KEY)
+    if (!raw) return { username: '', password: '', remember: true }
+    const saved = JSON.parse(raw) as { username?: string; password?: string }
+    return { username: saved.username || '', password: saved.password || '', remember: true }
+  } catch {
+    localStorage.removeItem(REMEMBERED_LOGIN_KEY)
+    return { username: '', password: '', remember: true }
+  }
+}
 
 export function LoginForm() {
   // 从认证上下文获取登录方法
   const { login, emailLogin } = useAuth()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   // 当前登录模式，默认密码登录
   const [mode, setMode] = useState<LoginMode>('password')
   // 错误提示信息
@@ -74,11 +89,13 @@ export function LoginForm() {
   const [cooldown, setCooldown] = useState(0)
   const [captcha, setCaptcha] = useState<CaptchaState | null>(null)
   const [captchaLoading, setCaptchaLoading] = useState(false)
+  const rememberedLogin = useMemo(loadRememberedLogin, [])
+  const [rememberLogin, setRememberLogin] = useState(rememberedLogin.remember)
 
   // 密码登录表单实例
   const passwordForm = useForm<PasswordLoginValues>({
     resolver: zodResolver(passwordLoginSchema),
-    defaultValues: { username: '', password: '', captchaCode: '' },
+    defaultValues: { username: rememberedLogin.username, password: rememberedLogin.password, captchaCode: '' },
   })
 
   // 验证码登录表单实例
@@ -124,7 +141,19 @@ export function LoginForm() {
    */
   const finishLogin = () => {
     sessionStorage.removeItem('learning-assistant.chat.current')
-    navigate('/workspace/chat?new=1', { replace: true })
+    const redirect = searchParams.get('redirect')
+    navigate(redirect?.startsWith('/') && !redirect.startsWith('//') ? redirect : '/workspace/chat?new=1', { replace: true })
+  }
+
+  const saveRememberedLogin = (data: PasswordLoginValues) => {
+    if (!rememberLogin) {
+      localStorage.removeItem(REMEMBERED_LOGIN_KEY)
+      return
+    }
+    localStorage.setItem(REMEMBERED_LOGIN_KEY, JSON.stringify({
+      username: data.username,
+      password: data.password,
+    }))
   }
 
   const refreshLoginCaptcha = async (targetUsername = passwordForm.getValues('username')) => {
@@ -152,7 +181,7 @@ export function LoginForm() {
   /**
    * 密码登录提交处理：
    * 调用 AuthContext 的 login 方法
-   * 特殊处理 403 状态码（账号被禁用/无权限）
+   * 特殊处理验证码，其余失败使用后端提示或通用文案
    */
   const onPasswordSubmit = async (data: PasswordLoginValues) => {
     setError('')
@@ -164,6 +193,7 @@ export function LoginForm() {
         captchaChallengeId: captcha?.challengeId,
         captchaCode: data.captchaCode?.trim(),
       })
+      saveRememberedLogin(data)
       setCaptcha(null)
       finishLogin()
     } catch (err: unknown) {
@@ -176,9 +206,8 @@ export function LoginForm() {
       if (captcha) {
         await refreshLoginCaptcha(data.username)
       }
-      if (e.response?.status === 403) {
-        // 403 表示账号被禁用或无权限访问
-        setError('当前账号无权访问，请联系管理员确认权限。')
+      if (e.code === 403 || e.response?.status === 403) {
+        setError(e.message || '登录失败，请检查账号状态或联系管理员。')
       } else {
         setError(e.message || '用户名、邮箱或密码错误，请检查后再试。')
       }
@@ -353,7 +382,7 @@ export function LoginForm() {
               {/* 记住登录状态 + 忘记密码链接 */}
               <div className="mt-5 flex items-center justify-between text-xs text-slate-400">
                 <label className="flex items-center gap-2">
-                  <Checkbox defaultChecked />
+                  <Checkbox checked={rememberLogin} onCheckedChange={(checked) => setRememberLogin(checked === true)} />
                   记住登录状态
                 </label>
                 <Link to="/forgot-password" className="font-medium text-[#4b5563] hover:text-[#374151]">

@@ -88,6 +88,7 @@ public class ExternalApiRerankerClient implements RerankerClient {
         }
         // 如果外部 API 未配置，使用回退实现
         if (!properties.externalConfigured()) {
+            // 未配置外部服务时直接使用本地启发式重排，避免请求链路失败。
             return fallback.rerank(query, limited);
         }
         try {
@@ -97,6 +98,7 @@ public class ExternalApiRerankerClient implements RerankerClient {
             return reranked.isEmpty() ? fallback.rerank(query, limited) : reranked;
         } catch (Exception ignored) {
             // 外部 API 调用出现异常，降级到回退实现
+            // 网络或 JSON 异常都不向上抛出，RAG 主流程仍可用融合排序继续回答。
             return fallback.rerank(query, limited);
         }
     }
@@ -144,6 +146,7 @@ public class ExternalApiRerankerClient implements RerankerClient {
         // 兼容不同的响应格式：先尝试 "results" 字段，再尝试 "data" 字段
         JsonNode results = root.path("results");
         if (!results.isArray() || results.isEmpty()) {
+            // 部分兼容服务把重排结果放在 data 字段。
             results = root.path("data");
         }
         if (!results.isArray() || results.isEmpty()) {
@@ -156,11 +159,13 @@ public class ExternalApiRerankerClient implements RerankerClient {
             // 获取文档索引（兼容 "index" 和 "document_index" 两种字段名）
             int index = result.path("index").asInt(-1);
             if (index < 0 && result.has("document_index")) {
+                // 不同 rerank 服务的文档索引字段名不一致。
                 index = result.path("document_index").asInt(-1);
             }
             // 获取相关性分数（兼容 "relevance_score" 和 "score" 两种字段名）
             double score = result.path("relevance_score").asDouble(Double.NaN);
             if (Double.isNaN(score)) {
+                // 兼容只返回 score 而非 relevance_score 的服务。
                 score = result.path("score").asDouble(Double.NaN);
             }
             // 索引越界或分数无效时跳过该条结果

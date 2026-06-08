@@ -75,6 +75,7 @@ export function UsageRecordsPage() {
   const { data, isLoading, refetch, isFetching } = useAdminUsageRecords({
     page,
     size: PAGE_SIZE,
+    // 使用 undefined 表达“不搜索”，保持 queryKey 与后端语义一致。
     keyword: debouncedKeyword || undefined,
   })
 
@@ -89,6 +90,7 @@ export function UsageRecordsPage() {
     // 上传操作数（非问答即上传）
     const uploadCount = items.filter((item) => !isQuestionAction(item)).length
     // Token 消耗总量
+    // 后端可能返回字符串或 null，统一转 Number 后再累加。
     const tokenTotal = items.reduce((sum, item) => sum + Number(item.totalTokens || 0), 0)
     // 最近使用时间
     const latest = items[0]?.createdAt || ''
@@ -249,6 +251,7 @@ export function UsageRecordsPage() {
                 value={keyword}
                 onChange={(event) => {
                   setKeyword(event.target.value)
+                  // 新搜索从第一页开始，避免当前页超出新结果范围。
                   setPage(0) // 搜索时重置到第一页
                 }}
               />

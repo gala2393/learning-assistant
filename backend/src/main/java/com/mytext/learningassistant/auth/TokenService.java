@@ -113,6 +113,7 @@ public class TokenService {
         // 解码 payload 并验证签名
         String payload = decode(parts[0]);
         if (!sign(payload).equals(parts[1])) {
+            // 重新计算签名后比较，任何 payload 篡改都会导致签名不匹配。
             throw invalidToken();  // 签名不匹配，Token 被篡改
         }
 
@@ -128,6 +129,7 @@ public class TokenService {
                 ? Integer.parseInt(payloadParts[2]) : 0;
             // 检查 Token 是否已过期
             if (Instant.now().toEpochMilli() > expiresAt) {
+                // 过期 Token 不再进入用户查询阶段，减少后续认证分支。
                 throw new BusinessException(401, "token expired");
             }
             return new TokenClaims(userId, tokenVersion);

@@ -604,6 +604,7 @@ public class MaterialService {
             Files.createDirectories(partPath.getParent());
             byte[] bytes = chunk.getBytes();
             String expectedChecksum = normalizeOptionalText(checksumSha256);
+            // 单个分片允许独立校验，尽早发现前端重传或网络传输造成的内容损坏。
             if (expectedChecksum != null && !expectedChecksum.isBlank()) {
                 String actualChecksum = sha256(bytes);
                 if (!expectedChecksum.equalsIgnoreCase(actualChecksum)) {
@@ -612,6 +613,7 @@ public class MaterialService {
             }
             if (Files.exists(partPath)) {
                 byte[] existing = Files.readAllBytes(partPath);
+                // 相同分片重复上传视为幂等成功，内容不同则拒绝覆盖，避免合并出混合版本文件。
                 if (existing.length == bytes.length && sha256(existing).equalsIgnoreCase(sha256(bytes))) {
                     refreshSessionProgress(session);
                     return toUploadSessionResponse(session);
@@ -627,6 +629,7 @@ public class MaterialService {
         if (session.getUploadedChunks() != null && session.getTotalChunks() != null
             && session.getUploadedChunks() >= session.getTotalChunks()
             && session.getStatus() == MaterialUploadSessionStatus.UPLOADING) {
+            // 只有第一次观察到全部分片齐全时才切换到处理态，避免并发请求重复调度后台合并。
             session.setStatus(MaterialUploadSessionStatus.PROCESSING);
             materialUploadSessionRepository.save(session);
             markMaterialParsing(session);
@@ -1004,6 +1007,7 @@ public class MaterialService {
      */
     private void scheduleProcessing(String sessionId) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            // 后台线程依赖刚写入的 session/material 状态，必须等当前事务提交后再读取。
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
@@ -1075,6 +1079,7 @@ public class MaterialService {
             Path finalPath = resolveStoredPath(session.getStoragePath());
             Files.createDirectories(finalPath.getParent());
             updateMaterialParseProgress(session, 10, "合并文件", "正在合并上传分片");
+            // 合并和整文件校验先完成，再进入解析，避免半文件被 PDFBox/ZIP 解析器消费。
             assembleUploadedFile(session, finalPath);
             updateMaterialParseProgress(session, 18, "校验文件", "正在校验文件完整性");
             validateUploadedFileChecksum(session, finalPath);
@@ -1105,6 +1110,7 @@ public class MaterialService {
             material.setChunkCount(chunks.size());
             learningMaterialRepository.save(material);
             updateMaterialParseProgress(material.getId(), material.getOwnerId(), 82, "写入向量库", "正在保存知识片段和向量");
+            // 重新解析时先清理旧索引和旧切片，再写入新切片，保证数据库和 Vector Store 不混用两版内容。
             vectorStoreClient.deleteMaterial(material.getOwnerId(), material.getId());
             materialChunkRepository.deleteByMaterialId(material.getId());
             saveChunks(material, chunks, true);
@@ -1161,10 +1167,12 @@ public class MaterialService {
         try (var output = Files.newOutputStream(finalPath)) {
             for (int index = 0; index < session.getTotalChunks(); index++) {
                 Path partPath = partDir.resolve(partFileName(index));
+                // 按固定序号顺序拼接，任何缺片都立即中止，避免生成可解析但内容错位的文件。
                 if (!Files.exists(partPath)) {
                     throw new BusinessException(400, "Missing upload chunk");
                 }
                 Files.copy(partPath, output);
+                // 已写入最终文件的分片立刻删除，降低大文件上传的临时磁盘占用。
                 Files.deleteIfExists(partPath);
             }
         }
@@ -1380,6 +1388,7 @@ public class MaterialService {
             chunk.setHierarchyPath(buildHierarchyPath(material, chunk, index));
             chunk.setSummary(buildChunkSummary(draft.text()));
             chunk.setKeywords(buildChunkKeywords(draft.text()));
+            // Embedding 先落库为 JSON，随后解析成向量批量写入 Vector Store，便于后续重建索引。
             String embeddingJson = toEmbeddingJson(draft.text());
             chunk.setEmbeddingJson(embeddingJson);
             chunk.setCreatedAt(java.time.LocalDateTime.now());
@@ -1390,6 +1399,7 @@ public class MaterialService {
                 embeddingsByChunkId.put(saved.getId(), embedding);
             }
             if (savedChunks.size() >= VECTOR_UPSERT_BATCH_SIZE) {
+                // 分批 flush 控制内存峰值，并减少一次性向量写入失败的影响范围。
                 flushVectorBatch(material, savedChunks, embeddingsByChunkId);
             }
             if (updateProgress && chunks.size() > 0 && (index == chunks.size() - 1 || index % 5 == 0)) {
@@ -1896,6 +1906,7 @@ public class MaterialService {
                 || sourceType == MaterialSourceType.WORD
                 || sourceType == MaterialSourceType.PPTX
                 || sourceType == MaterialSourceType.PPT) {
+                // 重新解析前清掉旧图片资源，避免页面图和 Office 内嵌图残留到新解析结果。
                 deleteStoredAssets(storedFile.toString());
             }
             return switch (sourceType) {
@@ -2300,6 +2311,7 @@ public class MaterialService {
         String imageName = pageImageName(pageNo);
         String marker = imageMarker(imageName);
         if (!inlinePdfOcrEnabled) {
+            // 扫描页即使不做 OCR 也保留图片标记，后续预览或多模态问答仍能定位原页。
             return marker + "\n\u7b2c " + pageNo + " \u9875\u6682\u65e0\u53ef\u62bd\u53d6\u6587\u672c\uff1b\u539f\u9875\u56fe\u7247\u5c06\u5728\u9884\u89c8\u6216\u591a\u6a21\u6001\u95ee\u7b54\u65f6\u6309\u9700\u751f\u6210\u3002";
         }
         Path imagePath = renderPdfPageAsset(file, document, pageIndex, imageName);
@@ -2605,6 +2617,7 @@ public class MaterialService {
             return List.of("");
         }
         if (normalized.contains(IMAGE_MARKER_PREFIX)) {
+            // 图片标记需要和相邻说明文字绑定，不能按普通段落切散。
             return chunkTextWithImageMarkers(normalized);
         }
         return semanticChunk(normalized);
@@ -2636,6 +2649,7 @@ public class MaterialService {
                 continue;
             }
             if (trimmed.length() > CHUNK_MAX_SIZE) {
+                // 超长段落不直接进入缓冲区，先按句子拆开，避免单个 chunk 超过检索和 Embedding 的理想长度。
                 if (!buffer.isEmpty()) {
                     addChunk(chunks, buffer.toString().trim());
                     buffer.setLength(0);
@@ -2644,6 +2658,7 @@ public class MaterialService {
                 continue;
             }
             if (buffer.length() + trimmed.length() + 1 > CHUNK_MAX_SIZE && !buffer.isEmpty()) {
+                // 追加当前段会越过上限时先封存已有缓冲区，保持 chunk 长度稳定。
                 addChunk(chunks, buffer.toString().trim());
                 buffer.setLength(0);
             }
@@ -2849,6 +2864,7 @@ public class MaterialService {
             chunks.addAll(chunkText(content.substring(cursor, matcher.start())));
             int nextMarker = content.indexOf(IMAGE_MARKER_PREFIX, matcher.end());
             int imageBlockEnd = nextMarker >= 0 ? nextMarker : content.length();
+            // 当前图片到下一张图片之前的文字一起保留，方便 OCR、图注和正文在同一检索片段中命中。
             String imageBlock = content.substring(matcher.start(), imageBlockEnd).trim();
             if (!imageBlock.isBlank()) {
                 chunks.add(imageBlock);
@@ -2952,6 +2968,7 @@ public class MaterialService {
         }
         boolean acquired = false;
         try {
+            // PDF 渲染占用内存高，用信号量限制并发，超时则让调用方返回空结果。
             acquired = renderSemaphore.tryAcquire(30, TimeUnit.SECONDS);
             if (!acquired) {
                 return null;
@@ -3199,6 +3216,7 @@ public class MaterialService {
             return cached;
         }
         try {
+            // 以清洗后的文本作为缓存粒度，同一片段重复解析时避免再次请求外部 Embedding 服务。
             String embeddingJson = embeddingClient.embedDocument(cleanedText)
                 .filter(embedding -> !embedding.isEmpty())
                 .map(embedding -> {
@@ -3211,6 +3229,7 @@ public class MaterialService {
                 .orElse(null);
             if (embeddingJson != null) {
                 if (embeddingJsonCache.size() >= EMBEDDING_CACHE_MAX_ENTRIES) {
+                    // 简单上限保护：缓存只做性能优化，超限清空不会影响正确性。
                     embeddingJsonCache.clear();
                 }
                 embeddingJsonCache.putIfAbsent(cacheKey, embeddingJson);

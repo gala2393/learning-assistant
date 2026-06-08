@@ -138,6 +138,7 @@ export function LogsPage() {
   const { data, isLoading } = useAdminLogs({
     page,
     size: PAGE_SIZE,
+    // 防抖后的空值不传后端，表示查看全部日志。
     keyword: debouncedKeyword || undefined,
   })
 
@@ -145,6 +146,7 @@ export function LogsPage() {
   const allItems = (data?.items ?? []).filter((item) => !isUsageAction(item.action))
   // 根据事件类型筛选（前端筛选，仅作用于当前页数据）
   const items = useMemo(
+    // 后端负责分页和关键词，事件类型在当前页做轻量筛选。
     () => actionFilter === 'ALL' ? allItems : allItems.filter((item) => item.action === actionFilter),
     [actionFilter, allItems],
   )
@@ -301,6 +303,7 @@ export function LogsPage() {
                   value={keyword}
                   onChange={(event) => {
                     setKeyword(event.target.value)
+                    // 搜索条件改变后重置页码，避免停留在旧查询的高页码。
                     setPage(0) // 搜索时重置到第一页
                   }}
                 />

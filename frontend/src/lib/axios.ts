@@ -27,6 +27,7 @@ api.interceptors.request.use((config) => {
     try {
       const session = JSON.parse(raw)
       if (session.token) {
+        // 所有业务 API 统一在这里带 Token，避免各模块重复拼 Authorization。
         config.headers.Authorization = `Bearer ${session.token}`
       }
     } catch {
@@ -68,20 +69,25 @@ api.interceptors.response.use(
   (error) => {
     // 401 未授权 — 登录过期或 Token 无效
     if (error.response?.status === 401) {
+      const hadSession = Boolean(localStorage.getItem(SESSION_KEY))
       localStorage.removeItem(SESSION_KEY)
       const path = window.location.pathname
       const isPublicAuthPage = path === '/login' || path === '/register' || path === '/forgot-password'
-      if (!isPublicAuthPage) {
-        window.location.href = '/login'  // 跳转到登录页
+      if (hadSession && !isPublicAuthPage) {
+        // 避免在登录/注册页重复重定向，其他受保护页面统一回到登录入口。
+        const current = `${window.location.pathname}${window.location.search}`
+        window.location.href = `/login?redirect=${encodeURIComponent(current)}`  // 跳转到登录页
       }
     }
     // 无 response — 后端未启动或网络断开
     if (!error.response) {
       if (error.code === 'ECONNABORTED' || String(error.message || '').includes('timeout')) {
+        // Axios 超时没有后端响应体，转换成业务可读错误给表单/Toast 展示。
         const timeoutError = new Error('请求处理时间过长；如果是大文件或扫描版 PDF，请切换到资料问答上传，系统会在后台解析并显示进度。') as Error & { code?: number; data?: unknown }
         timeoutError.code = 0
         return Promise.reject(timeoutError)
       }
+      // 没有 response 说明请求没到达后端或服务不可用，给出本地开发可操作提示。
       const offlineError = new Error('后端未启动或无法访问，请先启动 8080 后端服务') as Error & { code?: number; data?: unknown }
       offlineError.code = 0
       return Promise.reject(offlineError)

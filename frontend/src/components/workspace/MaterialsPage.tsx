@@ -37,6 +37,8 @@ import {
 } from '@/api/materials'
 import { useDebounce } from '@/hooks/useDebounce'
 import { useToast } from '@/components/ui/toast'
+import { useAuth } from '@/context/AuthContext'
+import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import {
@@ -54,6 +56,14 @@ import type { UploadProgress, UploadProgressItem } from '@/api/materials'
 export function MaterialsPage() {
   const navigate = useNavigate()
   const { showToast } = useToast()
+  const { isAuthenticated } = useAuth()
+
+  const requireLogin = () => {
+    if (isAuthenticated) return true
+    showToast(LOGIN_REQUIRED_MESSAGE, 2000)
+    redirectToLogin()
+    return false
+  }
 
   // === 数据获取 ===
   /** 获取资料列表（React Query，自动缓存和刷新） */
@@ -102,6 +112,7 @@ export function MaterialsPage() {
     if (sourceTypeFilter !== 'ALL' && material.sourceType !== sourceTypeFilter) return false
     if (statusFilter !== 'ALL' && material.parseStatus !== statusFilter) return false
     if (debouncedKeyword) {
+      // 关键词只做前端过滤，标题和原始文件名任一命中即可保留。
       const kw = debouncedKeyword.toLowerCase()
       return (material.title || '').toLowerCase().includes(kw) || (material.originalName || '').toLowerCase().includes(kw)
     }
@@ -122,8 +133,10 @@ export function MaterialsPage() {
    * 6. 全部完成后刷新资料列表，关闭弹窗
    */
   const handleUpload = async (data: { title?: string; file?: File; files?: File[] }) => {
+    if (!requireLogin()) return
     const files = data.files?.length ? data.files : data.file ? [data.file] : []
     if (files.length === 0) return
+    // 进入上传前重置旧进度，避免上一次失败项继续显示到新任务里。
     setUploading(true)
     setUploadProgress(null)
     setUploadProgressItems(createUploadProgressItems(files))
@@ -159,6 +172,7 @@ export function MaterialsPage() {
       // 刷新资料列表缓存
       await queryClient.invalidateQueries({ queryKey: ['materials'] })
       if (failed.length > 0) {
+        // 部分失败时不关闭上传区域，保留每个文件的状态方便用户判断是否重试。
         showToast(`${failed.length}/${files.length} 份资料上传失败，请查看进度列表`)
         return
       }
@@ -183,7 +197,9 @@ export function MaterialsPage() {
 
   /** 保存编辑结果（更新资料标题） */
   const handleEditSave = () => {
+    if (!requireLogin()) return
     if (editTarget && editTitle.trim()) {
+      // 空标题不提交，避免把资料名称更新成不可见文本。
       updateMutation.mutate({ id: editTarget.id, payload: { title: editTitle.trim() } }, {
         onSuccess: () => {
           setEditTarget(null)
@@ -203,6 +219,7 @@ export function MaterialsPage() {
 
   /** 确认删除资料 */
   const handleDeleteConfirm = () => {
+    if (!requireLogin()) return
     if (deleteTarget) {
       deleteMutation.mutate(deleteTarget.id, {
         onSuccess: () => {
@@ -231,6 +248,8 @@ export function MaterialsPage() {
    * 4. 如果浏览器拦截了新窗口，提示用户允许弹窗
    */
   const handleOpenFile = async (material: Material) => {
+    if (!requireLogin()) return
+    // 先打开空白页，再异步写入 ticket URL，降低浏览器拦截新窗口的概率。
     const opened = window.open('', '_blank')
     try {
       const ticket = await createMaterialFileTicket(material.id)
@@ -247,9 +266,11 @@ export function MaterialsPage() {
 
   /** 触发资料重新解析（重新从源文件提取文本和切片） */
   const handleReparse = (material: Material) => {
+    if (!requireLogin()) return
     reparseMutation.mutate(material.id, {
       onSuccess: (updated) => {
         // 如果正在查看该资料，更新选中状态为最新数据
+        // 列表会通过 query 缓存刷新，底部摘要栏需要同步本地 selected。
         setSelected((current) => current?.id === updated.id ? updated : current)
         showToast('资料已重新解析')
       },
@@ -281,7 +302,10 @@ export function MaterialsPage() {
             size="sm"
             variant="outline"
             className="h-8 gap-1.5 px-2 md:hidden"
-            onClick={() => setUploadOpen((open) => !open)}
+            onClick={() => {
+              if (!requireLogin()) return
+              setUploadOpen((open) => !open)
+            }}
           >
             <Upload className="h-3.5 w-3.5" />
             导入

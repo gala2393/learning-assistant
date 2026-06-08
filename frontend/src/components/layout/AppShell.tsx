@@ -29,6 +29,7 @@ import {
 } from '@/components/ui/dialog'
 import { ADMIN_SECTIONS, WORKSPACE_SECTIONS } from '@/constants'
 import { useAuth } from '@/context/AuthContext'
+import { redirectToLogin } from '@/lib/auth-gate'
 import { cn } from '@/lib/utils'
 import {
   BookOpen,
@@ -75,7 +76,7 @@ export function AppShell() {
   const location = useLocation()
   const navigate = useNavigate()
   // 获取当前会话信息、管理员权限和登出方法
-  const { session, isAdmin, logout } = useAuth()
+  const { session, isAuthenticated, isAdmin, logout } = useAuth()
   // 移动端菜单弹窗的开关状态
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   // 个人资料弹窗的开关状态
@@ -220,32 +221,40 @@ export function AppShell() {
                 type="button"
                 className="flex min-w-0 flex-1 items-center gap-3 rounded-lg px-1 py-1 text-left transition-colors hover:bg-[#eceef1] dark:hover:bg-white/[0.08]"
                 onClick={() => {
+                  if (!isAuthenticated) {
+                    redirectToLogin(0)
+                    return
+                  }
                   setProfileOpen(true)
                   setMobileMenuOpen(false)
                 }}
               >
                 <UserAvatar session={session} />
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">{session?.nickname || session?.username}</div>
-                  <div className="text-xs text-muted-foreground">{session?.role === 'ADMIN' ? '管理员' : '普通用户'}</div>
+                  <div className="truncate text-sm font-medium">{session?.nickname || session?.username || '未登录'}</div>
+                  <div className="text-xs text-muted-foreground">{session ? (session.role === 'ADMIN' ? '管理员' : '普通用户') : '点击登录'}</div>
                 </div>
               </button>
               {/* 设置按钮 */}
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-9 w-9 shrink-0"
-                onClick={() => {
-                  setProfileOpen(true)
-                  setMobileMenuOpen(false)
-                }}
-              >
-                <Settings className="h-4 w-4" />
-              </Button>
+              {isAuthenticated && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 shrink-0"
+                  onClick={() => {
+                    setProfileOpen(true)
+                    setMobileMenuOpen(false)
+                  }}
+                >
+                  <Settings className="h-4 w-4" />
+                </Button>
+              )}
               {/* 登出按钮 */}
-              <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0" onClick={logout}>
-                <LogOut className="h-4 w-4" />
-              </Button>
+              {isAuthenticated && (
+                <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0" onClick={logout}>
+                  <LogOut className="h-4 w-4" />
+                </Button>
+              )}
             </div>
           </div>
         </DialogContent>

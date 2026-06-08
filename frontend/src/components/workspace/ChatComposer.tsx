@@ -156,6 +156,7 @@ export function ChatComposer({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
+      // 发送前复用 canSend，统一拦截 loading、disabled 和临时资料解析中的状态。
       if (canSend) onSubmit()
     }
   }
@@ -190,6 +191,7 @@ export function ChatComposer({
     setAttachmentError('')
     const remainingSlots = Math.max(0, MAX_IMAGES - images.length)
     const nextImages: ChatImagePayload[] = []
+    // 只处理剩余槽位内的图片，避免一次粘贴多张图突破后端限制。
     for (const file of imageFiles.slice(0, remainingSlots)) {
       nextImages.push(await compressImage(file))  // 压缩图片（限制尺寸和质量）
     }
@@ -224,6 +226,7 @@ export function ChatComposer({
     if (!files || files.length === 0) return
     setAttachmentError('')
     const selectedFiles = Array.from(files)
+    // 同一个 input 同时承载图片和文档，先拆分类型再分别进入图片压缩或资料上传流程。
     const imageFiles = selectedFiles.filter((file) => file.type.startsWith('image/'))
     const documentFiles = selectedFiles.filter((file) => !file.type.startsWith('image/'))
     if (imageFiles.length > 0) {
@@ -242,7 +245,7 @@ export function ChatComposer({
       // 资料模式：逐个上传
       documentFiles.forEach((file) => onUploadMaterialFile(file))
     } else {
-      // 没有上传回调时，打开上传弹窗
+      // 没有直接上传回调时降级打开上传弹窗，让父组件接管持久资料上传。
       onOpenUploadMaterial?.()
     }
   }

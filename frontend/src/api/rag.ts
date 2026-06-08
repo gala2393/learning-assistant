@@ -1,6 +1,7 @@
 import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
+import { hasStoredSession } from '@/lib/auth-gate'
 import type {
   ChatPayload, HistoryItem, RagEvaluationSuiteDetail, RagEvaluationSuitePayload,
   RagEvaluationSuiteResult, RagEvaluationSuiteRun, RagEvaluationSuiteSavePayload,
@@ -79,6 +80,7 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
   const controller = new AbortController()
   const base = (import.meta.env.VITE_API_BASE as string) || '/api'
   const session = localStorage.getItem('learning-assistant.frontend.session')
+  // 流式接口绕过 Axios，需要在 fetch 里手动补 Authorization。
   const token = session ? JSON.parse(session).token : ''
 
   fetch(`${base}/rag/chat/stream`, {
@@ -103,6 +105,7 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
         for (const rawLine of frame.split('\n')) {
           const line = rawLine.trimEnd()
           if (line.startsWith('event:')) currentEvent = line.slice(6).trim()
+          // data 可能跨多行，先收集后用换行拼回 JSON 字符串。
           else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
         }
         if (!currentEvent || dataLines.length === 0) return
@@ -125,6 +128,7 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
         let frameEnd = buffer.indexOf('\n\n')
         while (frameEnd >= 0) {
           const frame = buffer.slice(0, frameEnd)
+          // 保留未完整到达的尾部数据，下一次 reader.read 后继续拼接。
           buffer = buffer.slice(frameEnd + 2)
           processFrame(frame)
           frameEnd = buffer.indexOf('\n\n')
@@ -225,27 +229,37 @@ function groupHistoryByConversation(items: HistoryItem[]): HistoryItem[] {
 function readLocalConversationMap() {
   if (typeof window === 'undefined') return {}
   try { return JSON.parse(localStorage.getItem(CHAT_HISTORY_CONVERSATION_KEY) || '{}') }
+  // 本地对话映射损坏时清除，避免历史列表分组一直失败。
   catch { localStorage.removeItem(CHAT_HISTORY_CONVERSATION_KEY); return {} }
 }
 
 // ===== React Hooks =====
-export function useChat() { return useMutation({ mutationFn: chat, onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['history'] }); queryClient.invalidateQueries({ queryKey: ['rag-usage'] }); queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] }) } }) }
-export function useRagUsage() { return useQuery({ queryKey: ['rag-usage'], queryFn: getRagUsage }) }
-export function useHistory() { return useQuery({ queryKey: ['history'], queryFn: listHistory }) }
-export function useHistoryDetail(id: string | null) { return useQuery({ queryKey: ['history', id], queryFn: () => getHistory(id!), enabled: !!id }) }
+export function useChat() { return useMutation({ mutationFn: chat, onSuccess: () => {
+  // 新问答会新增历史、消耗额度，并影响管理端使用流水。
+  queryClient.invalidateQueries({ queryKey: ['history'] }); queryClient.invalidateQueries({ queryKey: ['rag-usage'] }); queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
+} }) }
+export function useRagUsage() { return useQuery({ queryKey: ['rag-usage'], queryFn: getRagUsage, enabled: hasStoredSession() }) }
+export function useHistory() { return useQuery({ queryKey: ['history'], queryFn: listHistory, enabled: hasStoredSession() }) }
+export function useHistoryDetail(id: string | null) { return useQuery({ queryKey: ['history', id], queryFn: () => getHistory(id!), enabled: !!id && hasStoredSession() }) }
 export function useDeleteHistory() { return useMutation({ mutationFn: deleteHistory, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] }) }) }
 export function useRenameHistory() { return useMutation({ mutationFn: ({ id, title }: { id: string; title: string }) => renameHistory(id, title), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] }) }) }
 export function useTogglePinHistory() { return useMutation({ mutationFn: togglePinHistory, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] }) }) }
-export function useClearHistory() { return useMutation({ mutationFn: clearHistory, onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['history'] }); queryClient.invalidateQueries({ queryKey: ['favorites'] }) } }) }
+export function useClearHistory() { return useMutation({ mutationFn: clearHistory, onSuccess: () => {
+  // 清空历史后收藏列表中可能还有指向历史的问题，需要一并刷新。
+  queryClient.invalidateQueries({ queryKey: ['history'] }); queryClient.invalidateQueries({ queryKey: ['favorites'] })
+} }) }
 export function useSummarizeMaterial() { return useMutation({ mutationFn: summarizeMaterial, onSuccess: (_d, materialId) => { queryClient.invalidateQueries({ queryKey: ['summaries', materialId] }) } }) }
-export function useMaterialSummary(materialId: string | null) { return useQuery({ queryKey: ['summaries', materialId], queryFn: () => getMaterialSummary(materialId!), enabled: !!materialId }) }
-export function useMaterialSummaryHistory(materialId: string | null) { return useQuery({ queryKey: ['summaries', materialId, 'history'], queryFn: () => listMaterialSummaries(materialId!), enabled: !!materialId }) }
+export function useMaterialSummary(materialId: string | null) { return useQuery({ queryKey: ['summaries', materialId], queryFn: () => getMaterialSummary(materialId!), enabled: !!materialId && hasStoredSession() }) }
+export function useMaterialSummaryHistory(materialId: string | null) { return useQuery({ queryKey: ['summaries', materialId, 'history'], queryFn: () => listMaterialSummaries(materialId!), enabled: !!materialId && hasStoredSession() }) }
 export function useRunEvaluationSuite() { return useMutation({ mutationFn: runEvaluationSuite }) }
 export function useEvaluationSuites() { return useQuery({ queryKey: ['rag-evaluation-suites'], queryFn: listEvaluationSuites }) }
 export function useEvaluationSuiteDetail(id: string | null) { return useQuery({ queryKey: ['rag-evaluation-suites', id], queryFn: () => getEvaluationSuite(id!), enabled: !!id }) }
 export function useEvaluationSuiteRuns(id: string | null) { return useQuery({ queryKey: ['rag-evaluation-suites', id, 'runs'], queryFn: () => listEvaluationSuiteRuns(id!), enabled: !!id }) }
 export function useSaveEvaluationSuite() { return useMutation({ mutationFn: saveEvaluationSuite, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] }) }) }
-export function useUpdateEvaluationSuite() { return useMutation({ mutationFn: ({ id, payload }: { id: string; payload: RagEvaluationSuiteSavePayload }) => updateEvaluationSuite(id, payload), onSuccess: (_d, v) => { queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] }); queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', v.id] }) } }) }
+export function useUpdateEvaluationSuite() { return useMutation({ mutationFn: ({ id, payload }: { id: string; payload: RagEvaluationSuiteSavePayload }) => updateEvaluationSuite(id, payload), onSuccess: (_d, v) => {
+  // 套件更新同时影响列表摘要和当前详情页，两个 queryKey 都要失效。
+  queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] }); queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', v.id] })
+} }) }
 export function useDeleteEvaluationSuite() { return useMutation({ mutationFn: deleteEvaluationSuite, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] }) }) }
 export function useRunSavedEvaluationSuite() { return useMutation({ mutationFn: runSavedEvaluationSuite, onSuccess: (_d, id) => { queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] }); queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', id] }); queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', id, 'runs'] }) } }) }
 export function useUpdateEvaluationSuiteSchedule() { return useMutation({ mutationFn: ({ id, payload }: { id: string; payload: { scheduled: boolean; intervalHours: number } }) => updateEvaluationSuiteSchedule(id, payload), onSuccess: (_d, v) => { queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites'] }); queryClient.invalidateQueries({ queryKey: ['rag-evaluation-suites', v.id] }) } }) }

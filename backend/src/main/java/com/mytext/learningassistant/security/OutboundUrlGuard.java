@@ -140,6 +140,7 @@ public class OutboundUrlGuard {
 
         // 如果配置允许内网访问，跳过所有检查（开发模式）
         if (allowPrivateNetwork) {
+            // 仅用于受控开发环境；生产默认关闭以避免 SSRF 访问内网。
             return;
         }
 
@@ -149,6 +150,7 @@ public class OutboundUrlGuard {
         }
 
         // 如果主机名是 IP 地址字面量（如 "192.168.1.1" 或 "::1"），直接检查 IP
+        // 先查字面量可以拦截不依赖 DNS 的内网地址。
         validateIpLiteral(normalizedHost);
 
         // 如果不需要 DNS 解析验证，到此结束
@@ -162,6 +164,7 @@ public class OutboundUrlGuard {
         try {
             InetAddress[] addresses = InetAddress.getAllByName(normalizedHost);
             for (InetAddress address : addresses) {
+                // 任意一个解析结果指向内网都拒绝，防止多 A 记录绕过。
                 if (isBlockedAddress(address)) {
                     throw new BusinessException(400, "不允许访问本机或内网地址");
                 }

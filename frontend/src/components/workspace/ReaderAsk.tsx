@@ -36,6 +36,9 @@ import { Send, Bot, ArrowRight, MousePointer, Sparkles, Trash2 } from 'lucide-re
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
 import { queryClient } from '@/lib/query-client'
 import { cn, truncate } from '@/lib/utils'
+import { useAuth } from '@/context/AuthContext'
+import { useToast } from '@/components/ui/toast'
+import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
 import type { Material, MaterialChunk, RagSource } from '@/types'
 
 /**
@@ -84,6 +87,8 @@ export function ReaderAsk({
   className,
 }: ReaderAskProps) {
   const navigate = useNavigate()
+  const { isAuthenticated } = useAuth()
+  const { showToast } = useToast()
 
   // === Refs ===
   /** 输入框引用（用于聚焦控制） */
@@ -126,6 +131,12 @@ export function ReaderAsk({
       : `今日剩余：${ragUsage.remainingToday ?? 0}/${ragUsage.dailyLimit}`
     : ''
   const usageExhausted = !!ragUsage && !ragUsage.unlimited && (ragUsage.remainingToday ?? 0) <= 0
+  const requireLogin = useCallback(() => {
+    if (isAuthenticated) return true
+    showToast(LOGIN_REQUIRED_MESSAGE, 2000)
+    redirectToLogin()
+    return false
+  }, [isAuthenticated, showToast])
 
   // === 派生值 ===
   /** 是否可以提问（有输入、未在加载、有资料、未超出使用额度） */
@@ -140,6 +151,7 @@ export function ReaderAsk({
   const chunkIndexById = useMemo(() => {
     const map = new Map<string, number>()
     ;(chunks || []).forEach((candidate, index) => {
+      // 来源里的 chunkId 可能是 number 或 string，统一转 string 做稳定匹配。
       map.set(String(candidate.id), index)
     })
     return map
@@ -157,6 +169,7 @@ export function ReaderAsk({
       const sel = window.getSelection()
       const text = sel?.toString().trim()
       if (text && text.length > 5 && text.length < 500) {
+        // 只接收短选区，避免整页误选导致 prompt 过长或覆盖用户当前问题。
         setSelectedText(text)
         selectionRef.current = text
       }
@@ -175,6 +188,10 @@ export function ReaderAsk({
    * AI 会根据当前片段内容生成相关的推荐问题
    */
   useEffect(() => {
+    if (!isAuthenticated) {
+      setSuggestedQuestions([])
+      return
+    }
     if (!material || !chunk) {
       setSuggestedQuestions([])
       return
@@ -182,7 +199,7 @@ export function ReaderAsk({
     suggestQuestions(material.id, chunk.id)
       .then(setSuggestedQuestions)
       .catch(() => setSuggestedQuestions([]))
-  }, [material?.id, chunk?.id])
+  }, [isAuthenticated, material?.id, chunk?.id])
 
   // === 核心交互逻辑 ===
 
@@ -218,6 +235,7 @@ export function ReaderAsk({
    * 7. 完成后刷新使用额度缓存
    */
   const submitQuestion = useCallback((rawQuestion: string, selection?: string | null) => {
+    if (!requireLogin()) return
     const q = rawQuestion.trim()
     if (!q || loading || !material) return
 
@@ -247,7 +265,8 @@ export function ReaderAsk({
     setSourcesByMessageId((prev) => ({ ...prev, [assistantId]: [] }))
     setErrorByMessageId((prev) => ({ ...prev, [assistantId]: '' }))
     answerBufferRef.current = ''
-    abortRef.current?.abort()  // 取消之前的请求（如果有）
+    // 新问题发起前取消旧流，防止旧 SSE 回调继续写入新的 assistant 消息。
+    abortRef.current?.abort()
 
     // 发起 SSE 流式请求
     abortRef.current = chatStream(
@@ -294,6 +313,7 @@ export function ReaderAsk({
         },
         /** onSources: 收到 RAG 检索来源 */
         onSources: (sources) => {
+          // 来源先写 ref，再写 state；onDone 闭包读取 ref，避免拿到过期 sources。
           sourcesRef.current = { ...sourcesRef.current, [assistantId]: sources }
           setSourcesByMessageId((prev) => ({ ...prev, [assistantId]: sources }))
         },
@@ -336,7 +356,7 @@ export function ReaderAsk({
         },
       },
     )
-  }, [chunk?.id, currentPageChunkIds, currentPageNo, loading, material, messages])
+  }, [chunk?.id, currentPageChunkIds, currentPageNo, loading, material, messages, requireLogin])
 
   /** 提交问题（组合选中文本一起发送） */
   const handleSubmit = () => {

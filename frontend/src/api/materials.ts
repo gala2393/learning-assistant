@@ -1,6 +1,7 @@
 import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
+import { hasStoredSession } from '@/lib/auth-gate'
 import type { Material, MaterialChunk, MaterialPage, PageResult, TemporaryMaterial } from '@/types'
 
 /**
@@ -123,6 +124,7 @@ export async function uploadTemporaryMaterial(
   onProgress?: (progress: { phase: 'uploading' | 'processing'; percent: number; message?: string }) => void,
 ): Promise<TemporaryMaterial> {
   if (params.file.size > MAX_TEMPORARY_MATERIAL_BYTES) {
+    // 临时问答走同步解析，超大文件会卡住请求；引导用户使用后台解析流程。
     throw new Error('智能问答临时资料最大支持 500MB；大文件请切换到资料问答上传，系统会在后台解析并显示进度。')
   }
   const formData = new FormData()
@@ -133,6 +135,7 @@ export async function uploadTemporaryMaterial(
     timeout: 180000,
     onUploadProgress: (event) => {
       if (!event.total) return
+      // 上传阶段最多推进到 60%，剩余进度留给后端解析，避免进度条误报完成。
       const percent = Math.max(1, Math.min(60, Math.round((event.loaded / event.total) * 60)))
       onProgress?.({ phase: 'uploading', percent, message: `正在上传 ${percent}%` })
     },
@@ -173,6 +176,7 @@ async function uploadChunkWithRetry(sessionId: string, params: { chunk: Blob; ch
     } catch (error) {
       lastError = error
       if (attempt < CHUNK_UPLOAD_RETRY_COUNT - 1) {
+        // 分片失败通常是瞬时网络抖动，递增等待能降低连续重试压力。
         await sleep(600 * (attempt + 1))  // 等待 600ms、1200ms
       }
     }
@@ -222,6 +226,7 @@ export async function uploadMaterialInChunks(
   for (let index = latest.uploadedChunks || 0; index < totalChunks; index++) {
     const start = index * chunkSize
     const end = Math.min(params.file.size, start + chunkSize)
+    // 只切当前片的 Blob，避免把大文件完整读入内存。
     latest = await uploadChunkWithRetry(latest.sessionId, {
       chunk: params.file.slice(start, end), chunkIndex: index, totalChunks,
     }) as UploadSession
@@ -242,6 +247,7 @@ async function waitForUploadProcessing(sessionId: string, totalChunks: number, o
       return session
     }
     if (session.status === 'FAILED') throw new Error(session.errorMessage || '资料解析失败')
+    // 后端解析进度可能缺失，统一归一化后再通知 UI，避免进度条越界。
     onProgress?.({ phase: 'processing', percent: normalizeProcessingPercent(session.parseProgressPercent), uploadedChunks: totalChunks, totalChunks, stage: session.parseStage || '后台解析中', message: session.parseMessage })
     await sleep(PROCESSING_POLL_INTERVAL_MS)
   }
@@ -253,6 +259,7 @@ function buildClientUploadId(file: File): string {
   return ['web', file.name, file.size, file.lastModified].join('-').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180)
 }
 function sleep(ms: number) { return new Promise((resolve) => window.setTimeout(resolve, ms)) }
+// 缺少后端进度时给一个低起点；未成功前最高 99%，避免 UI 提前显示完成。
 function normalizeProcessingPercent(percent?: number | null) { if (typeof percent !== 'number' || Number.isNaN(percent)) return 5; return Math.max(0, Math.min(99, Math.round(percent))) }
 function normalizeMaterial(material: Material): Material { return { ...material, id: String(material.id), parseProgressPercent: typeof material.parseProgressPercent === 'number' ? material.parseProgressPercent : null } }
 function normalizeChunk(chunk: MaterialChunk): MaterialChunk { return { ...chunk, id: String(chunk.id), materialId: String(chunk.materialId) } }
@@ -280,15 +287,20 @@ export async function deleteMaterial(id: string): Promise<void> {
 /** 资料列表 query — 有资料在解析中时每 1.5 秒自动刷新（显示实时进度） */
 export function useMaterials() {
   return useQuery({ queryKey: ['materials'], queryFn: listMaterials,
+    enabled: hasStoredSession(),
+    // 只有存在解析中资料时才轮询，解析完成后停止刷新，减少无意义请求。
     refetchInterval: (query) => { const data = query.state.data as Material[] | undefined; return data?.some(isMaterialParsing) ? 1500 : false } })
 }
 function isMaterialParsing(m: Material) { return ['PENDING', 'PARSING', 'PROCESSING'].includes(m.parseStatus) && (m.parseProgressPercent ?? 0) < 100 }
 
-export function useMaterial(id: string | null) { return useQuery({ queryKey: ['materials', id], queryFn: () => getMaterial(id!), enabled: !!id }) }
-export function useMaterialChunks(id: string | null) { return useQuery({ queryKey: ['materials', id, 'chunks'], queryFn: () => getMaterialChunks(id!), enabled: !!id }) }
-export function useMaterialPages(id: string | null) { return useQuery({ queryKey: ['materials', id, 'pages'], queryFn: () => getMaterialPages(id!), enabled: !!id }) }
+export function useMaterial(id: string | null) { return useQuery({ queryKey: ['materials', id], queryFn: () => getMaterial(id!), enabled: !!id && hasStoredSession() }) }
+export function useMaterialChunks(id: string | null) { return useQuery({ queryKey: ['materials', id, 'chunks'], queryFn: () => getMaterialChunks(id!), enabled: !!id && hasStoredSession() }) }
+export function useMaterialPages(id: string | null) { return useQuery({ queryKey: ['materials', id, 'pages'], queryFn: () => getMaterialPages(id!), enabled: !!id && hasStoredSession() }) }
 export function useUploadMaterial() { return useMutation({ mutationFn: uploadMaterial, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }
 export function useImportWebMaterial() { return useMutation({ mutationFn: importWebMaterial, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }
 export function useUpdateMaterial() { return useMutation({ mutationFn: ({ id, payload }: { id: string; payload: { title?: string; sourceUrl?: string } }) => updateMaterial(id, payload), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }
-export function useReparseMaterial() { return useMutation({ mutationFn: reparseMaterial, onSuccess: (_m, id) => { queryClient.invalidateQueries({ queryKey: ['materials'] }); queryClient.invalidateQueries({ queryKey: ['materials', id] }); queryClient.invalidateQueries({ queryKey: ['materials', id, 'chunks'] }); queryClient.invalidateQueries({ queryKey: ['history'] }) } }) }
+export function useReparseMaterial() { return useMutation({ mutationFn: reparseMaterial, onSuccess: (_m, id) => {
+  // 重新解析会影响列表状态、详情、分块内容，以及依赖旧分块的历史检索展示。
+  queryClient.invalidateQueries({ queryKey: ['materials'] }); queryClient.invalidateQueries({ queryKey: ['materials', id] }); queryClient.invalidateQueries({ queryKey: ['materials', id, 'chunks'] }); queryClient.invalidateQueries({ queryKey: ['history'] })
+} }) }
 export function useDeleteMaterial() { return useMutation({ mutationFn: deleteMaterial, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }

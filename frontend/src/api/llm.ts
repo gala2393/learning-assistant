@@ -1,6 +1,7 @@
 import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
+import { hasStoredSession } from '@/lib/auth-gate'
 import type { UserLlmConfig, UserLlmConfigPayload, UserLlmTestResult } from '@/types'
 
 /**
@@ -42,7 +43,7 @@ export async function deleteUserLlmConfig(id: string | number): Promise<UserLlmC
 
 /** 获取 LLM 配置 query */
 export function useUserLlmConfig() {
-  return useQuery({ queryKey: ['llm', 'user-config'], queryFn: getUserLlmConfig })
+  return useQuery({ queryKey: ['llm', 'user-config'], queryFn: getUserLlmConfig, enabled: hasStoredSession() })
 }
 
 /** 保存 LLM 配置 mutation — 保存后刷新配置列表和使用统计 */

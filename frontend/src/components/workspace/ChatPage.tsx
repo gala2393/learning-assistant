@@ -21,6 +21,8 @@ import { queryClient } from '@/lib/query-client'
 import { useToast } from '@/components/ui/toast'
 import { useGlobalSearch } from '@/hooks/useGlobalSearch'
 import { GlobalSearch } from '@/components/layout/GlobalSearch'
+import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
+import { useAuth } from '@/context/AuthContext'
 import {
   getChatSessionSnapshot,
   resetChatSession,
@@ -99,6 +101,7 @@ import type { UploadProgress, UploadProgressItem } from '@/api/materials'
 export function ChatPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
+  const { isAuthenticated } = useAuth()
 
   // === 数据获取（React Query hooks） ===
   /** 历史会话列表 */
@@ -124,6 +127,23 @@ export function ChatPage() {
 
   const { showToast } = useToast()
   const { open: searchOpen, setOpen: setSearchOpen, close: closeSearch } = useGlobalSearch()
+
+  const requireLogin = () => {
+    if (isAuthenticated) return true
+    showToast(LOGIN_REQUIRED_MESSAGE, 2000)
+    redirectToLogin()
+    return false
+  }
+
+  const openUploadDialog = () => {
+    if (!requireLogin()) return
+    setUploadDialogOpen(true)
+  }
+
+  const openModelDialog = () => {
+    if (!requireLogin()) return
+    setModelDialogOpen(true)
+  }
 
   // === 模型切换弹窗状态 ===
   /** 模型切换弹窗是否打开 */
@@ -207,6 +227,7 @@ export function ChatPage() {
    * 初始化模型弹窗的表单字段
    */
   useEffect(() => {
+    if (!llmConfig) return
     setModelMode(llmConfig.enabled ? 'CUSTOM' : 'SYSTEM')
     setSelectedConfigId(llmConfig.activeConfigId == null ? null : String(llmConfig.activeConfigId))
     const active = llmConfig.configs?.find((item) => String(item.id) === String(llmConfig.activeConfigId))
@@ -226,6 +247,7 @@ export function ChatPage() {
    * - materialId + chunkId：切换到指定的资料和片段
    */
   useEffect(() => {
+    if (newChatParam === '1') {
       resetChatSession()
       setSearchParams(new URLSearchParams(), { replace: true })
       return
@@ -234,12 +256,14 @@ export function ChatPage() {
     if (historyParam) {
       const target = historyItems.find((item) => String(item.id) === historyParam)
       if (target && selectedHistoryId !== historyParam) {
+        // 历史会话以服务端快照为准，避免把当前未完成的聊天状态混入历史详情。
         selectHistorySession(target)
       }
       return
     }
 
     if (materialParam && (mode !== 'MATERIAL' || selectedMaterialId !== materialParam || selectedChunkId !== chunkParam)) {
+      // 资料阅读器跳转过来时，仅同步资料上下文，不主动创建新消息。
       updateChatSession({
         mode: 'MATERIAL',
         materialId: materialParam,
@@ -267,6 +291,7 @@ export function ChatPage() {
    */
   const handleModeChange = (newMode: 'GENERAL' | 'MATERIAL') => {
     if (newMode === mode) return
+    // 切到通用模式时清空资料绑定，切回资料模式时保留最近一次选中的资料。
     const nextMaterialId = newMode === 'MATERIAL' ? selectedMaterialId : null
     resetChatSession({
       mode: newMode,
@@ -292,6 +317,7 @@ export function ChatPage() {
     deleteHistoryMutation.mutate(id, {
       onSuccess: () => {
         showToast('会话已删除')
+        // 删除当前正在查看的会话时，回到同模式的新会话，避免界面继续指向失效 historyId。
         if (selectedHistoryId === id || currentQuestionId === id) handleNewChat()
       },
       onError: (error) => showToast(error instanceof Error ? error.message : '删除失败'),
@@ -324,6 +350,7 @@ export function ChatPage() {
   const handleToggleFavorite = (item: HistoryItem) => {
     const favoriteId = getHistoryFavoriteId(item)
     if (favoriteId) {
+      // favoriteId 可能来自收藏列表或历史项冗余字段，优先用真实收藏记录删除。
       deleteFavoriteMutation.mutate(favoriteId, {
         onSuccess: () => showToast('已取消收藏'),
         onError: (error) => showToast(error instanceof Error ? error.message : '取消收藏失败'),
@@ -342,6 +369,7 @@ export function ChatPage() {
     nextParams.set('historyId', String(item.id))
     const source = item.sources?.[0]
     if (source) {
+      // 带上首个来源，聊天页恢复历史时也能同步左侧资料/片段上下文。
       nextParams.set('materialId', source.materialId)
       nextParams.set('chunkId', source.chunkId)
     }
@@ -358,6 +386,7 @@ export function ChatPage() {
   }
 
   const handleUploadMaterial = async (data: { title?: string; file?: File; files?: File[] }) => {
+    if (!requireLogin()) return
     const files = data.files?.length ? data.files : data.file ? [data.file] : []
     await handleUploadMaterialFiles(files, data.title)
   }
@@ -378,7 +407,9 @@ export function ChatPage() {
    *    - 有失败时显示错误信息
    */
   const handleUploadMaterialFiles = async (files: File[], title?: string) => {
+    if (!requireLogin()) return
     if (files.length === 0) return
+    // 持久资料上传与临时资料共用顶部 uploading 状态，进入前先清空两类进度/错误残留。
     setUploading(true)
     setUploadProgress(null)
     setUploadProgressItems(createUploadProgressItems(files))
@@ -386,6 +417,7 @@ export function ChatPage() {
     try {
       const results = await Promise.allSettled(files.map((file, index) => {
         const id = uploadProgressItemId(file, index)
+        // 每个文件独立分片上传，失败不会中断其他文件的上传结果收集。
         return uploadMaterialInChunks({
           file,
           title: files.length === 1 ? title : undefined,
@@ -414,6 +446,7 @@ export function ChatPage() {
       const failedCount = results.length - successfulMaterialIds.length
       await queryClient.invalidateQueries({ queryKey: ['materials'] })
       if (failedCount > 0) {
+        // 保留进度列表让用户看到具体失败项，不自动关闭上传弹窗。
         const message = `${failedCount}/${files.length} 份资料上传失败，请查看进度列表`
         setTemporaryUploadError(message)
         showToast(message)
@@ -422,6 +455,7 @@ export function ChatPage() {
       setUploadDialogOpen(false)
       const firstMaterialId = successfulMaterialIds[0]
       if (firstMaterialId) {
+        // 多文件上传完成后选中第一份资料，给后续资料问答一个确定的默认上下文。
         updateChatSession({
           mode: 'MATERIAL',
           materialId: firstMaterialId,
@@ -443,6 +477,7 @@ export function ChatPage() {
   }
 
   const handleUploadTemporaryMaterial = async (file: File) => {
+    if (!requireLogin()) return
     await handleUploadTemporaryMaterials([file])
   }
 
@@ -465,9 +500,11 @@ export function ChatPage() {
    * 5. 最终状态清理（600ms 后隐藏进度条）
    */
   const handleUploadTemporaryMaterials = async (files: File[]) => {
+    if (!requireLogin()) return
     if (files.length === 0) return
     const tooLargeFile = files.find((file) => file.size > MAX_TEMPORARY_MATERIAL_BYTES)
     if (tooLargeFile) {
+      // 临时资料直接进入对话上下文，超大文件改走持久资料流程以获得后台解析和进度跟踪。
       const message = `${tooLargeFile.name} 超过智能问答临时资料上限 ${formatBytes(MAX_TEMPORARY_MATERIAL_BYTES)}；大文件请切换到资料问答上传，系统会在后台解析并显示进度。`
       setTemporaryUploadError(message)
       setTemporaryUploadProgress(null)
@@ -491,6 +528,7 @@ export function ChatPage() {
     try {
       const progressByIndex = new Map<number, { phase: 'uploading' | 'processing'; percent: number; message?: string }>()
       const updateAggregateProgress = () => {
+        // 多个临时文件共用一个提示条，这里把各文件进度折算为平均百分比。
         const values = files.map((_, index) => progressByIndex.get(index) || { phase: 'uploading' as const, percent: 1 })
         const completed = values.filter((progress) => progress.percent >= 100).length
         const percent = Math.max(1, Math.min(99, Math.round(values.reduce((sum, progress) => sum + progress.percent, 0) / values.length)))
@@ -513,6 +551,7 @@ export function ChatPage() {
             window.setTimeout(() => {
               const current = progressByIndex.get(index)
               if (current?.phase === 'uploading') {
+                // 后端可能在上传后进入 OCR/解析但尚未回调，先切到解析态避免进度条卡在上传中。
                 progressByIndex.set(index, { phase: 'processing', percent: 65, message: '正在解析资料，扫描版 PDF 会进行 OCR' })
                 updateAggregateProgress()
               }
@@ -532,6 +571,7 @@ export function ChatPage() {
         }))
       const failedCount = results.length - uploaded.length
       if (uploaded.length === 0) {
+        // 全部失败时抛错进入统一错误分支；部分失败则保留成功解析的资料。
         throw new Error(failedCount > 0 ? `${failedCount}/${files.length} 份临时资料解析失败` : '临时资料解析失败，请重试')
       }
       const temporary = mergeTemporaryMaterials(temporaryMaterial ? [temporaryMaterial, ...uploaded] : uploaded)
@@ -570,9 +610,11 @@ export function ChatPage() {
    * 4. 更新 URL 参数
    */
   const handleSubmit = () => {
+    if (!requireLogin()) return
     const question = input.trim()
     if (!question || streaming) return
     if (mode === 'MATERIAL' && !selectedMaterialId) {
+      // 资料问答必须有 materialId，否则后端无法限定 RAG 检索范围。
       showToast('请先上传或选择资料')
       return
     }
@@ -582,6 +624,7 @@ export function ChatPage() {
       mode,
       materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
       chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
+      // 通用模式下把临时资料摘要作为 selectedText 传入，复用后端已有上下文字段。
       selectedText: mode === 'GENERAL' && temporaryMaterial
         ? buildTemporaryMaterialContext(temporaryMaterial)
         : null,
@@ -600,6 +643,7 @@ export function ChatPage() {
   })
 
   const handleTestModel = () => {
+    if (!requireLogin()) return
     setDeleteConfirmId(null)
     setActionNotice({ type: 'info', message: '正在测试连接...' })
     testLlmConfigMutation.mutate(currentLlmPayload(), {
@@ -618,6 +662,7 @@ export function ChatPage() {
     const activeId = config.activeConfigId ?? selectedConfigId ?? `local-${Date.now()}`
     const exists = (config.configs || []).some((item) => String(item.id) === String(activeId))
     if (exists) return config
+    // 保存接口返回延迟或缺少新配置时，先在本地补一条，保证弹窗列表立即可见。
     return {
       ...config,
       enabled: true,
@@ -638,6 +683,7 @@ export function ChatPage() {
   }
 
   const handleSaveModel = () => {
+    if (!requireLogin()) return
     setDeleteConfirmId(null)
     setActionNotice({ type: 'info', message: modelMode === 'CUSTOM' ? '正在应用模型配置...' : '正在应用系统模型...' })
     saveLlmConfigMutation.mutate(currentLlmPayload(), {
@@ -843,7 +889,7 @@ export function ChatPage() {
               variant="ghost"
               size="sm"
               className="hidden h-7 shrink-0 rounded-full px-2.5 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 sm:inline-flex"
-              onClick={() => setUploadDialogOpen(true)}
+              onClick={openUploadDialog}
             >
               <Upload className="mr-1 h-3.5 w-3.5" />
               上传资料
@@ -883,7 +929,7 @@ export function ChatPage() {
               {parsedMaterials.length === 0 ? (
                 <div className="flex items-center justify-between gap-3 rounded-2xl border border-dashed border-slate-300 bg-[#fafafa] px-4 py-3 text-sm text-muted-foreground dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
                   <span>暂无已解析资料，请先导入并完成解析。</span>
-                  <Button size="sm" variant="outline" onClick={() => setUploadDialogOpen(true)}>
+                  <Button size="sm" variant="outline" onClick={openUploadDialog}>
                     <Upload className="mr-1.5 h-3.5 w-3.5" />
                     上传资料
                   </Button>
@@ -909,7 +955,7 @@ export function ChatPage() {
                     type="button"
                     variant="outline"
                     className="h-11 shrink-0 rounded-2xl px-3"
-                    onClick={() => setUploadDialogOpen(true)}
+                    onClick={openUploadDialog}
                   >
                     <Upload className="h-4 w-4 sm:mr-1.5" />
                     <span className="hidden sm:inline">上传</span>
@@ -931,10 +977,10 @@ export function ChatPage() {
             usageLabel={usageLabel}
             modelLabel={effectiveLlmConfig?.activeLabel || 'gpt5.5模型'}
             customModelEnabled={!!effectiveLlmConfig?.enabled}
-            onOpenModelSettings={() => setModelDialogOpen(true)}
+            onOpenModelSettings={openModelDialog}
             images={images}
             onImagesChange={(nextImages) => updateChatSession({ images: nextImages })}
-            onOpenUploadMaterial={!isGeneral ? () => setUploadDialogOpen(true) : undefined}
+            onOpenUploadMaterial={!isGeneral ? openUploadDialog : undefined}
             onUploadMaterialFile={!isGeneral ? (file) => handleUploadMaterial({ file }) : undefined}
             onUploadMaterialFiles={!isGeneral ? handleUploadMaterialFiles : undefined}
             onUploadTemporaryMaterial={isGeneral ? handleUploadTemporaryMaterial : undefined}
@@ -966,10 +1012,10 @@ export function ChatPage() {
             usageLabel={usageLabel}
             modelLabel={effectiveLlmConfig?.activeLabel || 'gpt5.5模型'}
             customModelEnabled={!!effectiveLlmConfig?.enabled}
-            onOpenModelSettings={() => setModelDialogOpen(true)}
+            onOpenModelSettings={openModelDialog}
             images={images}
             onImagesChange={(nextImages) => updateChatSession({ images: nextImages })}
-            onOpenUploadMaterial={!isGeneral ? () => setUploadDialogOpen(true) : undefined}
+            onOpenUploadMaterial={!isGeneral ? openUploadDialog : undefined}
             onUploadMaterialFile={!isGeneral ? (file) => handleUploadMaterial({ file }) : undefined}
             onUploadMaterialFiles={!isGeneral ? handleUploadMaterialFiles : undefined}
             onUploadTemporaryMaterial={isGeneral ? handleUploadTemporaryMaterial : undefined}
@@ -1248,6 +1294,12 @@ function createUploadProgressItems(files: File[]): UploadProgressItem[] {
 
 /** 更新指定文件的进度条状态（不可变更新） */
 function updateUploadProgressItem(
+  items: UploadProgressItem[],
+  id: string,
+  progress: UploadProgress | null,
+  status?: UploadProgressItem['status'],
+  error?: string | null,
+): UploadProgressItem[] {
   return items.map((item) => {
     if (item.id !== id) return item
     if (!progress) {

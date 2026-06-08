@@ -15,7 +15,7 @@
  */
 
 import { useEffect } from 'react'
-import { Outlet, useNavigate } from 'react-router-dom'
+import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { AuthParticles } from './AuthParticles'
 import { useAuth } from '@/context/AuthContext'
 
@@ -23,6 +23,7 @@ export function AuthLayout() {
   // 从认证上下文中获取当前用户状态
   const { isAuthenticated, isLoading, isAdmin } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
 
   /**
    * 已登录用户自动跳转：
@@ -33,10 +34,15 @@ export function AuthLayout() {
     if (isAuthenticated && !isLoading) {
       // 清除之前保存的聊天会话 ID，确保进入全新对话
       sessionStorage.removeItem('learning-assistant.chat.current')
+      const redirect = new URLSearchParams(location.search).get('redirect')
+      if (redirect?.startsWith('/') && !redirect.startsWith('//')) {
+        navigate(redirect, { replace: true })
+        return
+      }
       // replace: true 表示替换历史记录，用户无法通过"后退"按钮回到认证页面
       navigate(isAdmin ? '/admin/dashboard' : '/workspace/chat?new=1', { replace: true })
     }
-  }, [isAuthenticated, isLoading, isAdmin, navigate])
+  }, [isAuthenticated, isLoading, isAdmin, location.search, navigate])
 
   // 认证状态仍在加载中，显示全屏加载提示
   if (isLoading) {

@@ -110,6 +110,7 @@ public class RagStreamController {
         HttpServletRequest httpRequest
     ) {
         rateLimitService.checkRagChat(rateIdentity(currentUserId, httpRequest));
+        // 限流身份同时包含用户和 IP，避免共享账号或代理流量集中打爆 RAG 流式接口。
         // 创建流式响应体：在输出流上逐步写入 SSE 事件
         StreamingResponseBody stream = outputStream -> {
             try {
@@ -174,6 +175,7 @@ public class RagStreamController {
     private void sendEvent(OutputStream outputStream, String eventName, Object data) throws IOException {
         String payload = "event: " + eventName + "\n"
             + "data: " + objectMapper.writeValueAsString(data) + "\n\n";
+        // 每个事件写完立即 flush，减少代理和 Servlet 缓冲导致的首包延迟。
         outputStream.write(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         outputStream.flush();
     }
@@ -319,6 +321,7 @@ public class RagStreamController {
     private String clientIp(HttpServletRequest request) {
         String forwardedFor = request.getHeader("X-Forwarded-For");
         if (forwardedFor != null && !forwardedFor.isBlank()) {
+            // 取 X-Forwarded-For 第一段作为客户端原始 IP。
             return forwardedFor.split(",", 2)[0].trim();
         }
         String realIp = request.getHeader("X-Real-IP");

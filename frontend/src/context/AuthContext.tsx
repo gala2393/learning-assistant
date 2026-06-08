@@ -36,6 +36,7 @@ function loadSession(): Session | null {
     const raw = localStorage.getItem(SESSION_KEY)
     return raw ? JSON.parse(raw) : null
   } catch {
+    // 本地 session 被手工改坏时直接视为未登录，避免应用启动崩溃。
     return null  // JSON 解析失败
   }
 }
@@ -94,6 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // 调用 /api/auth/me 验证 token
     getMe()
       .then((me) => {
+        // 以后端最新用户资料为准，同时保留本地 Token 继续给 Axios 使用。
         const merged: Session = { ...me, token: stored.token }
         saveSession(merged)
         setSession(merged)
@@ -145,6 +147,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const updateProfile = useCallback(async (payload: ProfilePayload) => {
     const data = await updateProfileApi(payload)
     setSession((current) => {
+      // 资料修改后立即同步到 Context 和 localStorage，顶部头像等组件无需重新请求。
       const merged: Session = {
         ...current,
         ...data,
@@ -163,6 +166,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   /** 登出 — 清除 session 并跳转到登录页 */
   const logout = useCallback(async () => {
     try { await logoutApi() } catch { /* 登出失败也忽略，本地清除即可 */ }
+    // 服务端登出不是强依赖；清掉本地 session 后路由守卫会接管访问控制。
     saveSession(null)
     setSession(null)
   }, [])

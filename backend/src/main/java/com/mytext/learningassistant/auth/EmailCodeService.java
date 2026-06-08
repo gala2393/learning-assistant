@@ -34,6 +34,7 @@ public class EmailCodeService {
 
     public void sendCode(String rawEmail, String provider, String ipAddress) {
         String email = normalizeEmail(rawEmail);
+        // 先做邮箱冷却和 IP 小时级限制，再生成验证码，避免无效请求消耗随机数和 SMTP 资源。
         checkEmailCooldown(email);
         checkIpLimit(ipAddress);
 
@@ -62,6 +63,7 @@ public class EmailCodeService {
         if (expectedCode == null || submittedCode == null || !expectedCode.equals(submittedCode.trim())) {
             return false;
         }
+        // 验证码成功后立即删除，保证同一验证码只能使用一次。
         stateStore.delete(codeKey(email));
         return true;
     }
@@ -76,6 +78,7 @@ public class EmailCodeService {
                 }
                 return;
             } catch (MailException exception) {
+                // 当前 SMTP 通道失败时尝试下一个已配置通道，提高验证码送达率。
                 log.warn(
                     "Failed to send email login code to {} through provider {} using {}:{}",
                     email,
@@ -162,6 +165,7 @@ public class EmailCodeService {
             Duration.ofHours(1).plusMinutes(5)
         );
         if (count > properties.getIpHourlyLimit()) {
+            // IP 级限制防止批量枚举邮箱或刷验证码邮件。
             throw new BusinessException(429, "验证码请求过于频繁，请稍后再试");
         }
     }

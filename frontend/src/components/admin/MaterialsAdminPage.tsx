@@ -100,13 +100,19 @@ export function MaterialsAdminPage() {
   const [statusFilter, setStatusFilter] = useState('ALL')
 
   // 从后端获取资料数据
-  const { data, isLoading } = useAdminMaterials({ page, size: PAGE_SIZE, keyword: keyword.trim() || undefined })
+  const { data, isLoading } = useAdminMaterials({
+    page,
+    size: PAGE_SIZE,
+    // trim 后为空则不传 keyword，减少后端无效过滤分支。
+    keyword: keyword.trim() || undefined,
+  })
   // 修改资料状态的 mutation hook
   const updateStatusMutation = useUpdateAdminMaterialStatus()
 
   const allItems = data?.items ?? []
   // 前端按解析状态筛选（仅作用于当前页数据）
   const items = useMemo(
+    // 状态筛选只作用于当前页，跨页搜索仍由后端分页接口负责。
     () => statusFilter === 'ALL' ? allItems : allItems.filter((item) => item.parseStatus === statusFilter),
     [allItems, statusFilter],
   )
@@ -132,6 +138,7 @@ export function MaterialsAdminPage() {
    * @param status - 目标状态（'SUCCESS' 或 'FAILED'）
    */
   const handleSetStatus = (id: string, status: string) => {
+    // 人工标记只修正 parseStatus，summaryStatus 等其他状态保持不变。
     updateStatusMutation.mutate({ id, payload: { parseStatus: status } })
   }
 

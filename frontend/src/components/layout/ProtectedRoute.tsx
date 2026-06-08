@@ -30,9 +30,10 @@ import { useAuth } from '@/context/AuthContext'
  */
 interface ProtectedRouteProps {
   requireAdmin?: boolean
+  allowGuest?: boolean
 }
 
-export function ProtectedRoute({ requireAdmin }: ProtectedRouteProps) {
+export function ProtectedRoute({ requireAdmin, allowGuest }: ProtectedRouteProps) {
   // 从认证上下文获取当前用户的状态
   const { isAuthenticated, isAdmin, isLoading } = useAuth()
 
@@ -47,12 +48,13 @@ export function ProtectedRoute({ requireAdmin }: ProtectedRouteProps) {
 
   // 未登录：重定向到登录页面
   // replace: true 表示替换历史记录，防止用户通过"后退"按钮回到受保护页面
-  if (!isAuthenticated) {
+  if (!isAuthenticated && !allowGuest) {
     return <Navigate to="/login" replace />
   }
 
   // 需要管理员权限但当前用户不是管理员：重定向到工作台
   if (requireAdmin && !isAdmin) {
+    // 普通登录用户仍可进入工作台，但不能停留在管理端 route。
     return <Navigate to="/workspace/chat" replace />
   }
 

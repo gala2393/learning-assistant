@@ -87,6 +87,7 @@ public class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
             return Optional.empty();
         }
         try {
+            // Embedding 调用失败不抛到业务层，资料解析会保留 chunk，只是缺少向量索引。
             // 构建 HTTP 请求：设置超时、认证头、JSON 内容类型
             HttpRequest request = HttpRequest.newBuilder(embeddingsUri())
                 .timeout(properties.timeout())
@@ -111,6 +112,7 @@ public class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
             }
 
             // 逐个读取嵌入向量中的浮点数值
+            // 严格校验每一维都是数字，避免把错误响应或混合类型数据写入向量库。
             List<Double> embedding = new ArrayList<>(embeddingNode.size());
             for (JsonNode value : embeddingNode) {
                 if (!value.isNumber()) {

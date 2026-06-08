@@ -19,6 +19,7 @@ export function useGlobalSearch() {
     const down = (e: KeyboardEvent) => {
       // 检测 Ctrl+K 或 Cmd+K 快捷键
       if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
+        // 阻止浏览器默认搜索/地址栏行为，把快捷键交给应用内搜索。
         e.preventDefault()
         setOpen((prev) => !prev)  // 切换打开/关闭状态
       }

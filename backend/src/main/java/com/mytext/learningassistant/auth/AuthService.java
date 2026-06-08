@@ -100,6 +100,7 @@ public class AuthService {
         }
         // 如果提供了邮箱，验证邮箱验证码
         if (email != null && !emailCodeService.verify(email, request.code())) {
+            // 邮箱注册必须先验证邮箱所有权，避免绑定他人邮箱。
             throw new BusinessException(400, "验证码错误或已过期");
         }
         // 检查用户名是否已被占用
@@ -146,6 +147,7 @@ public class AuthService {
         String email = normalizeEmail(request.email());
         // 验证邮箱验证码
         if (!emailCodeService.verify(email, request.code())) {
+            // 邮箱验证码登录以验证码作为唯一凭证，校验失败不创建账号。
             throw new BusinessException(400, "验证码错误或已过期");
         }
         // 查找已有用户，不存在则自动创建
@@ -180,6 +182,7 @@ public class AuthService {
             .orElseThrow(() -> new BusinessException(400, "该邮箱未注册，请先注册"));
         // 验证邮箱验证码
         if (!emailCodeService.verify(email, request.code())) {
+            // 重置密码必须在确认邮箱所有权后执行，防止未授权改密。
             throw new BusinessException(400, "验证码错误或已过期");
         }
         user.incrementTokenVersion();  // 递增 Token 版本号，使旧 Token 失效
@@ -241,6 +244,7 @@ public class AuthService {
         }
         // 验证密码
         if (!passwordHasher.matches(request.password(), user.getPasswordHash())) {
+            // 密码错误只返回统一错误文案，避免暴露账号是否存在或密码状态。
             loginCaptchaService.recordFailure(attemptKey);  // 密码错误，记录失败次数
             throw new BusinessException(400, "用户名、邮箱或密码错误");
         }
@@ -250,6 +254,7 @@ public class AuthService {
 
         // 如果密码哈希使用的是旧算法（SHA-256），自动升级为 BCrypt
         if (passwordHasher.needsRehash(user.getPasswordHash())) {
+            // 成功登录时顺手升级旧哈希，不额外打断用户流程。
             user.setPasswordHash(passwordHasher.hash(request.password()));
             user = userRepository.save(user);
         }

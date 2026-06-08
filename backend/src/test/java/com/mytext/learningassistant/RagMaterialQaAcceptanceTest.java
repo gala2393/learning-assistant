@@ -82,7 +82,7 @@ class RagMaterialQaAcceptanceTest {
      *   <li>定义查询（"什么是 RAG？"）- 引用摘要应包含 "RAG refers" 关键内容</li>
      *   <li>对比查询（"BM25 和 vector search 有什么区别？"）- 引用应包含对比说明</li>
      *   <li>资料概览查询 - 回答应包含 "MySQL"，引用应包含 "database fundamentals"</li>
-     *   <li>无证据场景 - 当资料中无相关内容时，sources 为空数组，回复提示未检索到足够页码</li>
+     *   <li>无证据场景 - 当资料中无相关内容时，sources 为空数组，回复提示未检索到足够依据</li>
      * </ul>
      */
     @Test
@@ -151,7 +151,7 @@ class RagMaterialQaAcceptanceTest {
         JsonNode noEvidenceAnswer = chat(token, "How do database indexes speed lookup and query filtering?", plantMaterialId, null);
         printCase("no evidence", noEvidenceAnswer);
         Assertions.assertEquals(0, noEvidenceAnswer.at("/sources").size(), noEvidenceAnswer.toPrettyString());
-        assertAnswerContains(noEvidenceAnswer, "\u5f53\u524d\u8d44\u6599\u672a\u68c0\u7d22\u5230\u8db3\u591f\u9875\u7801");
+        assertAnswerContains(noEvidenceAnswer, "\u5f53\u524d\u8d44\u6599\u91cc\u6ca1\u6709\u68c0\u7d22\u5230\u8db3\u591f\u4f9d\u636e");
         assertAnswerNotContains(noEvidenceAnswer, "Other Database Material");
     }
 

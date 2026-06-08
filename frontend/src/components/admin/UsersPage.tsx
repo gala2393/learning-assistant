@@ -54,6 +54,7 @@ export function UsersPage() {
   const { data, isLoading } = useAdminUsers({
     page,
     size: PAGE_SIZE,
+    // 空字符串不传给后端，避免把“无搜索”误当成一个关键词条件。
     keyword: debouncedKeyword || undefined,
   })
 
@@ -74,6 +75,7 @@ export function UsersPage() {
    */
   const handleToggleRole = (user: AdminUser) => {
     const newRole = user.role === 'ADMIN' ? 'USER' : 'ADMIN'
+    // 只提交目标角色，列表刷新交给 mutation 成功后的缓存失效处理。
     updateRoleMutation.mutate({ id: user.id, role: newRole })
   }
 
@@ -83,6 +85,7 @@ export function UsersPage() {
    */
   const handleToggleStatus = (user: AdminUser) => {
     const newStatus = user.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
+    // 禁用/启用属于服务端权限状态，成功后由后端返回的列表作为最终真相。
     updateStatusMutation.mutate({ id: user.id, status: newStatus })
   }
 
@@ -202,6 +205,7 @@ export function UsersPage() {
           value={keyword}
           onChange={(e) => {
             setKeyword(e.target.value)
+            // 搜索条件变化后当前页可能不存在，回到第一页避免空页误导。
             setPage(0) // 搜索时重置到第一页
           }}
         />

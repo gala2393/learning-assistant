@@ -83,6 +83,7 @@ export function useAdminStats() {
 
 /** 用户列表 query */
 export function useAdminUsers(params: { page?: number; size?: number; keyword?: string } = {}) {
+  // 分页和关键词放进 queryKey，确保每组筛选条件都有独立缓存。
   return useQuery({ queryKey: ['admin', 'users', params], queryFn: () => listAdminUsers(params) })
 }
 
@@ -90,6 +91,7 @@ export function useAdminUsers(params: { page?: number; size?: number; keyword?: 
 export function useUpdateAdminUserRole() {
   return useMutation({
     mutationFn: ({ id, role }: { id: string; role: string }) => updateAdminUserRole(id, role),
+    // 角色变更会影响列表中的权限标签，成功后让所有用户列表缓存重新拉取。
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'users'] }),
   })
 }
@@ -98,12 +100,14 @@ export function useUpdateAdminUserRole() {
 export function useUpdateAdminUserStatus() {
   return useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) => updateAdminUserStatus(id, status),
+    // 状态变更后不能只改当前行，分页/搜索结果中的同一用户也需要同步。
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'users'] }),
   })
 }
 
 /** 资料列表 query（管理员视图） */
 export function useAdminMaterials(params: { page?: number; size?: number; keyword?: string } = {}) {
+  // 管理端资料列表同样按分页/搜索条件隔离缓存，避免切页时串数据。
   return useQuery({ queryKey: ['admin', 'materials', params], queryFn: () => listAdminMaterials(params) })
 }
 
@@ -111,12 +115,14 @@ export function useAdminMaterials(params: { page?: number; size?: number; keywor
 export function useUpdateAdminMaterialStatus() {
   return useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: { parseStatus?: string; summaryStatus?: string } }) => updateAdminMaterialStatus(id, payload),
+    // 人工标记会改变状态筛选和统计口径，刷新资料列表缓存。
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'materials'] }),
   })
 }
 
 /** 系统日志 query */
 export function useAdminLogs(params: { page?: number; size?: number; keyword?: string } = {}) {
+  // 日志查询参数进入 queryKey，保证搜索词变化时触发新的后端查询。
   return useQuery({ queryKey: ['admin', 'logs', params], queryFn: () => listAdminLogs(params) })
 }
 
@@ -125,6 +131,7 @@ export function useAdminUsageRecords(params: { page?: number; size?: number; key
   return useQuery({
     queryKey: ['admin', 'usage-records', params],
     queryFn: () => listAdminUsageRecords(params),
+    // 使用记录是近实时流水，定时刷新比手动失效更适合管理端监控场景。
     refetchInterval: 5000,              // 每 5 秒刷新
     refetchIntervalInBackground: true,  // 后台标签页也继续刷新
   })

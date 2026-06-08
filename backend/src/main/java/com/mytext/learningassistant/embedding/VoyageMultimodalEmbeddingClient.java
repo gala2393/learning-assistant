@@ -54,6 +54,7 @@ public class VoyageMultimodalEmbeddingClient implements EmbeddingClient {
             return Optional.empty();
         }
         try {
+            // Voyage 多模态接口用 input_type 区分文档入库和查询检索，避免两类向量空间语义混淆。
             HttpRequest request = HttpRequest.newBuilder(multimodalEmbeddingsUri())
                 .timeout(properties.timeout())
                 .header("Authorization", "Bearer " + properties.apiKey())
@@ -64,6 +65,7 @@ public class VoyageMultimodalEmbeddingClient implements EmbeddingClient {
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 return Optional.empty();
             }
+            // 只接受 data[0].embedding 的纯数字数组，响应结构异常时由调用方按缺失向量处理。
             JsonNode embeddingNode = objectMapper.readTree(response.body())
                 .path("data")
                 .path(0)
@@ -89,6 +91,7 @@ public class VoyageMultimodalEmbeddingClient implements EmbeddingClient {
         while (baseUrl.endsWith("/")) {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
         }
+        // 兼容配置中已包含 /v1 或只配置服务根地址的两种写法。
         if (baseUrl.endsWith("/v1")) {
             return URI.create(baseUrl + "/multimodalembeddings");
         }
@@ -104,6 +107,7 @@ public class VoyageMultimodalEmbeddingClient implements EmbeddingClient {
         input.put("content", List.of(textPart));
 
         Map<String, Object> body = new LinkedHashMap<>();
+        // 当前只传文本 part，但保留多模态 content 结构，后续接入图片 part 时不用改外层协议。
         body.put("inputs", List.of(input));
         body.put("model", properties.model());
         body.put("input_type", inputType);

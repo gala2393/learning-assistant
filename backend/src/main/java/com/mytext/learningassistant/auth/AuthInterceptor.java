@@ -101,6 +101,7 @@ public class AuthInterceptor implements HandlerInterceptor {
 
         // 带 ticket 参数的材料文件下载/预览请求直接放行（ticket 由 MaterialFileTicketService 单独验证）
         if (path.matches("^/api/materials/\\d+/(?:file|preview-file)$") && request.getParameter("ticket") != null) {
+            // 文件临时 ticket 与 Bearer Token 二选一，便于浏览器直接预览受保护文件。
             return true;
         }
 
@@ -123,6 +124,7 @@ public class AuthInterceptor implements HandlerInterceptor {
             }
             // Token 版本号不匹配，说明该 Token 已被废弃（如用户修改了密码或登出）
             if (currentUser.getTokenVersion() != claims.tokenVersion()) {
+                // tokenVersion 是服务端主动失效旧 Token 的边界，必须和数据库当前值一致。
                 return unauthorized(response);
             }
             // 管理后台接口需要 ADMIN 角色才能访问

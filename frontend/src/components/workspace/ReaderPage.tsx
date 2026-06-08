@@ -152,6 +152,7 @@ export function ReaderPage() {
   useEffect(() => {
     if (!chunkParam || requestedChunkIndex < 0) return
     if (requestedChunkIndex !== selectedChunkIndex) {
+      // chunkId 必须等 chunks 加载完成后才能解析成索引，未命中时先保持当前片段不动。
       setSelectedChunkIndex(requestedChunkIndex)
     }
   }, [chunkParam, requestedChunkIndex, selectedChunkIndex])
@@ -166,6 +167,7 @@ export function ReaderPage() {
     if (materialParam && materialParam !== selectedMaterialId) return
     if (chunkParam && chunkParam !== String(currentChunk.id) && requestedChunkIndex >= 0) return
     if (materialParam === selectedMaterialId && chunkParam === String(currentChunk.id)) return
+    // replace 同步内部阅读位置，避免翻片段时污染浏览器返回栈。
     setSearchParams({ materialId: selectedMaterialId, chunkId: String(currentChunk.id) }, { replace: true })
   }, [chunkParam, currentChunk, materialParam, requestedChunkIndex, selectedMaterialId, setSearchParams])
 
@@ -239,6 +241,7 @@ export function ReaderPage() {
     setMobilePanel(null)
     const targetChunk = chunks[index]
     if (selectedMaterialId && targetChunk) {
+      // 用户主动点目录时使用 push，保留可后退的阅读路径。
       setSearchParams({ materialId: selectedMaterialId, chunkId: String(targetChunk.id) }, { replace: false })
     }
   }
@@ -259,6 +262,7 @@ export function ReaderPage() {
    */
   const handleOpenFile = async () => {
     if (!selectedMaterial) return
+    // 先同步打开空白窗口，避免异步拿 ticket 后被浏览器弹窗策略拦截。
     const opened = window.open('', '_blank')
     try {
       const ticket = await createMaterialFileTicket(selectedMaterial.id)

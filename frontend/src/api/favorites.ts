@@ -1,6 +1,7 @@
 import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
+import { hasStoredSession } from '@/lib/auth-gate'
 import type { FavoriteItem } from '@/types'
 
 /**
@@ -31,7 +32,7 @@ export async function deleteFavorite(id: string): Promise<void> {
 
 /** 收藏列表 query */
 export function useFavorites() {
-  return useQuery({ queryKey: ['favorites'], queryFn: listFavorites })
+  return useQuery({ queryKey: ['favorites'], queryFn: listFavorites, enabled: hasStoredSession() })
 }
 
 /** 添加收藏 mutation — 同时刷新收藏列表和历史列表（历史中显示收藏标记） */

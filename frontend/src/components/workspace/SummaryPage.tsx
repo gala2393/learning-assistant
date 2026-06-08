@@ -15,6 +15,9 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { useMaterials } from '@/api/materials'
 import { useSummarizeMaterial, useMaterialSummaryHistory } from '@/api/rag'
+import { useAuth } from '@/context/AuthContext'
+import { useToast } from '@/components/ui/toast'
+import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -26,6 +29,8 @@ import { Sparkles, BookOpen, Loader2, Clock } from 'lucide-react'
 import type { SummaryResult } from '@/types'
 
 export function SummaryPage() {
+  const { isAuthenticated } = useAuth()
+  const { showToast } = useToast()
   // 获取所有资料列表
   const { data: materials = [] } = useMaterials()
   // 当前选中的资料 ID
@@ -41,6 +46,11 @@ export function SummaryPage() {
 
   // 触发生成总结
   const handleGenerate = () => {
+    if (!isAuthenticated) {
+      showToast(LOGIN_REQUIRED_MESSAGE, 2000)
+      redirectToLogin()
+      return
+    }
     if (selectedMaterialId) {
       summarizeMutation.mutate(selectedMaterialId)
     }
