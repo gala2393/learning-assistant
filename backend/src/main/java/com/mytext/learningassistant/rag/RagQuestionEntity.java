@@ -54,11 +54,21 @@ public class RagQuestionEntity {
     @Column(name = "question_text", columnDefinition = "TEXT", nullable = false)
     private String questionText;
 
-    /** 用户随问题上传的图片 JSON，仅用于历史回显 */
+    /**
+     * 用户随问题上传的图片 JSON，仅用于历史回显。
+     *
+     * <p>图片会在请求阶段作为多模态输入传给 LLM；这里保存的是规范化后的
+     * data URL 列表，方便历史详情重新展示用户当时附带的图片。</p>
+     */
     @Column(name = "question_images_json", columnDefinition = "LONGTEXT")
     private String questionImagesJson;
 
-    /** 用户随问题上传的临时资料 JSON，仅用于历史回显，不进入资料管理 */
+    /**
+     * 用户随问题上传的临时资料 JSON，仅用于历史回显，不进入资料管理。
+     *
+     * <p>临时资料的正文会参与本次智能问答，但不会建立 learning_material、
+     * material_chunk 等持久资料记录；保存 JSON 是为了历史消息里还能打开附件卡片。</p>
+     */
     @Column(name = "question_temporary_material_json", columnDefinition = "LONGTEXT")
     private String questionTemporaryMaterialJson;
 

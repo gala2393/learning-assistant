@@ -4,7 +4,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { cn, formatBytes, sanitizeAiText } from '@/lib/utils'
 import { SourceCard } from './SourceCard'
-import { Activity, AlertCircle, Check, Copy, FileText, Layers3 } from 'lucide-react'
+import { Activity, AlertCircle, ArrowDown, Check, Copy, FileText, Layers3 } from 'lucide-react'
 import { useAuth } from '@/context/AuthContext'
 import { UserAvatar } from '@/components/layout/UserAvatar'
 import type { RagSource, TemporaryMaterial } from '@/types'
@@ -403,22 +403,69 @@ function TemporaryMaterialCard({
  */
 export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
   const { session } = useAuth()
+  /** ScrollArea 的真实滚动视口；Radix 的 Root 不是实际滚动元素，所以要拿 Viewport。 */
+  const viewportRef = useRef<HTMLDivElement>(null)
   /** 列表底部引用（用于自动滚动） */
   const bottomRef = useRef<HTMLDivElement>(null)
+  /** 记录用户是否仍在底部附近；离开底部后，流式内容继续生成但不再打断阅读。 */
+  const shouldAutoScrollRef = useRef(true)
+  /** 控制“回到底部”按钮显隐；高频 token 更新时不依赖它判断是否滚动，避免状态滞后。 */
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false)
   /** 图片预览弹窗状态 */
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null)
   /** 临时资料预览弹窗状态 */
   const [previewMaterial, setPreviewMaterial] = useState<TemporaryMaterial | null>(null)
 
-  // 新消息到达时自动滚动到底部
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages])
+  /**
+   * 判断视口是否接近底部。
+   * 保留一点阈值是为了避免 1-2px 的浏览器舍入误差，让“贴底自动跟随”更稳定。
+   */
+  const isNearBottom = (element: HTMLDivElement) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight < 96
+
+  /**
+   * 监听用户滚动：
+   * - 用户在底部附近：允许流式输出继续自动跟随。
+   * - 用户向上查看历史：暂停自动滚动，只显示“回到底部”按钮。
+   */
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+
+    const syncAutoScrollState = () => {
+      const nearBottom = isNearBottom(viewport)
+      shouldAutoScrollRef.current = nearBottom
+      setShowJumpToBottom(!nearBottom)
+    }
+
+    syncAutoScrollState()
+    viewport.addEventListener('scroll', syncAutoScrollState, { passive: true })
+    return () => viewport.removeEventListener('scroll', syncAutoScrollState)
+  }, [])
+
+  /**
+   * 消息变化时只在“贴底状态”自动滚动。
+   * 这样 SSE 流式输出仍会持续写入 DOM，但用户上滑阅读已生成内容时不会被拉回底部。
+   */
+  useEffect(() => {
+    if (!shouldAutoScrollRef.current) return
+    bottomRef.current?.scrollIntoView({ block: 'end' })
+  }, [messages])
+
+  /** 用户主动点击后恢复自动跟随，并立即定位到最新回答。 */
+  const jumpToBottom = () => {
+    shouldAutoScrollRef.current = true
+    setShowJumpToBottom(false)
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }
 
   const openPreviewImage = (image: PreviewImage) => setPreviewImage(image)
   const closePreviewImage = () => setPreviewImage(null)
 
   return (
     <>
-      <ScrollArea className="h-full min-h-0 w-full overflow-hidden px-2 md:px-4">
+      <div className="relative h-full min-h-0">
+        <ScrollArea viewportRef={viewportRef} className="h-full min-h-0 w-full overflow-hidden px-2 md:px-4">
         <div className="mx-auto max-w-5xl space-y-5 py-4 md:space-y-7 md:py-6">
           {/* 遍历所有消息 */}
           {messages.map((msg) => (
@@ -493,7 +540,22 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
           {/* 滚动锚点 */}
           <div ref={bottomRef} />
         </div>
-      </ScrollArea>
+        </ScrollArea>
+        {showJumpToBottom && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-4">
+            <button
+              type="button"
+              onClick={jumpToBottom}
+              className="pointer-events-auto inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white/95 px-3 text-xs font-medium text-slate-700 shadow-lg shadow-slate-900/10 backdrop-blur transition hover:border-cyan-200 hover:bg-cyan-50 hover:text-cyan-700 focus:outline-none focus:ring-2 focus:ring-cyan-400 dark:border-slate-700 dark:bg-slate-900/95 dark:text-slate-200 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/60 dark:hover:text-cyan-200"
+              aria-label="回到底部查看最新回答"
+              title="回到底部查看最新回答"
+            >
+              <ArrowDown className="h-4 w-4" />
+              回到底部查看最新回答
+            </button>
+          </div>
+        )}
+      </div>
       {/* 图片放大预览弹窗 */}
       <ImagePreviewDialog
         image={previewImage}

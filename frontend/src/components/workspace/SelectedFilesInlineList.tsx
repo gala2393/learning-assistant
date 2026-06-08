@@ -2,6 +2,12 @@ import { MoreHorizontal } from 'lucide-react'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { cn, formatBytes } from '@/lib/utils'
 
+/**
+ * 已选择文件的轻量展示项。
+ *
+ * 这个类型被多个文件选择/附件组件复用，只保留 UI 展示需要的最小字段；
+ * 真实 File 对象仍留在调用方，避免列表组件承担上传或解析职责。
+ */
 export interface SelectedFileListItem {
   name: string
   size?: number | null
@@ -14,12 +20,23 @@ interface SelectedFilesInlineListProps {
   className?: string
 }
 
+/** 内联区域只露出最后 2 个文件，较早选择的文件通过 More 菜单查看。 */
 const INLINE_FILE_LIMIT = 2
 
+/**
+ * SelectedFilesInlineList -- 上传表单里的“已选文件”摘要。
+ *
+ * 与 ChatAttachmentCards 的区别：
+ * - 这里用于上传前的文件选择结果，还没有进入聊天上下文。
+ * - 只做摘要展示，不提供预览/删除单项等聊天交互。
+ * - 多文件时把早期文件折叠菜单，避免上传表单在窄屏下被长文件名撑开。
+ */
 export function SelectedFilesInlineList({ files, totalSize, className }: SelectedFilesInlineListProps) {
   if (files.length === 0) return null
+  // 优先展示最后选择的文件，因为用户刚追加的文件最需要被确认。
   const inlineFiles = files.slice(-INLINE_FILE_LIMIT)
   const hiddenFileCount = Math.max(0, files.length - inlineFiles.length)
+  // totalSize 可以由父组件提前传入；未传时在这里按文件列表兜底计算。
   const resolvedTotalSize = totalSize ?? files.reduce((sum, file) => sum + (file.size || 0), 0)
 
   return (

@@ -22,6 +22,14 @@ export const CHAT_DRAFT_KEY = 'learning-assistant.chat.current'
 const CHAT_DRAFT_BACKUP_KEY = 'learning-assistant.chat.current.backup'
 export const CHAT_HISTORY_CONVERSATION_KEY = 'learning-assistant.chat.history-conversations'
 const CHAT_CONVERSATION_ARCHIVE_KEY = 'learning-assistant.chat.conversation-archive'
+/**
+ * 临时资料持久化文本上限。
+ *
+ * 用户可能上传很大的 PDF/DOCX 作为临时资料。前端保存草稿和本地会话归档时，
+ * 如果把完整解析文本原样写入 localStorage/sessionStorage，会很快触发浏览器
+ * 存储配额限制，导致整个聊天状态无法恢复。因此只保留前 2 万字用于历史回显
+ * 和预览提示；真正发给后端的内容在请求发起前已经完成。
+ */
 const TEMPORARY_MATERIAL_TEXT_LIMIT = 20_000
 
 type ChatMode = 'GENERAL' | 'MATERIAL'  // 通用模式 / 资料模式
@@ -137,7 +145,10 @@ export async function selectHistorySession(item: HistoryItem) {
 
 /** 从历史记录恢复对话状态 */
 export function applyHistorySession(item: HistoryItem) {
-  // ... 从归档和后端详情中恢复 messages、conversationHistory 等
+  // 历史详情有两类来源：
+  // 1. 后端返回的 messages，保证刷新、换设备后仍能看到完整会话。
+  // 2. 本地 archive，保留前端即时产生的图片、临时资料预览和更完整的流式中间状态。
+  // 当本地归档更完整时优先使用归档，否则以服务端详情为准。
   const source = item.sources?.[0]
   const conversationId = String(item.conversationId || readHistoryConversationId(String(item.id)) || item.id)
   const archived = readConversationArchive(conversationId)
@@ -426,6 +437,8 @@ function readConversationArchiveMap(): Record<string, ConversationArchiveItem> {
 function notify() { listeners.forEach((l) => l()) }
 
 function compactChatMessages(messages: ChatMessage[]) {
+  // 只压缩消息里携带的临时资料文本；图片 DataURL、消息文本和来源引用保持原样，
+  // 这样恢复历史时仍能得到与发送时一致的视觉结果。
   return messages.map((message) => message.temporaryMaterial
     ? { ...message, temporaryMaterial: compactTemporaryMaterial(message.temporaryMaterial) }
     : message)
@@ -435,6 +448,8 @@ function compactTemporaryMaterial(material: TemporaryMaterial | null | undefined
   if (!material) return null
   const text = material.text || ''
   if (text.length <= TEMPORARY_MATERIAL_TEXT_LIMIT) return material
+  // parts/files 等元数据保留完整，只有大段正文截断；预览弹窗仍能展示文件名、
+  // 文件大小和“内容已截取”的提示。
   const compactText = text.slice(0, TEMPORARY_MATERIAL_TEXT_LIMIT)
   return {
     ...material,

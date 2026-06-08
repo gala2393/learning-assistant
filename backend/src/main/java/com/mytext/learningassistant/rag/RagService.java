@@ -795,6 +795,13 @@ public class RagService {
         return trimmed.replaceAll("\\s+", "");
     }
 
+    /**
+     * 将用户问题附带的图片规范化为可持久化 JSON。
+     *
+     * <p>前端可能传 dataUrl，也可能传 base64Data + mediaType。这里统一转成
+     * {@code data:<mediaType>;base64,...} 形式，并限制数量、类型和大小。
+     * 这些图片已经在当前请求中传给 LLM；写入数据库主要用于历史消息回显。</p>
+     */
     private String questionImagesJson(ChatRequest request) {
         if (request.images() == null || request.images().isEmpty()) {
             return null;
@@ -818,6 +825,12 @@ public class RagService {
         return normalizedImages.isEmpty() ? null : writeJson(normalizedImages);
     }
 
+    /**
+     * 读取历史问题里的图片附件。
+     *
+     * <p>历史回显不是核心问答链路，旧数据或脏数据解析失败时返回空列表，
+     * 避免一条损坏的附件 JSON 影响整段会话打开。</p>
+     */
     private List<ChatImage> readQuestionImages(RagQuestionEntity question) {
         String json = question.getQuestionImagesJson();
         if (json == null || json.isBlank()) {
@@ -830,6 +843,12 @@ public class RagService {
         }
     }
 
+    /**
+     * 将临时资料附件写入问答历史。
+     *
+     * <p>只有已抽取到正文的临时资料才会保存。空文本附件对 LLM 没有上下文价值，
+     * 也不应该在历史消息里显示成可预览资料。</p>
+     */
     private String questionTemporaryMaterialJson(ChatRequest request) {
         ChatTemporaryMaterial material = request.temporaryMaterial();
         if (material == null) {
@@ -850,6 +869,11 @@ public class RagService {
         ));
     }
 
+    /**
+     * 读取历史问题里的临时资料附件。
+     *
+     * <p>和图片附件一样，历史回显容错优先：解析失败返回 null，让消息正文仍可正常展示。</p>
+     */
     private ChatTemporaryMaterial readQuestionTemporaryMaterial(RagQuestionEntity question) {
         String json = question.getQuestionTemporaryMaterialJson();
         if (json == null || json.isBlank()) {
@@ -1933,7 +1957,13 @@ public class RagService {
 
     /**
      * 保存流式问答的结果到数据库。
-     * 包括问答记录和来源引用，保存失败时返回一个空的兜底对象。
+     *
+     * <p>流式接口在前端已经实时展示了回答，但只有收到最终 done 事件后，
+     * 才会把完整 answer、token 用量、来源引用、图片和临时资料附件一起落库。
+     * 这样历史记录中看到的是最终稳定版本，而不是中间增量。</p>
+     *
+     * <p>保存失败时返回一个空的兜底对象，避免 SSE 响应线程因为持久化异常中断。
+     * 调用方仍会收到回答文本，但 questionId/conversationId 会是 0。</p>
      */
     private RagQuestionEntity saveStreamResult(
         long userId,
@@ -1966,10 +1996,10 @@ public class RagService {
         } catch (Exception ignored) {
             RagQuestionEntity fallback = new RagQuestionEntity();
             fallback.setId(0L);
-              fallback.setConversationId(0L);
-              return fallback;
-          }
-      }
+            fallback.setConversationId(0L);
+            return fallback;
+        }
+    }
 
     // ========== Token 使用量计算 ==========
 
@@ -2867,7 +2897,13 @@ public class RagService {
         );
     }
 
-    /** 将问答实体转换为历史详情响应（包含完整对话消息列表） */
+    /**
+     * 将问答实体转换为历史详情响应（包含完整对话消息列表）。
+     *
+     * <p>历史列表只展示会话的最新一条问答；用户点开详情时，才通过
+     * conversationQuestions 把同一 conversationId 下的全部轮次拼成 messages。
+     * sources 仍然只代表最新回答的引用来源，前端会把它挂在最后一条 assistant 消息上。</p>
+     */
     private RagHistoryDetailResponse toHistoryDetail(
         long userId,
         RagQuestionEntity question,
@@ -3176,7 +3212,13 @@ public class RagService {
         return latestByConversation.values().stream().toList();
     }
 
-    /** 将问答列表转为对话消息列表（交替的 user/assistant 消息） */
+    /**
+     * 将问答列表转为对话消息列表（交替的 user/assistant 消息）。
+     *
+     * <p>数据库一行 rag_question 同时包含一次用户提问和一次 AI 回答；
+     * 前端聊天线程需要的是逐条消息，所以这里把每行拆成 user + assistant 两条。
+     * 图片和临时资料只挂在 user 消息上，assistant 消息只保留回答文本。</p>
+     */
     private List<RagHistoryMessageResponse> toConversationMessages(List<RagQuestionEntity> questions) {
         List<RagHistoryMessageResponse> messages = new ArrayList<>();
         for (RagQuestionEntity question : questions) {
@@ -3211,7 +3253,10 @@ public class RagService {
 
     /**
      * 解析对话 ID：如果用户指定了 conversationId，查找该问答并获取其有效的对话 ID。
-     * 这样新消息会被加入到已有的对话中。
+     *
+     * <p>前端可能传“会话 ID”，也可能传该会话里某一条问题 ID。这里统一查库确认
+     * 记录属于当前用户，再映射到 effectiveConversationId，防止用户把消息追加到
+     * 不属于自己的会话。</p>
      */
     private Long resolveConversationId(long userId, Long requestedConversationId) {
         if (requestedConversationId == null || requestedConversationId <= 0) {
@@ -3224,7 +3269,10 @@ public class RagService {
 
     /**
      * 确保问答记录有有效的对话 ID。
-     * 如果 conversationId 为空（新对话的第一条消息），则用自己的 ID 作为对话 ID。
+     *
+     * <p>新对话的第一条消息在插入前还没有自增 ID，因此 conversationId 先为空；
+     * 插入成功后再把自己的主键写回 conversation_id。后续轮次只要传这个 ID，
+     * 就会被归入同一组历史会话。</p>
      */
     private RagQuestionEntity ensureConversationId(RagQuestionEntity question) {
         if (question.getConversationId() == null) {

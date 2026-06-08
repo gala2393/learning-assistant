@@ -3,16 +3,30 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/compon
 import { formatBytes } from '@/lib/utils'
 import type { SelectedFileListItem } from './SelectedFilesInlineList'
 
+/**
+ * ChatAttachmentCards -- 聊天输入框上方的附件卡片条。
+ *
+ * 这个组件服务于“智能问答临时资料”场景：用户在通用问答里上传 PDF、Word、PPT、
+ * Markdown 等文件后，ChatComposer 会把已解析的文件整理成 SelectedFileListItem，
+ * 再交给这里展示。
+ *
+ * 设计要点：
+ * - 前 3 个附件以内联卡片展示，便于用户确认当前问题会携带哪些资料上下文。
+ * - 超过 3 个的附件折叠到 More 菜单，避免输入框在多文件场景下被挤变形。
+ * - onOpen 用于打开临时资料预览，onRemove 用于从当前会话上下文里移除某个文件。
+ */
 interface ChatAttachmentCardsProps {
   files: SelectedFileListItem[]
   onOpen?: (file: SelectedFileListItem, index: number) => void
   onRemove?: (file: SelectedFileListItem, index: number) => void
 }
 
+/** 输入框内联区域最多直接展示 3 个文件，其余文件统一收进下拉菜单。 */
 const INLINE_ATTACHMENT_LIMIT = 3
 
 export function ChatAttachmentCards({ files, onOpen, onRemove }: ChatAttachmentCardsProps) {
   if (files.length === 0) return null
+  // visibleFiles 保持稳定的卡片宽度，hiddenFiles 则进入“全部附件”菜单。
   const visibleFiles = files.slice(0, INLINE_ATTACHMENT_LIMIT)
   const hiddenFiles = files.slice(INLINE_ATTACHMENT_LIMIT)
 

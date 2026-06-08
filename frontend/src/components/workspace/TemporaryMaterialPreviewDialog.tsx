@@ -6,6 +6,12 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { cleanTemporaryMaterialText, formatBytes } from '@/lib/utils'
 import type { TemporaryMaterial } from '@/types'
 
+/**
+ * 单次渲染的最大文本窗口。
+ *
+ * 临时资料可能来自大 PDF 或多文件合并，直接把几十万字一次性塞进 DOM 会造成弹窗卡顿。
+ * 这里采用“分段窗口”预览：每次只渲染 8 万字，用户可以用上一段/下一段翻看。
+ */
 const PREVIEW_WINDOW_CHARS = 80_000
 
 interface TemporaryMaterialPreviewDialogProps {
@@ -13,6 +19,18 @@ interface TemporaryMaterialPreviewDialogProps {
   onClose: () => void
 }
 
+/**
+ * TemporaryMaterialPreviewDialog -- 智能问答临时资料预览弹窗。
+ *
+ * 临时资料和“资料库资料”不同：它只为当前聊天问题提供上下文，不进入资料管理，
+ * 后端也不会长期保存原文件。因此这里展示的是“已经抽取出来的文本”，而不是完整
+ * PDF/DOCX 版式预览。
+ *
+ * 组件职责：
+ * - 展示文件名、类型、大小等基本信息。
+ * - 对长文本做分段窗口渲染，保证大文件预览仍然顺滑。
+ * - 切换资料或分段时自动回到顶部，避免用户以为打开的是空白内容。
+ */
 export function TemporaryMaterialPreviewDialog({ material, onClose }: TemporaryMaterialPreviewDialogProps) {
   const [windowOffset, setWindowOffset] = useState(0)
   const viewportRef = useRef<HTMLDivElement | null>(null)
@@ -21,6 +39,7 @@ export function TemporaryMaterialPreviewDialog({ material, onClose }: TemporaryM
   const detail = material?.fileSize ? `${sourceType} ${formatBytes(material.fileSize)}` : sourceType
   const rawText = material?.text || ''
   const textLength = rawText.length
+  // windowOffset 来自按钮点击，资料切换后可能超过新文本长度，所以渲染前再夹紧一次。
   const safeWindowOffset = Math.max(0, Math.min(windowOffset, Math.max(0, textLength - 1)))
   const windowEnd = Math.min(textLength, safeWindowOffset + PREVIEW_WINDOW_CHARS)
   const isWindowed = textLength > PREVIEW_WINDOW_CHARS
@@ -34,10 +53,12 @@ export function TemporaryMaterialPreviewDialog({ material, onClose }: TemporaryM
     ? '该 PDF 暂无可抽取文本。临时资料不会保存原文件，如需完整 PDF 版式预览，请上传到资料问答。'
     : '暂无可预览文本。'
 
+  // 换一份资料时从第一段开始看，避免沿用上一份长文档的偏移量。
   useEffect(() => {
     setWindowOffset(0)
   }, [material?.id])
 
+  // 切换资料或分段后滚到顶部，让“上一段/下一段”的反馈更明确。
   useEffect(() => {
     viewportRef.current?.scrollTo({ top: 0, left: 0 })
   }, [material?.id, safeWindowOffset])

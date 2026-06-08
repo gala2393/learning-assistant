@@ -215,8 +215,11 @@ function groupHistoryByConversation(items: HistoryItem[]): HistoryItem[] {
   const localConversationMap = readLocalConversationMap()
   for (const item of items) {
     const itemId = String(item.id)
+    // 旧记录可能没有 conversationId；前端在流式完成时会额外记录 questionId -> conversationId，
+    // 用这个本地映射兜底，避免同一轮对话在历史侧边栏里被拆成多条。
     const key = String(item.conversationId || localConversationMap[itemId] || itemId)
     const current = grouped.get(key)
+    // 列表只展示每个会话的最新一条问答；点击后再通过详情接口拿完整 messages。
     if (!current || new Date(item.createdAt).getTime() > new Date(current.createdAt).getTime()) {
       grouped.set(key, { ...item, conversationId: key })
     }

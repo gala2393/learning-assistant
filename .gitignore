@@ -13,7 +13,19 @@ frontend/dist/
 frontend/tsconfig.tsbuildinfo
 
 upload-package/
+upload-package-latest/
 frontend-dist-upload/
+.codex-run/
+output/
+test-results/
+*.zip
+*.tar
+*.tar.gz
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.key
 .idea/
 *.ppk
 
