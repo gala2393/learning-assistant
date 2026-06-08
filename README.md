@@ -121,9 +121,9 @@ LLM 配置示例：
 
 ```env
 LLM_ENABLED=true
-LLM_BASE_URL=https://www.codex2api.com
+LLM_BASE_URL=<你的大模型url地址>
 LLM_API_KEY=<your-api-key>
-LLM_MODEL=gpt-5.5
+LLM_MODEL=<大模型名称>
 LLM_API_FORMAT=responses
 LLM_TIMEOUT=60s
 ```
