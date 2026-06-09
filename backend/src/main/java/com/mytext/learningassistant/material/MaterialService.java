@@ -205,9 +205,6 @@ public class MaterialService {
     /** 写入向量库时的批大小，避免超大资料解析时长时间持有全部切片和向量 */
     private static final int VECTOR_UPSERT_BATCH_SIZE = 200;
 
-    /** 超过该切片数时先完成上传，再由后台补齐向量索引，避免大资料进度条长时间假死。 */
-    private static final int DEFER_VECTOR_INDEX_CHUNK_THRESHOLD = 300;
-
     /** 关键词停用词列表，这些常见词不会作为关键词输出 */
     private static final List<String> KEYWORD_STOP_WORDS = List.of(
         "the", "and", "for", "with", "that", "this", "from", "into", "are", "was", "were", "has", "have",
@@ -291,12 +288,16 @@ public class MaterialService {
     // ======================== 线程和缓存 ========================
     /** 上传会话后台处理线程池（2 个线程） */
     private final ExecutorService uploadExecutor = Executors.newFixedThreadPool(2);
+    /** 后台向量索引线程池，和上传解析解耦，避免 Embedding 慢导致上传卡住。 */
+    private final ExecutorService vectorIndexExecutor = Executors.newFixedThreadPool(2);
     /** 外部命令输出读取线程池，避免 MinerU 等命令输出过多时阻塞进程结束。 */
     private final ExecutorService processOutputExecutor = Executors.newCachedThreadPool();
     /** PDF 页面渲染并发信号量（限制同时渲染 2 个页面，防止内存溢出） */
     private final Semaphore renderSemaphore = new Semaphore(2);
     /** Embedding 向量缓存（key 为文本 SHA-256，value 为 JSON 格式的向量） */
     private final ConcurrentMap<String, String> embeddingJsonCache = new ConcurrentHashMap<>();
+    /** 已调度的上传解析任务，防止并发分片同时完成时重复提交后台解析。 */
+    private final ConcurrentMap<String, Boolean> scheduledProcessingSessions = new ConcurrentHashMap<>();
 
     /**
      * 构造函数 -- 通过 Spring 依赖注入初始化所有组件和配置。
@@ -402,6 +403,7 @@ public class MaterialService {
     @PreDestroy
     public void shutdown() {
         uploadExecutor.shutdownNow();
+        vectorIndexExecutor.shutdownNow();
         processOutputExecutor.shutdownNow();
     }
 
@@ -1105,6 +1107,9 @@ public class MaterialService {
      * @param sessionId 上传会话 ID
      */
     private void scheduleProcessing(String sessionId) {
+        if (sessionId == null || scheduledProcessingSessions.putIfAbsent(sessionId, Boolean.TRUE) != null) {
+            return;
+        }
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             // 后台线程依赖刚写入的 session/material 状态，必须等当前事务提交后再读取。
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
@@ -1165,16 +1170,16 @@ public class MaterialService {
      */
     private void processUploadSession(String sessionId) {
         MaterialUploadSessionEntity session = materialUploadSessionRepository.findById(sessionId).orElse(null);
-        if (session == null) {
-            return;
-        }
-        if (session.getStatus() == MaterialUploadSessionStatus.SUCCESS) {
-            return;
-        }
-        if (session.getStatus() != MaterialUploadSessionStatus.PROCESSING) {
-            return;
-        }
         try {
+            if (session == null) {
+                return;
+            }
+            if (session.getStatus() == MaterialUploadSessionStatus.SUCCESS) {
+                return;
+            }
+            if (session.getStatus() != MaterialUploadSessionStatus.PROCESSING) {
+                return;
+            }
             Path finalPath = resolveStoredPath(session.getStoragePath());
             Files.createDirectories(finalPath.getParent());
             updateMaterialParseProgress(session, 10, "合并文件", "正在合并上传分片");
@@ -1208,9 +1213,8 @@ public class MaterialService {
             applyPreviewMetadata(material, finalPath, sourceType);
             material.setChunkCount(chunks.size());
             learningMaterialRepository.save(material);
-            updateMaterialParseProgress(material.getId(), material.getOwnerId(), 82, "写入向量库", "正在保存知识片段和向量");
-            // 重新解析时先清理旧索引和旧切片，再写入新切片，保证数据库和 Vector Store 不混用两版内容。
-            vectorStoreClient.deleteMaterial(material.getOwnerId(), material.getId());
+            updateMaterialParseProgress(material.getId(), material.getOwnerId(), 82, "保存切片", "正在保存知识片段和阅读文本层");
+            // 先清理旧切片和旧文本层；外部向量库重建放到后台，避免上传完成前被 Embedding 拖住。
             materialPageTextBlockRepository.deleteByMaterialId(material.getId());
             materialChunkRepository.deleteByMaterialId(material.getId());
             boolean deferVectorIndex = shouldDeferVectorIndexing(sourceType, chunks.size());
@@ -1233,7 +1237,10 @@ public class MaterialService {
                   scheduleVectorIndexRebuildAfterCommit(material.getOwnerId(), material.getId());
               }
         } catch (Exception exception) {
-            log.error("Upload session processing failed: sessionId={}, materialId={}", sessionId, session.getMaterialId(), exception);
+            log.error("Upload session processing failed: sessionId={}, materialId={}",
+                sessionId,
+                session == null ? null : session.getMaterialId(),
+                exception);
             MaterialUploadSessionEntity failedSession = materialUploadSessionRepository.findById(sessionId).orElse(null);
             if (failedSession != null) {
                 failedSession.setStatus(MaterialUploadSessionStatus.FAILED);
@@ -1253,6 +1260,8 @@ public class MaterialService {
                 deleteStoredFile(failedSession.getStoragePath());
                 cleanupPartDir(failedSession);
             }
+        } finally {
+            scheduledProcessingSessions.remove(sessionId);
         }
     }
 
@@ -1577,7 +1586,7 @@ public class MaterialService {
             }
             if (updateProgress && chunks.size() > 0 && (index == chunks.size() - 1 || index % 5 == 0)) {
                 int percent = 82 + (int) Math.floor(((index + 1) * 10.0) / chunks.size());
-                updateMaterialParseProgress(material.getId(), material.getOwnerId(), Math.min(percent, 92), "写入向量库",
+                updateMaterialParseProgress(material.getId(), material.getOwnerId(), Math.min(percent, 92), "保存切片",
                     "正在保存知识片段 " + (index + 1) + "/" + chunks.size());
             }
         }
@@ -1608,18 +1617,11 @@ public class MaterialService {
     /**
      * 判断本次上传是否需要延迟建向量索引。
      *
-     * <p>TXT/MD/HTML/WEB 经常会被切成大量短片段；如果同步逐段请求 Embedding，
-     * 用户会看到上传卡在最后阶段。这里先保证资料可阅读、可按关键词问答，再后台补语义向量。</p>
+     * <p>上传主链路只负责让资料尽快可阅读、可问答。所有格式都先保存切片并标记成功，
+     * Embedding 和外部向量库写入统一放到后台补齐，避免用户看到进度长期卡在 92%。</p>
      */
     private boolean shouldDeferVectorIndexing(MaterialSourceType sourceType, int chunkCount) {
-        if (chunkCount <= 0) {
-            return false;
-        }
-        boolean textLike = sourceType == MaterialSourceType.TXT
-            || sourceType == MaterialSourceType.MD
-            || sourceType == MaterialSourceType.HTML
-            || sourceType == MaterialSourceType.WEB;
-        return textLike || chunkCount >= DEFER_VECTOR_INDEX_CHUNK_THRESHOLD;
+        return chunkCount > 0;
     }
 
     /**
@@ -1632,7 +1634,7 @@ public class MaterialService {
         if (materialId == null) {
             return;
         }
-        Runnable task = () -> uploadExecutor.submit(() -> rebuildMaterialVectorIndex(ownerId, materialId));
+        Runnable task = () -> vectorIndexExecutor.submit(() -> rebuildMaterialVectorIndex(ownerId, materialId));
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
             task.run();
             return;
@@ -1719,23 +1721,24 @@ public class MaterialService {
                     continue;
                 }
                 int pageNo = draft.pageNo() == null || draft.pageNo() <= 0 ? 1 : draft.pageNo();
-                MaterialPageTextBlockEntity block = new MaterialPageTextBlockEntity();
-                block.setMaterialId(material.getId());
-                block.setPageNo(pageNo);
-                block.setBlockIndex(blockIndexByPage.merge(pageNo, 1, Integer::sum) - 1);
-                block.setText(text);
-                block.setBlockType(normalizeText(draft.blockType(), "paragraph"));
-                block.setSource(normalizeText(draft.source(), "MINERU"));
                 List<Long> pageChunkIds = chunkIdsByPage.getOrDefault(pageNo, List.of());
-                block.setChunkId(pageChunkIds.isEmpty() ? null : pageChunkIds.get(0));
-                block.setPageWidth(draft.pageWidth());
-                block.setPageHeight(draft.pageHeight());
-                block.setBboxX(draft.bboxX());
-                block.setBboxY(draft.bboxY());
-                block.setBboxWidth(draft.bboxWidth());
-                block.setBboxHeight(draft.bboxHeight());
-                block.setConfidence(draft.confidence());
-                blocks.add(block);
+                appendPageTextBlocks(
+                    blocks,
+                    blockIndexByPage,
+                    material.getId(),
+                    pageNo,
+                    text,
+                    normalizeText(draft.blockType(), "paragraph"),
+                    normalizeText(draft.source(), "MINERU"),
+                    pageChunkIds.isEmpty() ? null : pageChunkIds.get(0),
+                    draft.pageWidth(),
+                    draft.pageHeight(),
+                    draft.bboxX(),
+                    draft.bboxY(),
+                    draft.bboxWidth(),
+                    draft.bboxHeight(),
+                    draft.confidence()
+                );
             }
         }
         if (!blocks.isEmpty()) {
@@ -1748,20 +1751,98 @@ public class MaterialService {
                 continue;
             }
             int pageNo = parsedBlock.pageNo() == null || parsedBlock.pageNo() <= 0 ? 1 : parsedBlock.pageNo();
-            MaterialPageTextBlockEntity block = new MaterialPageTextBlockEntity();
-            block.setMaterialId(material.getId());
-            block.setPageNo(pageNo);
-            block.setBlockIndex(blockIndexByPage.merge(pageNo, 1, Integer::sum) - 1);
-            block.setText(text);
-            block.setBlockType("paragraph");
-            block.setSource("LEGACY");
             List<Long> pageChunkIds = chunkIdsByPage.getOrDefault(pageNo, List.of());
-            block.setChunkId(pageChunkIds.isEmpty() ? null : pageChunkIds.get(0));
-            blocks.add(block);
+            appendPageTextBlocks(
+                blocks,
+                blockIndexByPage,
+                material.getId(),
+                pageNo,
+                text,
+                "paragraph",
+                "LEGACY",
+                pageChunkIds.isEmpty() ? null : pageChunkIds.get(0),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+            );
         }
         if (!blocks.isEmpty()) {
             materialPageTextBlockRepository.saveAll(blocks);
         }
+    }
+
+    /**
+     * 添加页面文本层块。
+     *
+     * <p>超长 TXT、Word 页面或 PDF 页面正文不能整块写入数据库，否则容易在保存文本层时失败。
+     * 这里按固定字符数拆分，再配合 MEDIUMTEXT 迁移兜底，确保上传流程稳定完成。</p>
+     */
+    private void appendPageTextBlocks(
+        List<MaterialPageTextBlockEntity> blocks,
+        Map<Integer, Integer> blockIndexByPage,
+        Long materialId,
+        int pageNo,
+        String text,
+        String blockType,
+        String source,
+        Long chunkId,
+        Double pageWidth,
+        Double pageHeight,
+        Double bboxX,
+        Double bboxY,
+        Double bboxWidth,
+        Double bboxHeight,
+        Double confidence
+    ) {
+        for (String part : splitPageTextBlock(text)) {
+            MaterialPageTextBlockEntity block = new MaterialPageTextBlockEntity();
+            block.setMaterialId(materialId);
+            block.setPageNo(pageNo);
+            block.setBlockIndex(blockIndexByPage.merge(pageNo, 1, Integer::sum) - 1);
+            block.setText(part);
+            block.setBlockType(blockType);
+            block.setSource(source);
+            block.setChunkId(chunkId);
+            block.setPageWidth(pageWidth);
+            block.setPageHeight(pageHeight);
+            block.setBboxX(bboxX);
+            block.setBboxY(bboxY);
+            block.setBboxWidth(bboxWidth);
+            block.setBboxHeight(bboxHeight);
+            block.setConfidence(confidence);
+            blocks.add(block);
+        }
+    }
+
+    private List<String> splitPageTextBlock(String text) {
+        String normalized = text == null ? "" : text.trim();
+        if (normalized.isBlank()) {
+            return List.of();
+        }
+        if (normalized.length() <= PAGE_TEXT_BLOCK_MAX_LENGTH) {
+            return List.of(normalized);
+        }
+        List<String> parts = new ArrayList<>();
+        int start = 0;
+        while (start < normalized.length()) {
+            int end = Math.min(normalized.length(), start + PAGE_TEXT_BLOCK_MAX_LENGTH);
+            if (end < normalized.length()) {
+                int boundary = findSoftBoundary(normalized, start, end);
+                if (boundary > start) {
+                    end = boundary;
+                }
+            }
+            String part = normalized.substring(start, end).trim();
+            if (!part.isBlank()) {
+                parts.add(part);
+            }
+            start = end;
+        }
+        return parts;
     }
 
     private void updateMaterialParseProgress(MaterialUploadSessionEntity session, int percent, String stage, String message) {

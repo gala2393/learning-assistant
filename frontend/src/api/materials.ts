@@ -21,6 +21,7 @@ export const MAX_TEMPORARY_MATERIAL_BYTES = 500 * 1024 * 1024
 const PROCESSING_POLL_INTERVAL_MS = 1500               // 轮询间隔 1.5 秒
 const PROCESSING_TIMEOUT_MS = 60 * 60 * 1000           // 最长等待 60 分钟
 const CHUNK_UPLOAD_RETRY_COUNT = 3                     // 每片最多重试 3 次
+const CHUNK_UPLOAD_CONCURRENCY = 5                      // 同一文件最多并行上传 5 个分片，兼顾速度和服务器压力
 
 /**
  * 上传会话 — 大文件分片上传的会话对象。
@@ -201,7 +202,7 @@ export async function getUploadSession(sessionId: string) {
  *
  * 流程：
  * 1. 创建上传会话
- * 2. 将文件按 1MB 切片，逐片上传（带重试）
+ * 2. 将文件按 1MB 切片，并行 5 个分片上传（带重试）
  * 3. 所有片上传完成后，等待后端解析（轮询状态）
  * 4. 返回最终的 UploadSession
  *
@@ -227,20 +228,43 @@ export async function uploadMaterialInChunks(
     fileSize: params.file.size,
     chunkSize,
   })
-  // 逐片上传（从断点继续）
   let latest = session as UploadSession
-  for (let index = latest.uploadedChunks || 0; index < totalChunks; index++) {
+  const initialUploaded = Math.max(0, Math.min(totalChunks, latest.uploadedChunks || 0))
+  let completedChunks = initialUploaded
+  const pendingIndexes = Array.from({ length: totalChunks - initialUploaded }, (_, offset) => initialUploaded + offset)
+  onProgress?.({ phase: 'uploading', percent: Math.round((completedChunks / totalChunks) * 100), uploadedChunks: completedChunks, totalChunks })
+  await runWithConcurrency(pendingIndexes, CHUNK_UPLOAD_CONCURRENCY, async (index) => {
     const start = index * chunkSize
     const end = Math.min(params.file.size, start + chunkSize)
-    // 只切当前片的 Blob，避免把大文件完整读入内存。
+    // 只切当前片的 Blob，避免把大文件完整读入内存；并行数固定为 5，避免压垮 nginx 或后端线程。
     latest = await uploadChunkWithRetry(latest.sessionId, {
       chunk: params.file.slice(start, end), chunkIndex: index, totalChunks,
     }) as UploadSession
-    onProgress?.({ phase: 'uploading', percent: Math.round(((index + 1) / totalChunks) * 100), uploadedChunks: index + 1, totalChunks })
-  }
+    completedChunks += 1
+    onProgress?.({ phase: 'uploading', percent: Math.round((completedChunks / totalChunks) * 100), uploadedChunks: completedChunks, totalChunks })
+  })
   if (latest.status === 'FAILED') throw new Error(latest.errorMessage || '上传处理失败')
   // 等待后端解析完成
   return waitForUploadProcessing(latest.sessionId, totalChunks, onProgress)
+}
+
+/**
+ * 按固定并发执行异步任务。
+ *
+ * 这里不用 Promise.all 一次性丢出全部分片，避免 2GB 文件产生几千个并发请求。
+ */
+async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>) {
+  if (items.length === 0) return
+  let cursor = 0
+  const workerCount = Math.max(1, Math.min(concurrency, items.length))
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor]
+      cursor += 1
+      await worker(item)
+    }
+  })
+  await Promise.all(workers)
 }
 
 /** 轮询等待后端解析完成 — 每 1.5 秒检查一次，最长等 15 分钟 */

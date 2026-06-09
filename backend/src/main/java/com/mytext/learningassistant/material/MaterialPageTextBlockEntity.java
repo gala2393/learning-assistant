@@ -39,7 +39,7 @@ public class MaterialPageTextBlockEntity {
     private Integer blockIndex;
 
     /** 文本内容 */
-    @Column(name = "text", nullable = false, columnDefinition = "TEXT")
+    @Column(name = "text", nullable = false, columnDefinition = "MEDIUMTEXT")
     private String text;
 
     /** 文本块类型，例如 paragraph、title、line、ocr */
