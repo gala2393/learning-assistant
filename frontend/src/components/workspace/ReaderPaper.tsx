@@ -19,8 +19,8 @@
  *    - 文本中嵌入的图片标记 [[material-image:xxx]] 会被替换为实际图片。
  *
  * 【跳转逻辑】
- * - 来源点击、目录点击、页码输入和上一/下一片段都通过同一套 DOM ref 定位。
- * - 有页面预览时跳页；无页面预览时跳片段编号。
+ * - 来源点击、目录点击和页码输入都通过同一套 DOM ref 定位。
+ * - 有页面预览时跳真实页码；无页面预览时按每 5 个片段组成的阅读页跳转，避免直接输入片段编号造成定位不稳。
  *
  * 【图片加载机制】
  * - MaterialImage 组件通过 fetch + Authorization 请求图片数据
@@ -1140,7 +1140,7 @@ export function ReaderPaper({
       {/* 内容展示区：有页面预览则按页连续渲染，否则按解析片段连续渲染。 */}
       {usesPageCanvas ? renderContinuousPages() : renderContinuousChunks()}
 
-      {/* 底部跳转栏：只保留页码输入，避免上一/下一片段按钮和窗口化滚动互相抢状态。 */}
+      {/* 底部跳转栏：只保留页码输入，避免片段式导航和窗口化滚动互相抢状态。 */}
       <div className="flex items-center justify-center gap-2 border-t px-3 py-2 md:px-6 md:py-3">
         <form
           className="flex min-w-0 flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground"
