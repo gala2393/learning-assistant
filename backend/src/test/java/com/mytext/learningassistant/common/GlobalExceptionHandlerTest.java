@@ -22,14 +22,14 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    void usesFiveHundredMegabyteFallbackWhenMaxUploadSizeIsUnknown() {
+    void usesTwoGigabyteFallbackWhenMaxUploadSizeIsUnknown() {
         GlobalExceptionHandler handler = new GlobalExceptionHandler();
 
         var response = handler.handleMaxUploadSize(new MaxUploadSizeExceededException(-1L));
 
         assertEquals(HttpStatus.PAYLOAD_TOO_LARGE, response.getStatusCode());
         assertEquals(413, response.getBody().code());
-        assertEquals("文件太大，请控制在500MB以内后再导入。", response.getBody().message());
+        assertEquals("文件太大，请控制在2GB以内后再导入。", response.getBody().message());
     }
 
     @Test

@@ -108,8 +108,44 @@ public class RagService {
     /** JSON 序列化/反序列化工具，用于解析嵌入向量、评估结果等 JSON 数据 */
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    /** 上下文片段的最大字符数限制（约 1 万字符），防止发送给 LLM 的上下文过长 */
-    private static final int MAX_CONTEXT_CHARS = 10_000;
+    /** 资料片段上下文的最大字符数，避免 RAG 资料把模型输入撑得过长。 */
+    private static final int MAX_CONTEXT_CHARS = 14_000;
+
+    /** 通用问答最近原文窗口，20 条约等于 10 轮对话。 */
+    private static final int GENERAL_RECENT_HISTORY_ITEMS = 20;
+
+    /** 资料问答最近原文窗口，16 条约等于 8 轮对话，给资料片段预留更多预算。 */
+    private static final int MATERIAL_RECENT_HISTORY_ITEMS = 16;
+
+    /** 通用问答历史原文总字符预算。 */
+    private static final int GENERAL_HISTORY_CHAR_BUDGET = 16_000;
+
+    /** 资料问答历史原文总字符预算，避免和资料片段叠加后请求过大。 */
+    private static final int MATERIAL_HISTORY_CHAR_BUDGET = 12_000;
+
+    /** 用户消息进入上下文的单条长度上限。 */
+    private static final int MAX_HISTORY_USER_CHARS = 1_500;
+
+    /** AI 回答进入上下文的单条长度上限。 */
+    private static final int MAX_HISTORY_ASSISTANT_CHARS = 2_000;
+
+    /** 长期会话摘要进入模型输入的最大字符数。 */
+    private static final int MAX_MEMORY_PROMPT_CHARS = 5_000;
+
+    /** 数据库中保存的长期会话摘要最大字符数。 */
+    private static final int MAX_MEMORY_STORAGE_CHARS = 8_000;
+
+    /** 选中文本直接作为资料依据时的最大字符数。 */
+    private static final int MAX_SELECTED_TEXT_CONTEXT_CHARS = 8_000;
+
+    /** 至少保留这些最近问答为原文，较早内容才会滚动进入摘要。 */
+    private static final int MEMORY_RECENT_QUESTION_WINDOW = 8;
+
+    /** 普通单次回答大约能稳定承载的中文正文长度，超过后提示用户输入"继续"分段续写。 */
+    private static final int LONG_DOCUMENT_PART_TARGET_CHARS = 2_800;
+
+    /** 未写明字数但明确要求"超长文档"时使用的默认目标长度。 */
+    private static final int DEFAULT_LONG_DOCUMENT_TARGET_CHARS = 9_000;
 
     /** BM25 索引缓存的最大条目数，避免内存无限增长 */
     private static final int BM25_CACHE_MAX_ENTRIES = 64;
@@ -117,8 +153,8 @@ public class RagService {
     /** 检索结果缓存的最大条目数，对相同查询复用检索结果以提高响应速度 */
     private static final int RETRIEVAL_CACHE_MAX_ENTRIES = 128;
 
-    /** 普通用户每天的聊天次数上限（管理员和自定义模型用户不受此限制） */
-    private static final int USER_DAILY_CHAT_LIMIT = 100;
+    /** 普通用户每天调用系统默认模型的聊天次数上限（管理员和自定义模型用户不受此限制） */
+    private static final int USER_DAILY_CHAT_LIMIT = 50;
 
     /** 每次请求用户最多上传的图片数量 */
     private static final int MAX_USER_IMAGES_PER_REQUEST = 8;
@@ -161,6 +197,14 @@ public class RagService {
         "(?i)(?:什么是|何为|解释一下|解释|定义|含义|概念|define|definition of|what is|what are)\\s*[\"“'‘]?([^\"”'’？?，,。；;：:\\n]{2,80})[\"”'’]?"
     );
 
+    /**
+     * 长文档字数识别模式。
+     * 支持"10000字"、"12000 个字"、"8000字符"、"1万字"这类写法，用来判断是否需要自动分段生成。
+     */
+    private static final Pattern LONG_DOCUMENT_CHAR_COUNT_PATTERN = Pattern.compile(
+        "(?i)(\\d+(?:\\.\\d+)?)\\s*(万)?\\s*(?:个)?\\s*(?:字|字符|汉字|中文字符|words?)"
+    );
+
     // ========== 依赖注入：数据访问层 ==========
 
     /** 学习资料仓库，用于查询用户上传的资料信息 */
@@ -174,6 +218,9 @@ public class RagService {
 
     /** 问答来源仓库，保存每个回答引用的资料片段来源 */
     private final RagQuestionSourceRepository ragQuestionSourceRepository;
+
+    /** 会话长期记忆仓库，用于保存滑出最近窗口的问答摘要。 */
+    private final RagConversationMemoryRepository ragConversationMemoryRepository;
 
     /** 用户反馈仓库，保存用户对回答的评价（点赞/踩） */
     private final RagFeedbackRepository ragFeedbackRepository;
@@ -248,6 +295,7 @@ public class RagService {
      * @param materialChunkRepository    资料片段仓库
      * @param ragQuestionRepository      问答记录仓库
      * @param ragQuestionSourceRepository 问答来源仓库
+     * @param ragConversationMemoryRepository 会话长期记忆仓库
      * @param ragFeedbackRepository      用户反馈仓库
      * @param ragEvaluationRepository    评估结果仓库
      * @param ragEvaluationSuiteRepository 评估套件仓库
@@ -270,6 +318,7 @@ public class RagService {
         MaterialChunkRepository materialChunkRepository,
         RagQuestionRepository ragQuestionRepository,
         RagQuestionSourceRepository ragQuestionSourceRepository,
+        RagConversationMemoryRepository ragConversationMemoryRepository,
         RagFeedbackRepository ragFeedbackRepository,
         RagEvaluationRepository ragEvaluationRepository,
         RagEvaluationSuiteRepository ragEvaluationSuiteRepository,
@@ -291,6 +340,7 @@ public class RagService {
         this.materialChunkRepository = materialChunkRepository;
         this.ragQuestionRepository = ragQuestionRepository;
         this.ragQuestionSourceRepository = ragQuestionSourceRepository;
+        this.ragConversationMemoryRepository = ragConversationMemoryRepository;
         this.ragFeedbackRepository = ragFeedbackRepository;
         this.ragEvaluationRepository = ragEvaluationRepository;
         this.ragEvaluationSuiteRepository = ragEvaluationSuiteRepository;
@@ -333,6 +383,7 @@ public class RagService {
         // 第一步：检查用户今日问答次数是否已用完
         ensureChatUsageAvailable(userId);
         boolean generalChat = isGeneralChat(request);
+        Long conversationId = resolveConversationId(userId, request.conversationId());
         // 如果用户问的是"你是什么模型"，走专门的身份回答逻辑
         if (thirdPartyLlmClient.isModelIdentityQuestion(request.question())) {
             return chatModelIdentity(userId, request);
@@ -371,12 +422,24 @@ public class RagService {
         }
 
         // ===== 生成阶段：调用 LLM 生成回答 =====
-        String questionWithContext = buildQuestionWithHistory(request.question(), request.history(), generalChat);
+        LongDocumentContinuation continuation = resolveLongDocumentContinuation(userId, conversationId, request.question());
+        String effectiveQuestion = continuation == null ? request.question() : continuation.originalQuestion();
+        String questionWithContext = buildQuestionWithHistory(userId, conversationId, request.question(), request.history(), generalChat);
         String llmQuestion = thirdPartyLlmClient.isModelIdentityQuestion(request.question())
             ? request.question()
-            : questionWithContext;
-        // 调用第三方 LLM 生成回答；如果调用失败则使用本地兜底回答
-        LlmCompletion rawCompletion = answerWithThirdParty(userId, llmQuestion, excerpts, images, generalChat, request.answerStyle())
+            : continuation == null ? questionWithContext : continuationQuestionWithHistory(questionWithContext, continuation);
+        // 调用第三方 LLM 生成回答；超长文档每次只生成一段，用户输入"继续"后再续写下一段。
+        LlmCompletion rawCompletion = answerWithLongDocumentSupport(
+            userId,
+            effectiveQuestion,
+            llmQuestion,
+            excerpts,
+            images,
+            generalChat,
+            request.answerStyle(),
+            continuation,
+            null
+        )
             .orElseGet(() -> new LlmCompletion(
                 generalChat
                     ? buildGeneralFallbackAnswer(request.question())
@@ -386,10 +449,11 @@ public class RagService {
         // 计算 Token 消耗量（优先使用模型返回的实际值，否则估算）
         TokenUsage usage = completionUsage(rawCompletion, llmQuestion, rawCompletion.content());
         // ===== 后处理阶段：装饰回答（添加引用依据等） =====
+        boolean longDocumentAnswer = longDocumentPlan(effectiveQuestion).parts() > 1;
         LlmCompletion completion = new LlmCompletion(
             generalChat
                 ? decorateGeneralAnswer(rawCompletion.content())
-                : decorateAnswer(request, rawCompletion.content(), selectedChunks),
+                : longDocumentAnswer ? decorateLongDocumentAnswer(rawCompletion.content()) : decorateAnswer(request, rawCompletion.content(), selectedChunks),
             rawCompletion.modelName(),
             usage.promptTokens(),
             usage.completionTokens(),
@@ -400,7 +464,8 @@ public class RagService {
         // ===== 持久化阶段：保存问答记录和来源信息 =====
         RagQuestionEntity question = new RagQuestionEntity();
         question.setUserId(userId);
-        question.setConversationId(resolveConversationId(userId, request.conversationId()));
+        question.setConversationId(conversationId);
+        question.setMaterialId(materialQuestionId(request));
         question.setQuestionText(request.question());
         question.setQuestionImagesJson(questionImagesJson(request));
         question.setQuestionTemporaryMaterialJson(questionTemporaryMaterialJson(request));
@@ -414,6 +479,7 @@ public class RagService {
         question.setQuestionStatus(QuestionStatus.SUCCESS);
         RagQuestionEntity savedQuestion = ragQuestionRepository.save(question);
         savedQuestion = ensureConversationId(savedQuestion);
+        updateConversationMemory(userId, savedQuestion.getConversationId());
 
         // 保存本次回答引用的来源片段
         List<RagQuestionSourceEntity> sourceEntities = saveSources(savedQuestion.getId(), selectedChunks);
@@ -440,6 +506,7 @@ public class RagService {
      * @return 包含模型身份信息的问答响应
      */
     private RagChatResponse chatModelIdentity(long userId, ChatRequest request) {
+        Long conversationId = resolveConversationId(userId, request.conversationId());
         LlmCompletion completion = thirdPartyLlmClient.currentModelCompletion(userId);
         TokenUsage usage = estimateUsage(request.question(), completion.content());
         completion = new LlmCompletion(
@@ -453,7 +520,8 @@ public class RagService {
 
         RagQuestionEntity question = new RagQuestionEntity();
         question.setUserId(userId);
-        question.setConversationId(resolveConversationId(userId, request.conversationId()));
+        question.setConversationId(conversationId);
+        question.setMaterialId(materialQuestionId(request));
         question.setQuestionText(request.question());
         question.setQuestionImagesJson(questionImagesJson(request));
         question.setQuestionTemporaryMaterialJson(questionTemporaryMaterialJson(request));
@@ -466,6 +534,7 @@ public class RagService {
         question.setCustomModel(completion.customModel());
         question.setQuestionStatus(QuestionStatus.SUCCESS);
         RagQuestionEntity savedQuestion = ensureConversationId(ragQuestionRepository.save(question));
+        updateConversationMemory(userId, savedQuestion.getConversationId());
         recordUsageLog(userId, "RAG_CHAT", savedQuestion.getId(), request, completion);
 
         return new RagChatResponse(
@@ -515,6 +584,314 @@ public class RagService {
         return completion == null ? java.util.Optional.empty() : completion;
     }
 
+    /**
+     * 带超长文档支持的模型调用入口。
+     * <p>
+     * 普通问答仍然只调用一次模型；当用户明确要求写长文档、长报告、论文等，且目标字数超过单次稳定输出能力时，
+     * 后端每次只生成一个安全长度的段落，并在结尾提示用户输入"继续"生成下一段。
+     *
+     * @param originalQuestion 用户原始问题，用于识别目标字数和长文意图
+     * @param llmQuestion      已加入长期记忆和最近对话的模型问题
+     * @param continuation     长文续写状态；普通长文首段为 null
+     * @param onChunk          流式回调；非流式调用传 null
+     */
+    private java.util.Optional<LlmCompletion> answerWithLongDocumentSupport(
+        long userId,
+        String originalQuestion,
+        String llmQuestion,
+        List<String> excerpts,
+        List<LlmImage> images,
+        boolean generalChat,
+        String answerStyle,
+        LongDocumentContinuation continuation,
+        java.util.function.Consumer<String> onChunk
+    ) {
+        LongDocumentPlan plan = longDocumentPlan(originalQuestion);
+        if (plan.parts() <= 1) {
+            if (onChunk == null) {
+                return answerWithThirdParty(userId, llmQuestion, excerpts, images, generalChat, answerStyle);
+            }
+            String answer = thirdPartyLlmClient.answerStream(
+                userId,
+                llmQuestion,
+                excerpts,
+                images,
+                onChunk,
+                generalChat,
+                answerStyle
+            );
+            if (answer == null || answer.isBlank()) {
+                return java.util.Optional.empty();
+            }
+            return java.util.Optional.of(new LlmCompletion(
+                answer,
+                thirdPartyLlmClient.effectiveModelName(userId),
+                null,
+                null,
+                null,
+                thirdPartyLlmClient.hasActiveUserConfig(userId)
+            ));
+        }
+        return onChunk == null
+            ? answerLongDocumentPart(userId, llmQuestion, excerpts, images, generalChat, answerStyle, plan, continuation)
+            : answerLongDocumentPartStream(userId, llmQuestion, excerpts, images, generalChat, answerStyle, plan, continuation, onChunk);
+    }
+
+    /**
+     * 非流式长文档单段生成。
+     * 只生成当前段并保存到历史，下一段由用户输入"继续"后再生成，避免单次请求过长导致页面报错。
+     */
+    private java.util.Optional<LlmCompletion> answerLongDocumentPart(
+        long userId,
+        String llmQuestion,
+        List<String> excerpts,
+        List<LlmImage> images,
+        boolean generalChat,
+        String answerStyle,
+        LongDocumentPlan plan,
+        LongDocumentContinuation continuation
+    ) {
+        int part = currentLongDocumentPart(plan, continuation);
+        if (isLongDocumentComplete(plan, continuation)) {
+            return java.util.Optional.of(new LlmCompletion(
+                longDocumentCompleteMessage(plan),
+                thirdPartyLlmClient.effectiveModelName(userId),
+                null,
+                null,
+                null,
+                thirdPartyLlmClient.hasActiveUserConfig(userId)
+            ));
+        }
+        String partQuestion = buildLongDocumentPartQuestion(
+            llmQuestion,
+            continuation == null ? "" : continuation.generatedAnswer(),
+            plan,
+            part
+        );
+        java.util.Optional<LlmCompletion> completion = answerWithThirdParty(
+            userId,
+            partQuestion,
+            excerpts,
+            images,
+            generalChat,
+            answerStyle
+        );
+        if (completion.isEmpty() || completion.orElseThrow().content().isBlank()) {
+            return java.util.Optional.empty();
+        }
+        LlmCompletion current = completion.orElseThrow();
+        String answer = appendLongDocumentContinueNotice(current.content(), plan, part);
+        return java.util.Optional.of(new LlmCompletion(
+            answer,
+            current.modelName(),
+            current.promptTokens(),
+            current.completionTokens(),
+            current.totalTokens(),
+            current.customModel()
+        ));
+    }
+
+    /**
+     * 流式长文档单段生成。
+     * 模型输出当前段后，后端追加"继续"提示并一并推送给前端。
+     */
+    private java.util.Optional<LlmCompletion> answerLongDocumentPartStream(
+        long userId,
+        String llmQuestion,
+        List<String> excerpts,
+        List<LlmImage> images,
+        boolean generalChat,
+        String answerStyle,
+        LongDocumentPlan plan,
+        LongDocumentContinuation continuation,
+        java.util.function.Consumer<String> onChunk
+    ) {
+        int part = currentLongDocumentPart(plan, continuation);
+        if (isLongDocumentComplete(plan, continuation)) {
+            String message = longDocumentCompleteMessage(plan);
+            onChunk.accept(message);
+            return java.util.Optional.of(new LlmCompletion(
+                message,
+                thirdPartyLlmClient.effectiveModelName(userId),
+                null,
+                null,
+                null,
+                thirdPartyLlmClient.hasActiveUserConfig(userId)
+            ));
+        }
+        String partQuestion = buildLongDocumentPartQuestion(
+            llmQuestion,
+            continuation == null ? "" : continuation.generatedAnswer(),
+            plan,
+            part
+        );
+        String current = thirdPartyLlmClient.answerStream(
+            userId,
+            partQuestion,
+            excerpts,
+            images,
+            onChunk,
+            generalChat,
+            answerStyle
+        );
+        if (current == null || current.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        String notice = longDocumentContinueNotice(plan, part);
+        if (!notice.isBlank()) {
+            onChunk.accept(notice);
+        }
+        return java.util.Optional.of(new LlmCompletion(
+            current.trim() + notice,
+            thirdPartyLlmClient.effectiveModelName(userId),
+            null,
+            null,
+            null,
+            thirdPartyLlmClient.hasActiveUserConfig(userId)
+        ));
+    }
+
+    /**
+     * 构造某一段的续写指令。
+     * 对模型明确约束"只输出当前段"，避免每段都重新生成标题页、摘要或结束语。
+     */
+    private String buildLongDocumentPartQuestion(String llmQuestion, String generatedAnswer, LongDocumentPlan plan, int part) {
+        String previous = abbreviateTail(generatedAnswer, 2_400);
+        return """
+            %s
+
+            【超长文档分段生成指令】
+            用户目标总长度约为 %d 字，系统计划分为 %d 段，这是第 %d 段。
+            本段目标长度约为 %d 字。
+            请只输出第 %d 段正文，不要解释分段机制，不要说"受限无法完成"。
+            第 1 段需要自然开篇；中间段直接承接；最后 1 段需要自然收束。
+            如果已生成内容尾部不为空，必须续写而不是重复前文。
+
+            【已生成内容尾部】
+            %s
+            """.formatted(
+            llmQuestion,
+            plan.targetChars(),
+            plan.parts(),
+            part,
+            plan.partTargetChars(),
+            part,
+            previous.isBlank() ? "无" : previous
+        );
+    }
+
+    /** 在非流式回答末尾追加长文续写提示。 */
+    private String appendLongDocumentContinueNotice(String answer, LongDocumentPlan plan, int part) {
+        String normalized = answer == null ? "" : answer.trim();
+        String notice = longDocumentContinueNotice(plan, part);
+        return notice.isBlank() ? normalized : normalized + notice;
+    }
+
+    /** 构造长文续写提示；前端直接展示，用户按提示输入"继续"即可接着生成。 */
+    private String longDocumentContinueNotice(LongDocumentPlan plan, int part) {
+        if (part >= plan.parts()) {
+            return "\n\n[超长文档已生成到计划末段。]";
+        }
+        return "\n\n[本段已完成。输入“继续”生成第 " + (part + 1) + "/" + plan.parts() + " 部分。]";
+    }
+
+    /** 用户继续请求已经超过计划段数时，直接返回明确提示，避免模型无边界续写。 */
+    private String longDocumentCompleteMessage(LongDocumentPlan plan) {
+        return "这篇超长文档已经生成到计划末段（共 " + plan.parts() + " 部分）。如需扩写，请直接说明新的补充要求。";
+    }
+
+    /** 计算当前应该生成第几段。 */
+    private int currentLongDocumentPart(LongDocumentPlan plan, LongDocumentContinuation continuation) {
+        int part = continuation == null ? 1 : continuation.nextPart();
+        return Math.max(1, Math.min(part, plan.parts()));
+    }
+
+    /** 判断当前长文是否已经按计划生成完。 */
+    private boolean isLongDocumentComplete(LongDocumentPlan plan, LongDocumentContinuation continuation) {
+        return continuation != null && continuation.nextPart() > plan.parts();
+    }
+
+    /**
+     * 根据用户原始问题判断是否需要长文分段。
+     * <p>
+     * 有明确字数时，需要同时具备文档生成意图才分段；未写字数时，只有明确说"超长/长篇/万字"才启用默认长文目标。
+     * 这样可以避免"给我一个方案"这类普通问答被误拆成多段长文。
+     */
+    private LongDocumentPlan longDocumentPlan(String question) {
+        String value = question == null ? "" : question.trim();
+        int requestedChars = requestedCharCount(value);
+        boolean documentIntent = hasDocumentGenerationIntent(value);
+        if (requestedChars <= 0 && hasExplicitLongDocumentIntent(value)) {
+            requestedChars = DEFAULT_LONG_DOCUMENT_TARGET_CHARS;
+            documentIntent = true;
+        }
+        if (!documentIntent || requestedChars <= LONG_DOCUMENT_PART_TARGET_CHARS) {
+            return new LongDocumentPlan(0, 1, LONG_DOCUMENT_PART_TARGET_CHARS);
+        }
+        int parts = Math.max(2, (int) Math.ceil((double) requestedChars / LONG_DOCUMENT_PART_TARGET_CHARS));
+        int partTargetChars = Math.max(1_800, (int) Math.ceil((double) requestedChars / parts));
+        return new LongDocumentPlan(requestedChars, parts, partTargetChars);
+    }
+
+    /** 提取用户显式要求的字数；未写字数时返回 0。 */
+    private int requestedCharCount(String question) {
+        Matcher matcher = LONG_DOCUMENT_CHAR_COUNT_PATTERN.matcher(question == null ? "" : question);
+        int max = 0;
+        while (matcher.find()) {
+            double number = Double.parseDouble(matcher.group(1));
+            int chars = (int) Math.round(number * ("万".equals(matcher.group(2)) ? 10_000 : 1));
+            max = Math.max(max, chars);
+        }
+        return max;
+    }
+
+    /** 判断问题是否是文档类生成，而不是普通解释、总结或短回答。 */
+    private boolean hasDocumentGenerationIntent(String question) {
+        String value = question == null ? "" : question.toLowerCase(Locale.ROOT);
+        return value.contains("文档")
+            || value.contains("报告")
+            || value.contains("论文")
+            || value.contains("教程")
+            || value.contains("讲稿")
+            || value.contains("文章")
+            || value.contains("作文")
+            || value.contains("材料")
+            || value.contains("写一篇")
+            || value.contains("写一份")
+            || value.contains("撰写")
+            || value.contains("生成一篇")
+            || value.contains("生成一份")
+            || value.contains("write")
+            || value.contains("document")
+            || value.contains("report")
+            || value.contains("essay");
+    }
+
+    /** 未写明确字数时，只对明显的超长表达启用默认长文分段。 */
+    private boolean hasExplicitLongDocumentIntent(String question) {
+        String value = question == null ? "" : question.toLowerCase(Locale.ROOT);
+        return hasDocumentGenerationIntent(value)
+            && (value.contains("超长")
+            || value.contains("长文")
+            || value.contains("长篇")
+            || value.contains("万字")
+            || value.contains("完整长文")
+            || value.contains("long-form")
+            || value.contains("very long"));
+    }
+
+    /** 只保留已生成内容的尾部，给下一段提供衔接信息，同时控制上下文长度。 */
+    private String abbreviateTail(String value, int maxLength) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String normalized = value.trim();
+        if (normalized.length() <= maxLength) {
+            return normalized;
+        }
+        return normalized.substring(normalized.length() - maxLength);
+    }
+
     // ========== 流式问答接口 ==========
 
     /**
@@ -539,6 +916,7 @@ public class RagService {
     public RagStreamResult chatStream(long userId, ChatRequest request, java.util.function.Consumer<String> onChunk) {
         ensureChatUsageAvailable(userId);
         boolean generalChat = isGeneralChat(request);
+        Long conversationId = resolveConversationId(userId, request.conversationId());
         if (thirdPartyLlmClient.isModelIdentityQuestion(request.question())) {
             return streamModelIdentity(userId, request, onChunk);
         }
@@ -569,10 +947,12 @@ public class RagService {
             collectImagesFromMaterialChunks(userId, request.materialId(), selectedChunks, images);
         }
 
-        String questionWithContext = buildQuestionWithHistory(request.question(), request.history(), generalChat);
+        LongDocumentContinuation continuation = resolveLongDocumentContinuation(userId, conversationId, request.question());
+        String effectiveQuestion = continuation == null ? request.question() : continuation.originalQuestion();
+        String questionWithContext = buildQuestionWithHistory(userId, conversationId, request.question(), request.history(), generalChat);
         String llmQuestion = thirdPartyLlmClient.isModelIdentityQuestion(request.question())
             ? request.question()
-            : questionWithContext;
+            : continuation == null ? questionWithContext : continuationQuestionWithHistory(questionWithContext, continuation);
 
         boolean customModel = thirdPartyLlmClient.hasActiveUserConfig(userId);
         String modelName = thirdPartyLlmClient.effectiveModelName(userId);
@@ -583,9 +963,23 @@ public class RagService {
                 onChunk.accept(delta);
             }
         };
-        String answer = isHomeworkStyle(request.answerStyle())
-            ? thirdPartyLlmClient.answerStream(userId, llmQuestion, excerpts, images, trackedChunk, generalChat, request.answerStyle())
-            : thirdPartyLlmClient.answerStream(userId, llmQuestion, excerpts, images, trackedChunk, generalChat, "STUDY");
+        String answerStyle = isHomeworkStyle(request.answerStyle()) ? request.answerStyle() : "STUDY";
+        LlmCompletion rawCompletion = answerWithLongDocumentSupport(
+            userId,
+            effectiveQuestion,
+            llmQuestion,
+            excerpts,
+            images,
+            generalChat,
+            answerStyle,
+            continuation,
+            trackedChunk
+        ).orElse(null);
+        String answer = rawCompletion == null ? "" : rawCompletion.content();
+        if (rawCompletion != null) {
+            modelName = rawCompletion.modelName();
+            customModel = rawCompletion.customModel();
+        }
         if (answer.isBlank()) {
             // LLM 流式调用失败时回退到本地生成，保证 SSE 至少能返回完整答案。
             answer = generalChat
@@ -599,12 +993,14 @@ public class RagService {
             streamAnswerInSmallChunks(answer, onChunk);
         }
 
+        boolean longDocumentAnswer = longDocumentPlan(effectiveQuestion).parts() > 1;
         String decoratedAnswer = generalChat
             ? decorateGeneralAnswer(answer)
-            : decorateAnswer(request, answer, selectedChunks);
+            : longDocumentAnswer ? decorateLongDocumentAnswer(answer) : decorateAnswer(request, answer, selectedChunks);
 
         TokenUsage usage = estimateUsage(llmQuestion, answer);
-        RagQuestionEntity savedQuestion = saveStreamResult(userId, request, decoratedAnswer, selectedChunks, modelName, customModel, usage);
+        RagQuestionEntity savedQuestion = saveStreamResult(userId, request, conversationId, decoratedAnswer, selectedChunks, modelName, customModel, usage);
+        updateConversationMemory(userId, savedQuestion.getConversationId());
         recordUsageLog(userId, "RAG_CHAT_STREAM", savedQuestion.getId(), request, new LlmCompletion(
             decoratedAnswer,
             modelName,
@@ -644,12 +1040,14 @@ public class RagService {
         RagQuestionEntity savedQuestion = saveStreamResult(
             userId,
             request,
+            resolveConversationId(userId, request.conversationId()),
             completion.content(),
             List.of(),
             completion.modelName(),
             completion.customModel(),
             usage
         );
+        updateConversationMemory(userId, savedQuestion.getConversationId());
         recordUsageLog(userId, "RAG_CHAT_STREAM", savedQuestion.getId(), request, completion);
         return new RagStreamResult(savedQuestion.getId(), savedQuestion.getConversationId(), completion.content(), List.of());
     }
@@ -1953,7 +2351,7 @@ public class RagService {
      */
     private List<String> buildExcerpts(ChatRequest request, List<ScoredChunk> selectedChunks) {
         if (request.selectedText() != null && !request.selectedText().isBlank()) {
-            return List.of("[用户选中内容]\n原文：" + request.selectedText().trim());
+            return List.of("[用户选中内容]\n原文：" + truncate(request.selectedText(), MAX_SELECTED_TEXT_CONTEXT_CHARS));
         }
         if (request.chunkId() == null) {
             return selectedChunks.stream().map(this::sourceContext).toList();
@@ -1973,12 +2371,13 @@ public class RagService {
      * 才会把完整 answer、token 用量、来源引用、图片和临时资料附件一起落库。
      * 这样历史记录中看到的是最终稳定版本，而不是中间增量。</p>
      *
-     * <p>保存失败时返回一个空的兜底对象，避免 SSE 响应线程因为持久化异常中断。
-     * 调用方仍会收到回答文本，但 questionId/conversationId 会是 0。</p>
+     * <p>保存失败时直接抛出业务异常。流式问答如果答完却没有落库，前端重进页面就无法恢复历史，
+     * 因此这里不能再静默返回 0 号记录。</p>
      */
     private RagQuestionEntity saveStreamResult(
         long userId,
         ChatRequest request,
+        Long conversationId,
         String answer,
         List<ScoredChunk> chunks,
         String modelName,
@@ -1988,7 +2387,8 @@ public class RagService {
         try {
             RagQuestionEntity question = new RagQuestionEntity();
             question.setUserId(userId);
-            question.setConversationId(resolveConversationId(userId, request.conversationId()));
+            question.setConversationId(conversationId);
+            question.setMaterialId(materialQuestionId(request));
             question.setQuestionText(request.question());
             question.setQuestionImagesJson(questionImagesJson(request));
             question.setQuestionTemporaryMaterialJson(questionTemporaryMaterialJson(request));
@@ -2004,11 +2404,11 @@ public class RagService {
             saved = ensureConversationId(saved);
             saveSources(saved.getId(), chunks);
             return saved;
-        } catch (Exception ignored) {
-            RagQuestionEntity fallback = new RagQuestionEntity();
-            fallback.setId(0L);
-            fallback.setConversationId(0L);
-            return fallback;
+        } catch (BusinessException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            log.warn("Failed to persist stream RAG result for user {}", userId, exception);
+            throw new BusinessException(500, "流式问答保存失败，请重试");
         }
     }
 
@@ -2095,32 +2495,300 @@ public class RagService {
     // ========== 对话历史处理 ==========
 
     /**
-     * 将当前问题和对话历史组装为带上下文的完整问题文本。
-     * <p>
-     * 格式示例：
-     * <pre>
-     * 对话历史：
-     * user：什么是索引？
-     * assistant：索引是数据库中...
+     * 组装发给模型的多轮上下文。
      *
-     * 当前问题：它有什么优缺点？
-     * </pre>
-     * 通用聊天模式最多保留 6 条历史，资料模式最多 10 条。
+     * <p>上下文由“长期会话摘要 + 最近原文窗口 + 当前问题”组成。
+     * 较早轮次进入摘要，最近轮次保留原文，从而兼顾更多轮记忆和请求体大小。</p>
      */
-    private String buildQuestionWithHistory(String question, List<ChatMessage> history, boolean generalChat) {
-        if (history == null || history.isEmpty()) {
+    private String buildQuestionWithHistory(
+        long userId,
+        Long conversationId,
+        String question,
+        List<ChatMessage> history,
+        boolean generalChat
+    ) {
+        StringBuilder sb = new StringBuilder();
+        String memorySummary = conversationMemorySummary(userId, conversationId);
+        List<ChatMessage> recentHistory = compactRecentHistory(history, generalChat);
+        if (memorySummary.isBlank() && recentHistory.isEmpty()) {
             return question;
         }
-        StringBuilder sb = new StringBuilder();
-        sb.append("对话历史：\n");
-        int maxHistoryItems = generalChat ? 6 : 10;
-        int start = Math.max(0, history.size() - maxHistoryItems);
-        for (int i = start; i < history.size(); i++) {
-            ChatMessage msg = history.get(i);
-            sb.append(msg.role()).append("：").append(msg.content()).append("\n");
+        if (!memorySummary.isBlank()) {
+            sb.append("长期会话摘要：\n")
+                .append(truncate(memorySummary, MAX_MEMORY_PROMPT_CHARS))
+                .append("\n\n");
         }
-        sb.append("\n当前问题：").append(question);
+
+        if (!recentHistory.isEmpty()) {
+            sb.append("最近对话原文：\n");
+            for (ChatMessage msg : recentHistory) {
+                sb.append(normalizeRole(msg.role()))
+                    .append("：")
+                    .append(truncateHistoryContent(msg))
+                    .append("\n");
+            }
+            sb.append("\n");
+        }
+
+        sb.append("当前问题：").append(question);
         return sb.toString();
+    }
+
+    /**
+     * 识别"继续"类请求对应的长文续写状态。
+     *
+     * <p>续写状态优先从服务端历史恢复，而不是只依赖前端传来的 history。
+     * 这样用户刷新页面后，只要仍在同一个会话里输入"继续"，后端仍能接上上一段。</p>
+     */
+    private LongDocumentContinuation resolveLongDocumentContinuation(long userId, Long conversationId, String question) {
+        if (!isContinueRequest(question) || conversationId == null || conversationId <= 0) {
+            return null;
+        }
+        List<RagQuestionEntity> questions = ragQuestionRepository
+            .findByUserIdAndConversationIdOrderByCreatedAtAsc(userId, conversationId);
+        if (questions.isEmpty()) {
+            return null;
+        }
+        String originalQuestion = "";
+        StringBuilder generatedAnswer = new StringBuilder();
+        int completedParts = 0;
+        for (RagQuestionEntity item : questions) {
+            String itemQuestion = item.getQuestionText();
+            LongDocumentPlan itemPlan = longDocumentPlan(itemQuestion);
+            if (itemPlan.parts() > 1 && !isContinueRequest(itemQuestion)) {
+                originalQuestion = itemQuestion;
+                generatedAnswer.setLength(0);
+                appendLongDocumentHistoryPart(generatedAnswer, item.getAnswerText());
+                completedParts = 1;
+                continue;
+            }
+            if (!originalQuestion.isBlank() && isContinueRequest(itemQuestion)) {
+                appendLongDocumentHistoryPart(generatedAnswer, item.getAnswerText());
+                completedParts++;
+            }
+        }
+        if (originalQuestion.isBlank() || generatedAnswer.isEmpty()) {
+            return null;
+        }
+        LongDocumentPlan plan = longDocumentPlan(originalQuestion);
+        return new LongDocumentContinuation(
+            originalQuestion,
+            generatedAnswer.toString().trim(),
+            completedParts,
+            completedParts + 1
+        );
+    }
+
+    /** 判断用户当前输入是否是在要求继续上一段长文。 */
+    private boolean isContinueRequest(String question) {
+        String value = question == null ? "" : question.trim().toLowerCase(Locale.ROOT);
+        String compact = value.replaceAll("[\\s\\p{Punct}\\u3000-\\u303f\\uff00-\\uffef]+", "");
+        return compact.equals("继续")
+            || compact.equals("继续写")
+            || compact.equals("接着写")
+            || compact.equals("续写")
+            || compact.equals("下一段")
+            || compact.equals("下一部分")
+            || compact.equals("继续生成")
+            || compact.equals("继续输出")
+            || compact.equals("goon")
+            || compact.equals("continue")
+            || compact.equals("next");
+    }
+
+    /** 把历史中的一段长文回答追加到续写上下文，去掉系统追加的"继续"提示。 */
+    private void appendLongDocumentHistoryPart(StringBuilder generatedAnswer, String answerText) {
+        String cleaned = cleanLongDocumentAnswerForContinuation(answerText);
+        if (cleaned.isBlank()) {
+            return;
+        }
+        if (!generatedAnswer.isEmpty()) {
+            generatedAnswer.append("\n\n");
+        }
+        generatedAnswer.append(cleaned);
+    }
+
+    /** 清理长文历史回答中的续写提示和引用装饰，避免下一段 prompt 重复这些系统文字。 */
+    private String cleanLongDocumentAnswerForContinuation(String answer) {
+        return cleanAnswerForMemory(answer)
+            .replaceAll("\\[本段已完成。输入“继续”生成第 \\d+/\\d+ 部分。]", "")
+            .replaceAll("\\[超长文档已生成到计划末段。]", "")
+            .trim();
+    }
+
+    /**
+     * 为"继续"请求补充原始长文需求和已生成尾部。
+     *
+     * <p>这段信息会再进入单段生成指令，双重约束模型只续写当前段，不重新开篇。</p>
+     */
+    private String continuationQuestionWithHistory(String questionWithContext, LongDocumentContinuation continuation) {
+        return """
+            %s
+
+            【长文续写上下文】
+            原始长文需求：
+            %s
+
+            已生成内容尾部：
+            %s
+
+            当前用户输入的是"继续"，请接着原始长文需求往下写，不要重复已经生成的内容。
+            """.formatted(
+            questionWithContext,
+            continuation.originalQuestion(),
+            abbreviateTail(continuation.generatedAnswer(), 2_400)
+        );
+    }
+
+    /**
+     * 读取持久化的长期摘要。
+     *
+     * <p>新会话第一轮还没有 conversationId，因此直接返回空摘要。</p>
+     */
+    private String conversationMemorySummary(long userId, Long conversationId) {
+        if (conversationId == null || conversationId <= 0) {
+            return "";
+        }
+        return ragConversationMemoryRepository.findByUserIdAndConversationId(userId, conversationId)
+            .map(RagConversationMemoryEntity::getSummary)
+            .orElse("");
+    }
+
+    /**
+     * 从最近窗口中按预算挑选历史原文。
+     *
+     * <p>从近到远选择，优先保留最新讨论；滑出窗口的较早内容由长期摘要承担。</p>
+     */
+    private List<ChatMessage> compactRecentHistory(List<ChatMessage> history, boolean generalChat) {
+        if (history == null || history.isEmpty()) {
+            return List.of();
+        }
+        int maxItems = generalChat ? GENERAL_RECENT_HISTORY_ITEMS : MATERIAL_RECENT_HISTORY_ITEMS;
+        int charBudget = generalChat ? GENERAL_HISTORY_CHAR_BUDGET : MATERIAL_HISTORY_CHAR_BUDGET;
+        int start = Math.max(0, history.size() - maxItems);
+        List<ChatMessage> window = history.subList(start, history.size());
+        List<ChatMessage> selected = new ArrayList<>();
+        int usedChars = 0;
+        for (int i = window.size() - 1; i >= 0; i--) {
+            ChatMessage message = window.get(i);
+            String content = truncateHistoryContent(message);
+            int nextChars = normalizeRole(message.role()).length() + content.length() + 2;
+            if (!selected.isEmpty() && usedChars + nextChars > charBudget) {
+                break;
+            }
+            selected.add(0, new ChatMessage(normalizeRole(message.role()), content));
+            usedChars += nextChars;
+        }
+        return selected;
+    }
+
+    /** 按角色裁剪单条历史，避免超长回答拖慢后续所有请求。 */
+    private String truncateHistoryContent(ChatMessage message) {
+        int maxChars = "assistant".equalsIgnoreCase(message.role())
+            ? MAX_HISTORY_ASSISTANT_CHARS
+            : MAX_HISTORY_USER_CHARS;
+        return truncate(message.content(), maxChars);
+    }
+
+    /** 统一角色名，防止前端或旧数据里的大小写差异影响 prompt。 */
+    private String normalizeRole(String role) {
+        return "assistant".equalsIgnoreCase(role) ? "assistant" : "user";
+    }
+
+    /** 按字符上限裁剪文本，并用明确标记告诉模型内容被截断。 */
+    private String truncate(String value, int maxChars) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.trim();
+        if (normalized.length() <= maxChars) {
+            return normalized;
+        }
+        return normalized.substring(0, maxChars) + "\n[内容过长，已截断]";
+    }
+
+    /**
+     * 更新会话长期摘要。
+     *
+     * <p>只处理已经滑出最近原文窗口的问答；最近若干轮继续以原文形式进入 prompt。
+     * 摘要由本地规则生成，不额外调用 LLM，避免因为维护记忆增加一次模型请求耗时。</p>
+     */
+    private void updateConversationMemory(long userId, Long conversationId) {
+        if (conversationId == null || conversationId <= 0) {
+            return;
+        }
+        List<RagQuestionEntity> questions = ragQuestionRepository
+            .findByUserIdAndConversationIdOrderByCreatedAtAsc(userId, conversationId);
+        if (questions.size() <= MEMORY_RECENT_QUESTION_WINDOW) {
+            return;
+        }
+
+        RagConversationMemoryEntity memory = ragConversationMemoryRepository
+            .findByUserIdAndConversationId(userId, conversationId)
+            .orElseGet(() -> newConversationMemory(userId, conversationId));
+        Long summarizedId = memory.getSummarizedQuestionId();
+        List<RagQuestionEntity> summarizable = questions.subList(0, questions.size() - MEMORY_RECENT_QUESTION_WINDOW)
+            .stream()
+            .filter(question -> summarizedId == null || question.getId() > summarizedId)
+            .toList();
+        if (summarizable.isEmpty()) {
+            return;
+        }
+
+        String updatedSummary = mergeConversationSummary(memory.getSummary(), summarizable);
+        memory.setSummary(updatedSummary);
+        memory.setSummarizedQuestionId(summarizable.get(summarizable.size() - 1).getId());
+        ragConversationMemoryRepository.save(memory);
+    }
+
+    /** 创建新的会话记忆记录。 */
+    private RagConversationMemoryEntity newConversationMemory(long userId, Long conversationId) {
+        RagConversationMemoryEntity memory = new RagConversationMemoryEntity();
+        memory.setUserId(userId);
+        memory.setConversationId(conversationId);
+        return memory;
+    }
+
+    /**
+     * 将滑出窗口的问答追加到长期摘要中。
+     *
+     * <p>摘要保留问题和结论，不保存完整长回答；超过存储预算时裁掉最早部分。</p>
+     */
+    private String mergeConversationSummary(String existingSummary, List<RagQuestionEntity> questions) {
+        List<String> lines = new ArrayList<>();
+        if (existingSummary != null && !existingSummary.isBlank()) {
+            lines.add(existingSummary.trim());
+        }
+        for (RagQuestionEntity question : questions) {
+            lines.add(memoryLine(question));
+        }
+        return keepTailWithinBudget(String.join("\n", lines), MAX_MEMORY_STORAGE_CHARS);
+    }
+
+    /** 把一轮问答压缩成适合长期记忆保存的一行。 */
+    private String memoryLine(RagQuestionEntity question) {
+        String userQuestion = truncate(question.getQuestionText(), 500);
+        String answer = truncate(cleanAnswerForMemory(question.getAnswerText()), 700);
+        return "- 用户问：" + userQuestion + "；助手结论：" + answer;
+    }
+
+    /** 清理回答中的引用装饰，减少摘要里无关的来源文本。 */
+    private String cleanAnswerForMemory(String answer) {
+        if (answer == null) {
+            return "";
+        }
+        return answer
+            .replaceAll("(?s)\\n{2,}参考依据：.*$", "")
+            .replaceAll("\\s+", " ")
+            .trim();
+    }
+
+    /** 保留字符串尾部预算，优先保存更新的会话信息。 */
+    private String keepTailWithinBudget(String text, int maxChars) {
+        if (text == null || text.length() <= maxChars) {
+            return text == null ? "" : text;
+        }
+        return "[较早摘要已截断]\n" + text.substring(Math.max(0, text.length() - maxChars));
     }
 
     /**
@@ -2318,6 +2986,34 @@ public class RagService {
             .map(this::toSourceResponse)
             .toList();
         return toHistoryDetail(userId, latestQuestion, sources, conversationQuestions);
+    }
+
+    /**
+     * 获取某份资料最近一段问答会话。
+     * 阅读器打开资料时用它恢复上次边读边问上下文；没有历史时返回 null。
+     */
+    @Transactional(readOnly = true)
+    public RagHistoryDetailResponse latestMaterialHistory(long userId, long materialId) {
+        validateCurrentMaterialForChat(userId, materialId);
+        return latestMaterialHistoryQuestion(userId, materialId)
+            .map(question -> historyDetail(userId, question.getId()))
+            .orElse(null);
+    }
+
+    /**
+     * 获取某份资料的历史问答会话列表。
+     * 只返回每个 conversation 的最新一条，用于阅读器问答区的历史弹窗。
+     */
+    @Transactional(readOnly = true)
+    public List<RagHistoryItemResponse> materialHistory(long userId, long materialId) {
+        validateCurrentMaterialForChat(userId, materialId);
+        Map<Long, RagQuestionEntity> latestByConversation = new LinkedHashMap<>();
+        for (RagQuestionEntity question : materialHistoryQuestions(userId, materialId)) {
+            latestByConversation.putIfAbsent(effectiveConversationId(question), question);
+        }
+        return latestByConversation.values().stream()
+            .map(question -> toHistoryItem(userId, question))
+            .toList();
     }
 
     /** 重命名历史记录的标题 */
@@ -2710,6 +3406,7 @@ public class RagService {
     public void deleteHistory(long userId, long questionId) {
         RagQuestionEntity question = ragQuestionRepository.findByIdAndUserId(questionId, userId)
             .orElseThrow(() -> new BusinessException(404, "Question not found"));
+        Long conversationId = effectiveConversationId(question);
         for (RagQuestionEntity conversationQuestion : questionsInConversation(userId, question)) {
             Long id = conversationQuestion.getId();
             userFavoriteRepository.deleteByUserIdAndQuestionId(userId, id);
@@ -2718,6 +3415,8 @@ public class RagService {
             ragEvaluationRepository.deleteByQuestionId(id);
             ragQuestionRepository.delete(conversationQuestion);
         }
+        ragConversationMemoryRepository.findByUserIdAndConversationId(userId, conversationId)
+            .ifPresent(ragConversationMemoryRepository::delete);
     }
 
     /** 清空用户的所有聊天历史（包括所有关联数据） */
@@ -2734,6 +3433,7 @@ public class RagService {
         ragFeedbackRepository.deleteByQuestionIdIn(questionIds);
         ragEvaluationRepository.deleteByQuestionIdIn(questionIds);
         ragQuestionRepository.deleteByUserId(userId);
+        ragConversationMemoryRepository.deleteByUserId(userId);
     }
 
     // ========== 资料摘要 ==========
@@ -3529,6 +4229,40 @@ public class RagService {
     }
 
     /**
+     * 查询资料相关问答记录。
+     * 新记录直接使用 rag_question.material_id；旧记录通过来源表中的 material_id 兜底。
+     */
+    private List<RagQuestionEntity> materialHistoryQuestions(long userId, long materialId) {
+        Map<Long, RagQuestionEntity> questions = new LinkedHashMap<>();
+        for (RagQuestionEntity question : ragQuestionRepository.findByUserIdAndMaterialIdOrderByCreatedAtDesc(userId, materialId)) {
+            questions.put(question.getId(), question);
+        }
+        for (Long questionId : ragQuestionSourceRepository.findQuestionIdsByMaterialIdOrderByCreatedAtDesc(materialId)) {
+            if (questionId == null || questions.containsKey(questionId)) {
+                continue;
+            }
+            ragQuestionRepository.findByIdAndUserId(questionId, userId)
+                .ifPresent(question -> questions.put(question.getId(), question));
+        }
+        return questions.values().stream()
+            .sorted((left, right) -> compareCreatedAtDesc(left, right))
+            .toList();
+    }
+
+    /** 获取资料最近一条问答记录，用于恢复阅读器问答会话。 */
+    private Optional<RagQuestionEntity> latestMaterialHistoryQuestion(long userId, long materialId) {
+        return materialHistoryQuestions(userId, materialId).stream().findFirst();
+    }
+
+    /** 按创建时间倒序比较，兼容极少数缺失时间的旧记录。 */
+    private int compareCreatedAtDesc(RagQuestionEntity left, RagQuestionEntity right) {
+        if (left.getCreatedAt() == null && right.getCreatedAt() == null) return 0;
+        if (left.getCreatedAt() == null) return 1;
+        if (right.getCreatedAt() == null) return -1;
+        return right.getCreatedAt().compareTo(left.getCreatedAt());
+    }
+
+    /**
      * 将问答列表转为对话消息列表（交替的 user/assistant 消息）。
      *
      * <p>数据库一行 rag_question 同时包含一次用户提问和一次 AI 回答；
@@ -3581,6 +4315,14 @@ public class RagService {
         return ragQuestionRepository.findByIdAndUserId(requestedConversationId, userId)
             .map(this::effectiveConversationId)
             .orElse(null);
+    }
+
+    /** 只有资料问答写 material_id，通用问答保持为空，避免历史恢复串到非资料会话。 */
+    private Long materialQuestionId(ChatRequest request) {
+        if (request == null || request.materialId() == null || !isMaterialChat(request)) {
+            return null;
+        }
+        return request.materialId();
     }
 
     /**
@@ -3824,6 +4566,17 @@ public class RagService {
             return "抱歉，我暂时无法回答这个问题。请尝试换个方式提问。";
         }
         return cleaned;
+    }
+
+    /**
+     * 装饰超长文档单段回答。
+     *
+     * <p>长文生成可能发生在资料模式或通用模式中，但它本质是创作/续写任务。
+     * 这里只清理模型输出，不追加资料引用，也不因检索片段为空而改写为"资料不足"。</p>
+     */
+    private String decorateLongDocumentAnswer(String content) {
+        String answer = cleanAnswerText(content);
+        return answer.isBlank() ? "未生成有效回答。" : answer;
     }
 
     private String buildGeneralFallbackAnswer(String question) {
@@ -4619,6 +5372,19 @@ public class RagService {
 
     /** 检索结果缓存条目，包含排序后的片段 ID 和分数 */
     private record RetrievalCacheEntry(List<CachedScoredChunk> chunks) {
+    }
+
+    /** 超长文档分段计划：目标总字数、拆分段数和每段目标字数。 */
+    private record LongDocumentPlan(int targetChars, int parts, int partTargetChars) {
+    }
+
+    /** 超长文档续写状态：原始需求、已生成正文、已完成段数和下一段编号。 */
+    private record LongDocumentContinuation(
+        String originalQuestion,
+        String generatedAnswer,
+        int completedParts,
+        int nextPart
+    ) {
     }
 
     /** 缓存中的片段记录：仅保存 chunkId 和分数（不持有实体引用，避免内存泄漏） */

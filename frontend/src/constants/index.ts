@@ -14,12 +14,12 @@ export const SESSION_KEY = 'learning-assistant.frontend.session'
 
 // ==================== 文件上传限制 ====================
 
-/** 单次上传文件大小上限：500MB（单位：字节） */
-export const MATERIAL_UPLOAD_LIMIT_BYTES = 500 * 1024 * 1024
+/** 持久资料上传大小上限：2GB（单位：字节） */
+export const MATERIAL_UPLOAD_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
 /** 上传限制的用户友好显示文本 */
-export const MATERIAL_UPLOAD_LIMIT_LABEL = '500MB'
-/** 分片上传时每个分片的大小：5MB */
-export const MATERIAL_UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024
+export const MATERIAL_UPLOAD_LIMIT_LABEL = '2GB'
+/** 分片上传时每个分片的大小：1MB，降低代理单请求体限制导致的上传失败概率 */
+export const MATERIAL_UPLOAD_CHUNK_BYTES = 1 * 1024 * 1024
 
 // ==================== 导航菜单配置 ====================
 
@@ -75,6 +75,8 @@ export const SOURCE_TYPE_LABELS: Record<string, string> = {
   DOCX: 'Word',
   WORD: 'Word',
   PPT: 'PPT',
+  PPTX: 'PPT',
+  XLSX: 'Excel',
   TXT: '文本',
   MD: 'Markdown',
   HTML: '网页',

@@ -2,21 +2,21 @@ import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
 import { hasStoredSession } from '@/lib/auth-gate'
-import type { Material, MaterialChunk, MaterialPage, PageResult, TemporaryMaterial } from '@/types'
+import type { Material, MaterialChunk, MaterialPage, MaterialPageTextBlock, PageResult, TemporaryMaterial } from '@/types'
 
 /**
  * 资料管理 API 模块 — 处理学习资料的上传、查询、分片上传、删除等操作。
  *
  * 核心功能：
  * 1. 普通上传（小文件）— 一次性 POST 文件
- * 2. 分片上传（大文件）— 5MB 一片，逐片上传，支持断点续传
+ * 2. 分片上传（大文件）— 1MB 一片，逐片上传，支持断点续传
  * 3. 上传后轮询状态 — 每 1.5 秒检查后端解析进度
  * 4. 资料 CRUD — 查询列表、详情、分块、更新标题、删除
  */
 
 // ===== 常量 =====
-const LARGE_UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024       // 每片 5MB
-export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024      // 最大 500MB
+export const LARGE_UPLOAD_CHUNK_SIZE = 1 * 1024 * 1024 // 每片 1MB，降低 nginx/网关单请求体限制导致的大文件分片失败概率
+export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024 // 持久资料最大 2GB，适配大 PDF 后台解析
 export const MAX_TEMPORARY_MATERIAL_BYTES = 500 * 1024 * 1024
 const PROCESSING_POLL_INTERVAL_MS = 1500               // 轮询间隔 1.5 秒
 const PROCESSING_TIMEOUT_MS = 60 * 60 * 1000           // 最长等待 60 分钟
@@ -35,7 +35,7 @@ export interface UploadSession {
   sourceType: string          // 文件类型（PDF/DOCX/PPTX 等）
   sourceUrl: string | null    // 来源 URL（网页导入时）
   fileSize: number            // 文件总大小（字节）
-  chunkSize: number           // 每片大小（5MB）
+  chunkSize: number           // 每片大小（当前默认 1MB）
   totalChunks: number         // 总片数
   uploadedChunks: number      // 已上传片数
   status: 'UPLOADING' | 'PROCESSING' | 'SUCCESS' | 'FAILED'
@@ -89,6 +89,12 @@ export async function getMaterialChunks(id: string): Promise<MaterialChunk[]> {
 export async function getMaterialPages(id: string): Promise<MaterialPage[]> {
   const { data } = await api.get(`/materials/${id}/pages`)
   return data
+}
+
+/** 按页获取原文透明文本层，用于阅读器直接在页面上选中划词。 */
+export async function getMaterialPageTextLayer(id: string, pageNo: number): Promise<MaterialPageTextBlock[]> {
+  const { data } = await api.get(`/materials/${id}/pages/${pageNo}/text-layer`)
+  return (data || []).map(normalizePageTextBlock)
 }
 
 /** 获取资料原始文件（二进制 Blob，用于 PDF 预览等） */
@@ -195,7 +201,7 @@ export async function getUploadSession(sessionId: string) {
  *
  * 流程：
  * 1. 创建上传会话
- * 2. 将文件按 5MB 切片，逐片上传（带重试）
+ * 2. 将文件按 1MB 切片，逐片上传（带重试）
  * 3. 所有片上传完成后，等待后端解析（轮询状态）
  * 4. 返回最终的 UploadSession
  *
@@ -207,13 +213,13 @@ export async function uploadMaterialInChunks(
   onProgress?: (progress: UploadProgress) => void,
 ): Promise<UploadSession> {
   if (params.file.size > MAX_UPLOAD_BYTES) {
-    throw new Error('文件超过 500MB，请压缩或拆分后再上传')
+    throw new Error('文件超过 2GB，请压缩或拆分后再上传')
   }
   const chunkSize = LARGE_UPLOAD_CHUNK_SIZE
   const totalChunks = Math.max(1, Math.ceil(params.file.size / chunkSize))
   // 创建会话
   const session = await createUploadSession({
-    clientUploadId: buildClientUploadId(params.file),
+    clientUploadId: buildClientUploadId(params.file, chunkSize, params.title),
     title: params.title?.trim() || params.file.name,
     originalName: params.file.name,
     sourceType: params.sourceType,
@@ -254,15 +260,27 @@ async function waitForUploadProcessing(sessionId: string, totalChunks: number, o
   throw new Error('资料仍在后台解析，请稍后刷新资料列表查看结果')
 }
 
-/** 生成客户端上传 ID（文件名+大小+最后修改时间的组合，用于防重复上传） */
-function buildClientUploadId(file: File): string {
-  return ['web', file.name, file.size, file.lastModified].join('-').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180)
+/** 生成客户端上传 ID（固定短格式，避免长中文文件名超过后端数据库字段长度） */
+function buildClientUploadId(file: File, chunkSize: number, title?: string): string {
+  const identity = [file.name, file.size, file.lastModified, chunkSize, title?.trim() || file.name].join('\n')
+  return ['web', file.size.toString(36), file.lastModified.toString(36), chunkSize.toString(36), hashUploadIdentity(identity)].join('-')
+}
+
+/** 对上传元数据做稳定哈希；同一文件重复上传仍能命中幂等会话，同时不会把长文件名直接写入 ID。 */
+function hashUploadIdentity(value: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
 }
 function sleep(ms: number) { return new Promise((resolve) => window.setTimeout(resolve, ms)) }
 // 缺少后端进度时给一个低起点；未成功前最高 99%，避免 UI 提前显示完成。
 function normalizeProcessingPercent(percent?: number | null) { if (typeof percent !== 'number' || Number.isNaN(percent)) return 5; return Math.max(0, Math.min(99, Math.round(percent))) }
 function normalizeMaterial(material: Material): Material { return { ...material, id: String(material.id), parseProgressPercent: typeof material.parseProgressPercent === 'number' ? material.parseProgressPercent : null } }
 function normalizeChunk(chunk: MaterialChunk): MaterialChunk { return { ...chunk, id: String(chunk.id), materialId: String(chunk.materialId) } }
+function normalizePageTextBlock(block: MaterialPageTextBlock): MaterialPageTextBlock { return { ...block, id: String(block.id), chunkId: block.chunkId == null ? null : String(block.chunkId) } }
 function normalizeUploadSession(session: UploadSession): UploadSession { return { ...session, materialId: session.materialId == null ? null : String(session.materialId) } }
 
 /** 更新资料信息（标题、来源 URL） */
@@ -296,6 +314,7 @@ function isMaterialParsing(m: Material) { return ['PENDING', 'PARSING', 'PROCESS
 export function useMaterial(id: string | null) { return useQuery({ queryKey: ['materials', id], queryFn: () => getMaterial(id!), enabled: !!id && hasStoredSession() }) }
 export function useMaterialChunks(id: string | null) { return useQuery({ queryKey: ['materials', id, 'chunks'], queryFn: () => getMaterialChunks(id!), enabled: !!id && hasStoredSession() }) }
 export function useMaterialPages(id: string | null) { return useQuery({ queryKey: ['materials', id, 'pages'], queryFn: () => getMaterialPages(id!), enabled: !!id && hasStoredSession() }) }
+export function useMaterialPageTextLayer(id: string | null, pageNo: number | null) { return useQuery({ queryKey: ['materials', id, 'pages', pageNo, 'text-layer'], queryFn: () => getMaterialPageTextLayer(id!, pageNo!), enabled: !!id && !!pageNo && hasStoredSession() }) }
 export function useUploadMaterial() { return useMutation({ mutationFn: uploadMaterial, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }
 export function useImportWebMaterial() { return useMutation({ mutationFn: importWebMaterial, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }
 export function useUpdateMaterial() { return useMutation({ mutationFn: ({ id, payload }: { id: string; payload: { title?: string; sourceUrl?: string } }) => updateMaterial(id, payload), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['materials'] }) }) }

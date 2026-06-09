@@ -15,9 +15,14 @@ frontend/tsconfig.tsbuildinfo
 upload-package/
 upload-package-latest/
 frontend-dist-upload/
+deploy-package-*/
+deploy-frontend.tar.gz
 .codex-run/
 output/
 test-results/
+login-payload.json
+test-txt-upload.sh
+delete-test-material.py
 *.zip
 *.tar
 *.tar.gz

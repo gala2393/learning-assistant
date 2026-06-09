@@ -66,6 +66,21 @@ class ThirdPartyLlmClientTest {
         assertEquals(0, llmClient.streamCalls);
     }
 
+    @Test
+    void ordinaryModelQuestionsDoNotTriggerIdentityAnswer() {
+        CapturingLlmClient llmClient = new CapturingLlmClient("normal model answer");
+        ThirdPartyLlmClient client = new ThirdPartyLlmClient(llmClient);
+
+        Optional<LlmCompletion> completion = client.answer(1L, "当前这个分类模型应该怎么使用？", List.of(), List.of(), true, "STUDY");
+
+        assertTrue(completion.isPresent());
+        assertEquals("normal model answer", completion.get().content());
+        assertEquals(1, llmClient.chatCalls);
+        assertFalse(client.isModelIdentityQuestion("当前这个分类模型应该怎么使用？"));
+        assertFalse(client.isModelIdentityQuestion("请解释一下 Transformer 模型的注意力机制"));
+        assertTrue(client.isModelIdentityQuestion("你是什么 AI？"));
+    }
+
     /**
      * 测试场景：历史对话中包含模型身份问答，但当前问题为其他内容。
      * 预期结果：历史中的身份问答不影响当前问题处理，正常调用 LLM 服务（chatCalls=1）。

@@ -6,16 +6,17 @@
 
 ## 最近更新
 
-- 首页新增产品介绍页，未登录用户打开站点会先看到产品能力预览，可直接进入工作区或登录页。
-- 资料总结升级为通用结构化摘要，支持摘要类型选择、来源跳转和用户整理版保存。
+- 资料管理上传稳定性升级：PDF、`.doc`、`.docx`、TXT 等文件上传兼容性增强，大资料先完成入库再后台补齐向量索引，避免上传进度长时间卡住。
+- 阅读器升级为 A4 页面预览体验，支持 PDF 页面文本层划词、页码输入跳转和边问边读上下文绑定。
+- 引入 MinerU 可选解析能力，用于扫描版 PDF、图片型 PDF 和复杂版式文档的文本提取；普通文本 PDF 会优先复用原生文本层。
 
 ## 主要功能
 
 - 账号体系：登录、注册、找回密码、个人信息、头像和密码修改
 - 用户管控：管理员可修改用户角色、禁用用户登录，并显示禁用提示
-- 资料管理：上传资料、解析进度、资料列表、详情、编辑、删除
+- 资料管理：上传资料、解析进度、资料列表、详情、编辑、删除，支持大文件分片上传和后台向量索引补齐
 - 原文件访问：支持安全打开原文件，避免直接暴露文件真实路径
-- 文档阅读：资料列表、片段列表、原文预览、边读边问，适配桌面端、平板和手机端
+- 文档阅读：资料列表、片段列表、A4 页面预览、PDF 文本层划词、边读边问，适配桌面端、平板和手机端
 - 智能问答：通用知识问答、资料绑定问答、问答历史、收藏
 - 图片问答：支持上传图片或粘贴图片，后端按多模态请求发送给模型
 - 临时资料问答：通用问答可临时上传 PDF、Word、PPT、Markdown、TXT 等文件作为当前对话上下文，不进入资料库
@@ -36,7 +37,7 @@
 - 前端：React 18，Vite，TypeScript，React Router，TanStack Query
 - UI：Tailwind CSS，Radix UI，Lucide Icons，Framer Motion
 - 部署：Docker Compose，Nginx，MySQL 8
-- 可选能力：Tesseract OCR，LibreOffice 文档转换，Qdrant 向量库
+- 可选能力：MinerU 文档解析，Tesseract OCR，LibreOffice 文档转换，Qdrant 向量库
 
 ## 项目结构
 
@@ -88,6 +89,7 @@ learning-assistant/
 这些增强能力可以后续再安装，本地首次运行可以先关闭：
 
 - Redis：用于验证码、限流等短期状态存储
+- MinerU：用于扫描版 PDF、图片型 PDF 和复杂版式文档解析
 - Tesseract OCR：用于扫描 PDF 图片文字识别
 - LibreOffice：用于 Word、PPT 等文档预览转换
 - Qdrant：用于外部向量库检索
@@ -167,6 +169,10 @@ VECTOR_STORE_ENABLED=false
 RERANKER_ENABLED=true
 RERANKER_PROVIDER=local
 
+APP_DOCUMENT_PARSER_PROVIDER=mineru
+APP_MINERU_FALLBACK_ENABLED=true
+APP_MINERU_SKIP_TEXT_PDF=true
+
 OCR_ENABLED=false
 DOCUMENT_PREVIEW_CONVERTER_ENABLED=false
 PDF_COMPRESSION_ENABLED=false
@@ -186,6 +192,15 @@ EMBEDDING_BASE_URL=https://api.voyageai.com
 EMBEDDING_API_KEY=你的Embedding服务APIKey
 EMBEDDING_MODEL=voyage-multimodal-3
 ```
+
+如果你要启用扫描件 PDF 或复杂版式 PDF 的系统内置解析能力，需要先在运行环境安装 MinerU，并保持：
+
+```env
+APP_DOCUMENT_PARSER_PROVIDER=mineru
+APP_MINERU_FALLBACK_ENABLED=true
+```
+
+`APP_MINERU_SKIP_TEXT_PDF=true` 表示普通文本 PDF 优先使用原生文本层，扫描件和图片型 PDF 再进入 MinerU/OCR 流程。MinerU 未安装或解析失败时，系统会自动回退到内置解析器。
 
 注意：`backend/.env` 和 `backend/.env.local` 都包含真实密码或 API Key，绝对不要提交到 GitHub。
 
@@ -331,6 +346,18 @@ http://127.0.0.1:5174/login
 - 要获得完整 RAG 语义检索效果，需要配置 Embedding 服务
 - Qdrant 是可选项，不开启时可先使用基础能力验证流程
 
+PDF 不能划词或划词不精准：
+
+- 普通文本 PDF 会使用原生文本层和页面文本块支持划词上下文
+- 扫描版 PDF 需要安装并启用 MinerU/OCR 后重新上传或重新解析
+- 浏览器 PDF 预览的视觉选区和后端文本块可能存在少量版式偏差，复杂版式优先使用 MinerU 解析结果
+
+TXT 或大资料上传看起来卡住：
+
+- 新版本会先保存资料片段，再后台补齐向量索引
+- 如果启用了 Embedding 或 Qdrant，大文件的检索增强可能在上传完成后继续后台处理
+- 上传完成后可先阅读和问答，后台索引完成后语义检索效果会进一步提升
+
 管理员密码忘记：
 
 - 开发环境可以直接在数据库中处理用户数据，或清空本地测试数据库后重新启动初始化
@@ -412,7 +439,7 @@ APP_STORAGE_DIR=/data/learning-assistant-files
 本地先构建前端：
 
 ```bat
-cd /d C:\Users\23931\Desktop\learning-assistant\frontend
+cd /d C:\你的路径\learning-assistant\frontend
 npm run build
 ```
 
@@ -456,7 +483,10 @@ curl http://127.0.0.1/api/health
 - `upload-package/`
 - `upload-package-latest/`
 - `frontend-dist-upload/`
+- `deploy-package-*/`
 - `frontend/dist/`
+- `login-payload.json`
+- `test-txt-upload.sh`
 - `*.ppk`、`*.key`、`*.zip`、`*.tar.gz`
 
 已移除 Vercel/Railway 自动部署配置：

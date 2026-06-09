@@ -5,47 +5,41 @@
  * 在阅读器页面（ReaderPage）的中间区域展示资料的内容。
  * 是阅读器最核心的展示组件，负责将资料片段渲染为可视化的阅读内容。
  *
- * 【两种阅读模式】
+ * 【统一连续阅读】
  *
- * 1. 原文预览模式（viewMode='original'）：
- *    直接展示资料的原始文件：
- *    - PDF：通过 iframe 嵌入，支持定位到当前页
- *    - Word（DOCX）：后端转换为预览格式后通过 iframe 嵌入
- *    - 文本（TXT/MD）：通过 Blob 分段读取，每次显示 512KB，避免大文件卡死
+ * 1. 有页面预览的资料：
+ *    - PDF、DOC、DOCX 等资料优先使用 PDF.js 直接渲染预览 PDF，避免依赖后端 page-N.png 资产。
+ *    - 前端只渲染当前页附近的小窗口，防止大 PDF 一次性挂载几百页导致页面卡死。
+ *    - PDF.js 会叠加透明文字层，可复制 PDF 能直接在原页上划词提问。
+ *    - 扫描件或 Office 预览没有原生文字层时，叠加后端 MinerU/legacy 文本层用于原文划词。
  *
- * 2. 智能阅读模式（viewMode='smart'）：
- *    展示后端解析后的内容：
- *    - 页面预览：如果有页面图片（pages），以类似 PDF 的方式展示页面图片
- *    - 文本模式：如果没有页面图片，直接展示解析后的文本片段
- *    - 支持缩放（70%~180%，仅页面预览模式）
- *    - 文本中嵌入的图片标记 [[material-image:xxx]] 会被替换为实际图片
+ * 2. 无页面预览的资料：
+ *    - TXT、MD、HTML、WEB 等资料按后端解析片段分页式渲染当前窗口。
+ *    - 当前滚动停留片段会实时回传，确保提问携带正确片段上下文。
+ *    - 文本中嵌入的图片标记 [[material-image:xxx]] 会被替换为实际图片。
  *
- * 【文件类型与默认阅读模式】
- * - PDF：默认原文预览
- * - Word（DOCX）：默认原文预览
- * - TXT/MD：默认智能阅读（原文预览使用文本分段显示）
- * - 其他（PPT/HTML等）：默认智能阅读，原文预览标记为 unsupported
+ * 【跳转逻辑】
+ * - 来源点击、目录点击、页码输入和上一/下一片段都通过同一套 DOM ref 定位。
+ * - 有页面预览时跳页；无页面预览时跳片段编号。
  *
  * 【图片加载机制】
  * - MaterialImage 组件通过 fetch + Authorization 请求图片数据
  * - 使用 URL.createObjectURL 创建临时 URL 供 <img> 使用
  * - 组件卸载时通过 URL.revokeObjectURL 清理内存
  *
- * 【翻页逻辑】
- * - 页面预览模式：按页面翻页（handlePageStep），跳转到目标页的第一个片段
- * - 文本模式：按片段翻片（由父组件的 onPrev/onNext 控制）
- * - 原文预览模式：PDF 支持按片段翻（跳转到对应页码），其他不支持翻片
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
+import * as pdfjsLib from 'pdfjs-dist'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
+import type { PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api'
+import type { TextLayer } from 'pdfjs-dist/types/src/display/text_layer'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { createMaterialFileTicket } from '@/api/materials'
 import {
   ChevronLeft,
   ChevronRight,
   ExternalLink,
-  FileText,
   Image as ImageIcon,
   Loader2,
   Minus,
@@ -53,29 +47,41 @@ import {
 } from 'lucide-react'
 import { SESSION_KEY } from '@/constants'
 import { cn } from '@/lib/utils'
-import type { MaterialChunk, Material, MaterialPage } from '@/types'
+import { useMaterialPageTextLayer } from '@/api/materials'
+import type { MaterialChunk, Material, MaterialPage, MaterialPageTextBlock } from '@/types'
 
 /** 匹配文本中的图片标记 [[material-image:文件名]]（正则全局匹配） */
 const IMAGE_MARKER_RE = /\[\[material-image:([^\]]+)\]\]/g
 
+/** PDF 页数超过该阈值才启用窗口化；小文件全量渲染，保证连续滚动体验。 */
+const FULL_RENDER_PAGE_LIMIT = 20
+
+/** 文本片段超过该阈值才启用窗口化；少量片段直接全量渲染，避免跳转和滑动被窗口限制。 */
+const FULL_RENDER_CHUNK_LIMIT = 80
+
+/** 大 PDF 每次只挂载当前页前后 2 页，兼顾翻页顺滑和大文件性能。 */
+const PAGE_RENDER_WINDOW = 2
+
+/** 大文本资料每次只挂载当前片段前后 8 段，避免超长资料一次性渲染全部 DOM。 */
+const CHUNK_RENDER_WINDOW = 8
+
+/** 阅读器统一使用 A4 纸张比例作为视觉页面，避免不同 PDF MediaBox 把页面撑成异常比例。 */
+const A4_PAGE_WIDTH = 794
+const A4_PAGE_ASPECT_RATIO = 210 / 297
+const A4_PAGE_HEIGHT_RATIO = 297 / 210
+
 /** API 基础地址（从环境变量读取，去除尾部斜杠） */
 const API_BASE = ((import.meta.env.VITE_API_BASE as string) || '/api').replace(/\/$/, '')
 
-/** 阅读视图模式：'original' 原文预览 | 'smart' 智能阅读 */
-type ReaderViewMode = 'original' | 'smart'
-/** 原文预览类型：PDF / 文本 / Office / 不支持 */
-type OriginalPreviewKind = 'pdf' | 'text' | 'office' | 'unsupported'
-/** 原文下载进度（已加载字节数 / 总字节数） */
-type OriginalDownloadProgress = {
-  loaded: number
-  total: number | null
-}
+/** PDF.js Worker 必须显式指定，否则 Vite 构建后会找不到 worker 文件。 */
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
-/** 文本分段预览的每段大小（512KB，避免一次渲染整篇导致页面卡死） */
-const TEXT_PREVIEW_BYTES = 512 * 1024
-/** 文本原文定位时最多完整解码的大小；更大的文件使用片段序号估算窗口位置。 */
-const TEXT_LOCATE_MAX_BYTES = 8 * 1024 * 1024
-const TEXT_LOCATE_LEAD_BYTES = 2048
+/** 连续阅读实时上下文：右侧问答只依赖用户当前停留的页/片段，不再依赖旧的阅读模式。 */
+export type ReaderReadingContext = {
+  pageNo: number | null
+  chunkIds: Array<string | number>
+  chunkIndex: number
+}
 
 /** 从本地存储获取 JWT 认证令牌（用于请求需要认证的图片/文件） */
 function getAuthToken(): string {
@@ -92,168 +98,25 @@ function imageUrl(materialId: string, fileName: string) {
   return `${API_BASE}/materials/${materialId}/images/${encodeURIComponent(fileName)}`
 }
 
-/** 根据资料类型返回原文预览类型 */
-function sourceTypeOf(material: Material | null) {
-  return String(material?.sourceType || '').toUpperCase()
+/** 构建预览 PDF 的请求 URL；PDF.js 会带 Authorization 请求该地址并按页渲染。 */
+function previewFileUrl(materialId: string) {
+  return `${API_BASE}/materials/${materialId}/preview-file`
 }
 
-function isLegacyWordMaterial(material: Material | null) {
-  const originalName = String(material?.originalName || material?.title || '').toLowerCase()
-  return sourceTypeOf(material) === 'WORD' && originalName.endsWith('.doc')
-}
-
-function originalPreviewKind(material: Material | null): OriginalPreviewKind {
-  const type = sourceTypeOf(material)
-  if (type === 'PDF') return 'pdf'
-  if (type === 'MD' || type === 'TXT') return 'text'
-  if (type === 'DOCX' || type === 'WORD') return material?.previewStatus === 'READY' ? 'office' : 'unsupported'
-  return 'unsupported'
-}
-
-function supportsOriginalPreview(material: Material | null) {
-  return originalPreviewKind(material) !== 'unsupported'
-}
-
-function defaultReaderViewMode(material: Material | null): ReaderViewMode {
-  const kind = originalPreviewKind(material)
-  // 旧版 .doc 的浏览器原文预览依赖服务器转换结果，移动端默认进入更稳定的智慧阅读文本。
-  if (isLegacyWordMaterial(material)) return 'smart'
-  return kind === 'pdf' || kind === 'office' ? 'original' : 'smart'
-}
-
-function normalizeTicketUrl(url: string) {
-  if (!url) return ''
-  if (/^https?:\/\//i.test(url)) return url
-  if (url.startsWith('/api/') && /^https?:\/\//i.test(API_BASE)) {
-    return `${API_BASE.replace(/\/api$/, '')}${url}`
-  }
-  if (url.startsWith('/')) return url
-  return `/${url}`
-}
-
-function previewTicketUrl(url: string) {
-  return normalizeTicketUrl(url).replace('/file?', '/preview-file?')
-}
-
-function pdfPageUrl(url: string, pageNo?: number | null) {
-  if (!url || !pageNo || pageNo <= 0) return url
-  return `${url.split('#')[0]}#page=${pageNo}`
-}
-
-function formatBytes(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let value = bytes
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`
-}
-
-function charsetFromContentType(contentType: string) {
-  const match = (contentType || '').match(/charset=([^;]+)/i)
-  return match?.[1]?.trim().replace(/^"|"$/g, '').toLowerCase() || ''
-}
-
-function startsWithBytes(bytes: Uint8Array, prefix: number[]) {
-  if (bytes.length < prefix.length) return false
-  return prefix.every((value, index) => bytes[index] === value)
-}
-
-function textEncodingFor(bytes: Uint8Array, contentType: string) {
-  const charset = charsetFromContentType(contentType)
-  if (charset) return charset
-  if (startsWithBytes(bytes, [0xef, 0xbb, 0xbf])) return 'utf-8'
-  if (startsWithBytes(bytes, [0xff, 0xfe])) return 'utf-16le'
-  if (startsWithBytes(bytes, [0xfe, 0xff])) return 'utf-16be'
-  try {
-    new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-    return 'utf-8'
-  } catch {
-    return 'gb18030'
+/** 计算窗口化渲染范围，返回 [start, end) 索引区间。 */
+function windowRange(centerIndex: number, total: number, radius: number) {
+  if (total <= 0) return { start: 0, end: 0 }
+  const safeCenter = Math.max(0, Math.min(total - 1, centerIndex))
+  return {
+    start: Math.max(0, safeCenter - radius),
+    end: Math.min(total, safeCenter + radius + 1),
   }
 }
 
-function decodeTextWindow(buffer: ArrayBuffer, contentType: string) {
-  const bytes = new Uint8Array(buffer)
-  const encoding = textEncodingFor(bytes, contentType)
-  try {
-    return new TextDecoder(encoding).decode(bytes)
-  } catch {
-    return new TextDecoder('utf-8').decode(bytes)
-  }
-}
-
-function fallbackTextWindowOffset(blobSize: number, chunk: MaterialChunk, chunks: MaterialChunk[]) {
-  if (blobSize <= TEXT_PREVIEW_BYTES) return 0
-  const chunkIndex = Math.max(0, chunks.findIndex((candidate) => String(candidate.id) === String(chunk.id)))
-  const ratio = chunks.length > 1 ? chunkIndex / Math.max(1, chunks.length - 1) : 0
-  const maxOffset = Math.max(0, blobSize - TEXT_PREVIEW_BYTES)
-  return Math.min(maxOffset, Math.max(0, Math.floor(maxOffset * ratio)))
-}
-
-async function locateTextWindowOffset(blob: Blob, chunk: MaterialChunk, chunks: MaterialChunk[]) {
-  if (!chunk?.chunkText?.trim()) return fallbackTextWindowOffset(blob.size, chunk, chunks)
-  if (blob.size > TEXT_LOCATE_MAX_BYTES) return fallbackTextWindowOffset(blob.size, chunk, chunks)
-  const buffer = await blob.arrayBuffer()
-  const sourceText = decodeTextWindow(buffer, blob.type)
-  const textIndex = findChunkTextIndex(sourceText, chunk)
-  if (textIndex < 0 || sourceText.length === 0) return fallbackTextWindowOffset(blob.size, chunk, chunks)
-  const approximateByteOffset = Math.floor((textIndex / sourceText.length) * blob.size)
-  const maxOffset = Math.max(0, blob.size - TEXT_PREVIEW_BYTES)
-  return Math.min(maxOffset, Math.max(0, approximateByteOffset - TEXT_LOCATE_LEAD_BYTES))
-}
-
-function findChunkTextIndex(sourceText: string, chunk: MaterialChunk) {
-  const candidates = chunkTextCandidates(chunk)
-  for (const candidate of candidates) {
-    const index = sourceText.indexOf(candidate)
-    if (index >= 0) return index
-  }
-  const compactSource = compactTextWithMap(sourceText)
-  for (const candidate of candidates) {
-    const compactCandidate = compactText(candidate)
-    if (compactCandidate.length < 24) continue
-    const compactIndex = compactSource.text.indexOf(compactCandidate.slice(0, 240))
-    if (compactIndex >= 0) return compactSource.map[compactIndex] ?? -1
-  }
-  return -1
-}
-
-function chunkTextCandidates(chunk: MaterialChunk) {
-  const values = [chunk.chunkText, chunk.excerpt, chunk.summary]
-  const candidates: string[] = []
-  for (const value of values) {
-    const normalized = (value || '').trim()
-    if (!normalized) continue
-    for (const length of [500, 300, 160, 80]) {
-      const candidate = normalized.slice(0, length).trim()
-      if (candidate.length >= 24 && !candidates.includes(candidate)) candidates.push(candidate)
-    }
-    for (const line of normalized.split(/\r?\n+/)) {
-      const candidate = line.trim()
-      if (candidate.length >= 32 && !candidates.includes(candidate)) candidates.push(candidate.slice(0, 240))
-    }
-  }
-  return candidates
-}
-
-function compactText(value: string) {
-  return value.replace(/\s+/g, '').toLowerCase()
-}
-
-function compactTextWithMap(value: string) {
-  let text = ''
-  const map: number[] = []
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index]
-    if (/\s/.test(char)) continue
-    text += char.toLowerCase()
-    map.push(index)
-  }
-  return { text, map }
+/** 判断资料类型是否适合用预览 PDF 阅读器展示。 */
+function supportsPdfPreview(material: Material | null) {
+  const type = String(material?.sourceType || '').toUpperCase()
+  return ['PDF', 'DOC', 'DOCX', 'PPT', 'PPTX'].includes(type)
 }
 
 function fallbackChunkRangeForPage(page: MaterialPage, pages: MaterialPage[], chunkCount: number) {
@@ -264,43 +127,32 @@ function fallbackChunkRangeForPage(page: MaterialPage, pages: MaterialPage[], ch
   return { start: Math.min(chunkCount - 1, start), end: Math.min(chunkCount, end) }
 }
 
-async function fetchBlobWithProgress(
-  url: string,
-  signal: AbortSignal,
-  onProgress: (progress: OriginalDownloadProgress) => void,
-) {
-  const response = await fetch(url, { signal })
-  if (!response.ok) {
-    const message = await readErrorMessage(response)
-    throw new Error(message || `原文加载失败 (${response.status})`)
-  }
+function chunkIndexesForPage(page: MaterialPage, pages: MaterialPage[], chunks: MaterialChunk[]) {
+  const ids = new Set(page.chunkIds.map(String))
+  const mappedIndexes = chunks
+    .map((candidate, index) => (ids.has(String(candidate.id)) ? index : -1))
+    .filter((index) => index >= 0)
+  if (mappedIndexes.length > 0) return mappedIndexes
 
-  const totalHeader = Number(response.headers.get('content-length') || 0)
-  const total = Number.isFinite(totalHeader) && totalHeader > 0 ? totalHeader : null
+  // 兼容旧数据：页面没有 chunkIds 时，按页码与片段总量的比例估算本页片段范围。
+  const fallbackRange = fallbackChunkRangeForPage(page, pages, chunks.length)
+  if (!fallbackRange) return []
+  return Array.from(
+    { length: fallbackRange.end - fallbackRange.start },
+    (_, index) => fallbackRange.start + index,
+  )
+}
 
-  if (!response.body) {
-    const blob = await response.blob()
-    onProgress({ loaded: blob.size, total: total || blob.size })
-    return blob
-  }
-
-  const reader = response.body.getReader()
-  const chunks: BlobPart[] = []
-  let loaded = 0
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    if (value) {
-      chunks.push(value)
-      loaded += value.byteLength
-      onProgress({ loaded, total })
-    }
-  }
-
-  return new Blob(chunks, {
-    type: response.headers.get('content-type') || undefined,
-  })
+function pageNoForChunkIndex(chunkIndex: number, chunks: MaterialChunk[], pages: MaterialPage[]) {
+  const chunk = chunks[chunkIndex]
+  if (!chunk) return null
+  const directPageNo = Number(chunk.pageNo)
+  if (Number.isFinite(directPageNo) && directPageNo > 0) return directPageNo
+  const mappedPage = pages.find((page) => page.chunkIds.map(String).includes(String(chunk.id)))
+  if (mappedPage?.pageNo) return mappedPage.pageNo
+  if (!pages.length || !chunks.length) return null
+  const pageIndex = Math.min(pages.length - 1, Math.floor((chunkIndex * pages.length) / chunks.length))
+  return pages[pageIndex]?.pageNo ?? null
 }
 
 /**
@@ -444,16 +296,232 @@ function ChunkContent({ text, materialId }: { text: string; materialId: string }
   return <>{parts}</>
 }
 
+function textBlockStyle(block: MaterialPageTextBlock, page: MaterialPage, renderedPageHeight: number): React.CSSProperties {
+  const pageWidth = block.pageWidth || page.width || 1000
+  const pageHeight = block.pageHeight || page.height || 1000
+  const hasBox = [block.bboxX, block.bboxY, block.bboxWidth, block.bboxHeight]
+    .every((value) => typeof value === 'number' && Number.isFinite(value))
+  if (!hasBox) {
+    return {
+      left: '6%',
+      top: '6%',
+      width: '88%',
+      height: '88%',
+      fontSize: `${Math.max(12, renderedPageHeight * 0.018)}px`,
+      lineHeight: 1.7,
+    }
+  }
+  const renderedBlockHeight = ((block.bboxHeight || 14) / pageHeight) * renderedPageHeight
+  return {
+    left: `${((block.bboxX || 0) / pageWidth) * 100}%`,
+    top: `${((block.bboxY || 0) / pageHeight) * 100}%`,
+    width: `${Math.max(0.5, ((block.bboxWidth || 1) / pageWidth) * 100)}%`,
+    height: `${Math.max(0.5, ((block.bboxHeight || 1) / pageHeight) * 100)}%`,
+    fontSize: `${Math.max(7, renderedBlockHeight * 0.82)}px`,
+    lineHeight: 1.15,
+  }
+}
+
+function BackendTextLayer({
+  materialId,
+  page,
+  renderedPageHeight,
+  enabled,
+}: {
+  materialId: string
+  page: MaterialPage
+  renderedPageHeight: number
+  enabled: boolean
+}) {
+  const { data: blocks = [] } = useMaterialPageTextLayer(enabled ? materialId : null, enabled ? page.pageNo : null)
+  if (!enabled || blocks.length === 0) return null
+  return (
+    <div className="backend-text-layer" data-page-no={page.pageNo}>
+      {blocks.map((block) => (
+        <span
+          key={block.id}
+          className="backend-text-layer__block"
+          data-block-id={block.id}
+          data-page-no={block.pageNo}
+          data-chunk-id={block.chunkId ?? undefined}
+          style={textBlockStyle(block, page, renderedPageHeight)}
+        >
+          {block.text}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * PdfPageCanvas -- PDF.js 单页渲染组件
+ *
+ * 只接收已经加载好的 PDFDocumentProxy 和页码，组件挂载时渲染对应页面到 canvas。
+ * 父组件通过窗口化控制挂载数量，因此这里不做分页缓存，避免长 PDF 占用过多显存。
+ */
+function PdfPageCanvas({
+  document,
+  materialId,
+  page,
+  pageNo,
+  zoom,
+  onError,
+}: {
+  document: PDFDocumentProxy
+  materialId: string
+  page: MaterialPage
+  pageNo: number
+  zoom: number
+  onError?: () => void
+}) {
+  const paperRef = useRef<HTMLDivElement | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const contentFrameRef = useRef<HTMLDivElement | null>(null)
+  const textLayerRef = useRef<HTMLDivElement | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [hasTextLayer, setHasTextLayer] = useState(false)
+  const [renderedPageHeight, setRenderedPageHeight] = useState(1)
+  const paperWidth = Math.round(A4_PAGE_WIDTH * zoom)
+  const paperHeight = Math.round(paperWidth * A4_PAGE_HEIGHT_RATIO)
+  const [paperSize, setPaperSize] = useState({ width: paperWidth, height: paperHeight })
+
+  useEffect(() => {
+    const paper = paperRef.current
+    if (!paper) return
+    const updatePaperSize = () => {
+      const width = Math.max(1, Math.round(paper.clientWidth || paperWidth))
+      const height = Math.round(width * A4_PAGE_HEIGHT_RATIO)
+      setPaperSize((current) => (
+        current.width === width && current.height === height ? current : { width, height }
+      ))
+    }
+
+    updatePaperSize()
+    const observer = new ResizeObserver(updatePaperSize)
+    observer.observe(paper)
+    return () => observer.disconnect()
+  }, [paperHeight, paperWidth])
+
+  useEffect(() => {
+    let cancelled = false
+    let renderTask: { cancel: () => void; promise: Promise<unknown> } | null = null
+    let textLayer: TextLayer | null = null
+    setLoading(true)
+    setHasTextLayer(false)
+    if (textLayerRef.current) textLayerRef.current.innerHTML = ''
+
+    document.getPage(pageNo)
+      .then((page) => {
+        if (cancelled || !canvasRef.current) return null
+        const baseViewport = page.getViewport({ scale: 1 })
+        const fitScale = Math.min(paperSize.width / baseViewport.width, paperSize.height / baseViewport.height)
+        const viewport = page.getViewport({ scale: fitScale })
+        const canvas = canvasRef.current
+        const contentFrame = contentFrameRef.current
+        const textLayerContainer = textLayerRef.current
+        const context = canvas.getContext('2d')
+        if (!context) return null
+        const viewportWidth = viewport.width
+        const viewportHeight = viewport.height
+        const outputScale = Math.max(1, window.devicePixelRatio || 1)
+        const contentLeft = Math.max(0, (paperSize.width - viewportWidth) / 2)
+        const contentTop = Math.max(0, (paperSize.height - viewportHeight) / 2)
+        if (!cancelled) setRenderedPageHeight(viewportHeight)
+        canvas.width = Math.ceil(viewportWidth * outputScale)
+        canvas.height = Math.ceil(viewportHeight * outputScale)
+        canvas.style.width = `${viewportWidth}px`
+        canvas.style.height = `${viewportHeight}px`
+        if (contentFrame) {
+          contentFrame.style.left = `${contentLeft}px`
+          contentFrame.style.top = `${contentTop}px`
+          contentFrame.style.width = `${viewportWidth}px`
+          contentFrame.style.height = `${viewportHeight}px`
+        }
+        if (textLayerContainer) {
+          textLayerContainer.style.width = `${viewportWidth}px`
+          textLayerContainer.style.height = `${viewportHeight}px`
+        }
+        // canvas 使用设备像素比渲染，CSS 尺寸仍与 viewport 保持一致，避免视觉层和透明文字层产生亚像素漂移。
+        renderTask = page.render({
+          canvasContext: context,
+          viewport,
+          transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined,
+        })
+        return Promise.all([
+          renderTask.promise,
+          page.getTextContent().then((textContent) => {
+            if (cancelled || !textLayerContainer || textContent.items.length === 0) return
+            // PDF 原文划词依赖 PDF 自带文本层；扫描件没有文本层时，下方 OCR 文本仍可划选提问。
+            textLayer = new pdfjsLib.TextLayer({
+              textContentSource: textContent,
+              container: textLayerContainer,
+              viewport,
+            }) as TextLayer
+            return textLayer.render().then(() => {
+              if (!cancelled) setHasTextLayer(true)
+            })
+          }),
+        ])
+      })
+      .then(() => {
+        if (!cancelled) setLoading(false)
+      })
+      .catch((error) => {
+        // 主动取消渲染会进入 catch，这不是用户可见错误。
+        if (cancelled || error?.name === 'RenderingCancelledException') return
+        setLoading(false)
+        onError?.()
+      })
+
+    return () => {
+      cancelled = true
+      renderTask?.cancel()
+      textLayer?.cancel()
+      if (textLayerRef.current) textLayerRef.current.innerHTML = ''
+    }
+  }, [document, onError, pageNo, paperSize.height, paperSize.width])
+
+  return (
+    <div
+      ref={paperRef}
+      className="relative mx-auto max-w-full overflow-hidden bg-white shadow-lg ring-1 ring-black/10"
+      style={{
+        width: `min(${paperWidth}px, calc(100vw - 1rem))`,
+        aspectRatio: '210 / 297',
+      }}
+    >
+      {loading && (
+        <div className="absolute inset-0 z-10 flex min-h-64 items-center justify-center gap-2 bg-white/80 text-xs text-slate-500">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          正在渲染第 {pageNo} 页...
+        </div>
+      )}
+      <div ref={contentFrameRef} className="absolute transform-gpu">
+        <canvas ref={canvasRef} className="block max-w-none" />
+        <div
+          ref={textLayerRef}
+          className={cn('textLayer pdf-text-layer', !hasTextLayer && 'pointer-events-none')}
+          data-page-no={pageNo}
+        />
+        <BackendTextLayer materialId={materialId} page={page} renderedPageHeight={renderedPageHeight} enabled={!hasTextLayer} />
+      </div>
+    </div>
+  )
+}
+
 /**
  * PagePreviewCanvas -- 页面预览画布组件
  *
- * 以类似 PDF 阅读器的方式展示资料的页面图片。
+ * 后端图片预览兜底组件。
+ *
+ * PDF.js 无法加载预览 PDF 时，才回退到后端 page-N.png，避免旧资料或非 PDF 预览完全不可读。
  * 支持缩放，底部显示当前页包含的片段标签（可点击跳转）。
  */
 function PagePreviewCanvas({
   materialId,
-  currentPage,
+  page,
   zoom,
+  pdfDocument,
   pageChunkIndexes,
   chunks,
   activeChunkId,
@@ -461,32 +529,55 @@ function PagePreviewCanvas({
   onError,
 }: {
   materialId: string
-  currentPage: MaterialPage
+  page: MaterialPage
   zoom: number
+  pdfDocument?: PDFDocumentProxy | null
   pageChunkIndexes: number[]
   chunks: MaterialChunk[]
   activeChunkId: string
   onSelectChunk?: (chunkIndex: number) => void
   onError?: () => void
 }) {
+  const pageRatio = page.width && page.height ? page.width / page.height : A4_PAGE_ASPECT_RATIO
+  const isWiderThanA4 = pageRatio > A4_PAGE_ASPECT_RATIO
+  const fallbackPaperWidth = Math.round(A4_PAGE_WIDTH * zoom)
+  const fallbackPaperHeight = Math.round(fallbackPaperWidth * A4_PAGE_HEIGHT_RATIO)
+  const fallbackRenderedPageHeight = isWiderThanA4
+    ? fallbackPaperWidth / pageRatio
+    : fallbackPaperHeight
+
   return (
-    <div className="min-h-full min-w-full px-2 py-3 md:w-max md:px-4 md:py-6">
-      <div
-        className="mx-auto max-w-full bg-white shadow-lg ring-1 ring-black/10 md:max-w-none"
-        style={{
-          width: `min(${Math.round(794 * zoom)}px, calc(100vw - 1rem))`,
-          aspectRatio: currentPage.width && currentPage.height
-            ? `${currentPage.width} / ${currentPage.height}`
-            : '210 / 297',
-        }}
-      >
-        <MaterialImage
-          materialId={materialId}
-          fileName={currentPage.imageName}
-          className="h-full w-full object-contain"
-          onError={onError}
-        />
-      </div>
+    <div className="min-w-full px-2 py-4 md:px-4 md:py-6">
+      {pdfDocument ? (
+        <PdfPageCanvas document={pdfDocument} materialId={materialId} page={page} pageNo={page.pageNo} zoom={zoom} onError={onError} />
+      ) : (
+        <div
+          className="relative mx-auto flex max-w-full items-center justify-center overflow-hidden bg-white shadow-lg ring-1 ring-black/10 md:max-w-none"
+          style={{
+            width: `min(${fallbackPaperWidth}px, calc(100vw - 1rem))`,
+            aspectRatio: '210 / 297',
+          }}
+        >
+          <div
+            className="relative"
+            style={{
+              aspectRatio: `${pageRatio}`,
+              width: isWiderThanA4 ? '100%' : 'auto',
+              height: isWiderThanA4 ? 'auto' : '100%',
+              maxWidth: '100%',
+              maxHeight: '100%',
+            }}
+          >
+            <MaterialImage
+              materialId={materialId}
+              fileName={page.imageName}
+              className="h-full w-full object-contain"
+              onError={onError}
+            />
+            <BackendTextLayer materialId={materialId} page={page} renderedPageHeight={fallbackRenderedPageHeight} enabled />
+          </div>
+        </div>
+      )}
       {pageChunkIndexes.length > 0 && (
         <div className="mx-auto mt-3 flex max-w-3xl flex-wrap justify-center gap-1.5">
           {pageChunkIndexes.map((index) => (
@@ -530,13 +621,13 @@ interface ReaderPaperProps {
   pages: MaterialPage[]          // 页面列表（用于页面预览模式）
   material: Material | null      // 当前资料
   targetPageNo?: number | null   // URL 或外部来源指定的目标页码
-  initialViewMode?: ReaderViewMode | null
   progress: number               // 阅读进度（0~1）
   canPrev?: boolean              // 是否可以向前翻
   canNext?: boolean              // 是否可以向后翻
   onPrev: () => void             // 向前翻回调
   onNext: () => void             // 向后翻回调
   onSelectChunk?: (chunkIndex: number) => void  // 切换片段回调
+  onReadingContextChange?: (context: ReaderReadingContext) => void
   onOpenFile?: () => void        // 打开原文件回调
 }
 
@@ -546,36 +637,18 @@ export function ReaderPaper({
   pages,
   material,
   targetPageNo,
-  initialViewMode,
   progress,
   canPrev = true,
   canNext = true,
   onPrev,
   onNext,
   onSelectChunk,
+  onReadingContextChange,
   onOpenFile,
 }: ReaderPaperProps) {
   // === 状态管理 ===
   /** 缩放比例（0.7~1.8），仅页面预览模式下使用 */
   const [zoom, setZoom] = useState(1)
-  /** 当前阅读视图模式：'original' 原文预览 | 'smart' 智能阅读 */
-  const [viewMode, setViewMode] = useState<ReaderViewMode>('original')
-  /** 原文预览的 ObjectURL（用于 iframe src） */
-  const [originalUrl, setOriginalUrl] = useState('')
-  /** 原文是否正在加载 */
-  const [originalLoading, setOriginalLoading] = useState(false)
-  /** 原文下载进度（用于加载进度条） */
-  const [originalProgress, setOriginalProgress] = useState<OriginalDownloadProgress>({ loaded: 0, total: null })
-  /** 原文加载错误信息 */
-  const [originalError, setOriginalError] = useState('')
-  /** 文本分段预览的 Blob（TXT/MD 文件的完整内容） */
-  const [textPreviewBlob, setTextPreviewBlob] = useState<Blob | null>(null)
-  /** 文本分段预览的当前偏移量（字节） */
-  const [textWindowOffset, setTextWindowOffset] = useState(0)
-  /** 文本分段预览的当前段文本 */
-  const [textWindowText, setTextWindowText] = useState('')
-  /** 文本分段预览是否正在加载当前段 */
-  const [textWindowLoading, setTextWindowLoading] = useState(false)
   /**
    * 用户手动翻页时的页码覆盖
    * 当用户点击"上一页/下一页"时，用此值覆盖从 chunk 派生的页码
@@ -584,28 +657,35 @@ export function ReaderPaper({
   const [currentPageOverride, setCurrentPageOverride] = useState<number | null>(null)
   /** 页面图片是否加载失败（失败后降级为文本模式） */
   const [pagePreviewFailed, setPagePreviewFailed] = useState(false)
+  /** PDF.js 加载出的预览 PDF 文档；加载失败时自动回退到后端页面图片。 */
+  const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null)
+  /** PDF.js 是否加载失败；失败后不再反复请求同一份预览 PDF。 */
+  const [pdfPreviewFailed, setPdfPreviewFailed] = useState(false)
+  /** 底部页码/片段跳转输入值，跟随当前滚动上下文同步。 */
+  const [jumpValue, setJumpValue] = useState('1')
+  /** 用户正在编辑跳转输入时暂停滚动同步，避免输入内容被 IntersectionObserver 覆盖。 */
+  const [jumpFocused, setJumpFocused] = useState(false)
   /** 滚动区域的 DOM 引用（用于切换内容时滚回顶部） */
   const scrollViewportRef = useRef<HTMLDivElement | null>(null)
-  /** 原文 ObjectURL 引用（用于清理时释放内存） */
-  const originalObjectUrlRef = useRef<string | null>(null)
+  /** 连续阅读中每一页的 DOM 引用，用于来源点击、页码输入和片段按钮统一定位。 */
+  const pageRefs = useRef<Record<number, HTMLElement | null>>({})
+  /** 连续阅读中每个片段的 DOM 引用，无页面预览资料按片段定位。 */
+  const chunkRefs = useRef<Record<string, HTMLElement | null>>({})
+  const lastContextKeyRef = useRef('')
+  /** 只在用户主动跳转/切换片段时定位，避免手动滚动时被 effect 反复拉回当前片段。 */
+  const pendingScrollRef = useRef<{ type: 'page'; pageNo: number } | { type: 'chunk'; chunkId: string } | null>(null)
 
   // === 派生状态（从 props 和 state 计算） ===
   /** 阅读进度百分比（用于进度条显示） */
   const progressPercent = Math.round(progress * 100)
-  /** 原文预览类型（PDF/文本/Office/不支持） */
-  const previewKind = originalPreviewKind(material)
-  /** 当前资料是否支持原文预览 */
-  const hasOriginalPreview = supportsOriginalPreview(material)
-  /** 是否正在使用原文预览模式 */
-  const isOriginalView = viewMode === 'original' && hasOriginalPreview
   /** 是否使用页面图片预览模式（有页面图片 + 预览就绪 + 未失败） */
   const hasPagePreview = !!material?.id && pages.length > 0 && material.previewStatus === 'READY' && !pagePreviewFailed
-  /** 是否使用页面图片承载当前视图；PDF 原文预览也走页面图，避免浏览器 PDF viewer 记忆滚动到末页。 */
-  const usesPageCanvas = hasPagePreview && (!isOriginalView || previewKind === 'pdf')
+  /** 是否优先使用 PDF.js 阅读器；它直接读取预览 PDF，不依赖后端 page-N.png 图片资产。 */
+  const usesPdfPreview = hasPagePreview && supportsPdfPreview(material) && !!pdfDocument && !pdfPreviewFailed
+  /** 是否按页面连续阅读：PDF/Word 等已转换出页面图片时，统一渲染所有页面。 */
+  const usesPageCanvas = hasPagePreview
   /** 是否显示页面控制（缩放、页码标签等，仅页面预览模式时显示） */
   const showPageControls = usesPageCanvas
-  /** 原文模式下是否支持片段导航（PDF 和 Office 模式支持） */
-  const originalChunkNavigationEnabled = !isOriginalView || previewKind === 'pdf' || previewKind === 'office'
   const chunkPageNo = useMemo(() => {
     const directPageNo = Number(chunk.pageNo)
     if (Number.isFinite(directPageNo) && directPageNo > 0) return directPageNo
@@ -624,187 +704,99 @@ export function ReaderPaper({
   // 当前页码：优先覆盖值 > 片段页码 > 外部目标页码 > 第一页
   const currentPageNo = currentPageOverride || chunkPageNo || validTargetPageNo || pages[0]?.pageNo || 1
   const firstContentPage = pages.find((page) => page.chunkIds.length > 0) || pages[0]
-  const currentPage = pages.find((page) => page.pageNo === currentPageNo && page.chunkIds.length > 0)
+  const currentPage = pages.find((page) => page.pageNo === currentPageNo)
     || firstContentPage
   const currentPageIndex = currentPage ? pages.findIndex((page) => page.pageNo === currentPage.pageNo) : -1
-  const originalProgressPercent = originalProgress.total
-    ? Math.min(100, Math.round((originalProgress.loaded / originalProgress.total) * 100))
-    : null
-  const originalFrameUrl = useMemo(() => pdfPageUrl(originalUrl, currentPageNo), [currentPageNo, originalUrl])
-  const textWindowEnd = textPreviewBlob
-    ? Math.min(textPreviewBlob.size, textWindowOffset + TEXT_PREVIEW_BYTES)
-    : 0
-  const textWindowIndex = textPreviewBlob ? Math.floor(textWindowOffset / TEXT_PREVIEW_BYTES) + 1 : 0
-  const textWindowCount = textPreviewBlob ? Math.max(1, Math.ceil(textPreviewBlob.size / TEXT_PREVIEW_BYTES)) : 0
+  const pageRenderRange = pages.length <= FULL_RENDER_PAGE_LIMIT
+    ? { start: 0, end: pages.length }
+    : windowRange(Math.max(0, currentPageIndex), pages.length, PAGE_RENDER_WINDOW)
+  const visiblePages = pages.slice(pageRenderRange.start, pageRenderRange.end)
+  const isPageWindowed = pages.length > FULL_RENDER_PAGE_LIMIT
 
-  // 当前页包含的片段索引列表
-  const pageChunkIndexes = useMemo(() => {
-    if (!currentPage) return []
-    const ids = new Set(currentPage.chunkIds.map(String))
-    // 生成当前页的片段索引列表，供页预览下方的片段标签和问答上下文复用。
-    const mappedIndexes = chunks
-      .map((candidate, index) => (ids.has(String(candidate.id)) ? index : -1))
-      .filter((index) => index >= 0)
-    if (mappedIndexes.length > 0) return mappedIndexes
-    const fallbackRange = fallbackChunkRangeForPage(currentPage, pages, chunks.length)
-    if (!fallbackRange) return []
-    return Array.from(
-      { length: fallbackRange.end - fallbackRange.start },
-      (_, index) => fallbackRange.start + index,
-    )
-  }, [chunks, currentPage, pages])
+  const pageChunkIndexesByNo = useMemo(() => {
+    const map = new Map<number, number[]>()
+    pages.forEach((page) => {
+      map.set(page.pageNo, chunkIndexesForPage(page, pages, chunks))
+    })
+    return map
+  }, [chunks, pages])
+  const pageChunkIndexes = currentPage ? pageChunkIndexesByNo.get(currentPage.pageNo) || [] : []
+  const activeChunkIndex = Math.max(0, chunks.findIndex((candidate) => String(candidate.id) === String(chunk.id)))
+  const activeChunkPageNo = chunkPageNo || currentPage?.pageNo || null
+  const chunkRenderRange = chunks.length <= FULL_RENDER_CHUNK_LIMIT
+    ? { start: 0, end: chunks.length }
+    : windowRange(activeChunkIndex, chunks.length, CHUNK_RENDER_WINDOW)
+  const visibleChunks = chunks.slice(chunkRenderRange.start, chunkRenderRange.end)
+  const isChunkWindowed = chunks.length > FULL_RENDER_CHUNK_LIMIT
+  const jumpCount = usesPageCanvas ? pages.length : chunks.length
+  const currentJumpPosition = usesPageCanvas
+    ? (activeChunkPageNo || currentPage?.pageNo || pages[0]?.pageNo || 1)
+    : activeChunkIndex + 1
 
   // === 副作用 ===
 
   /** 切换片段时重置页码覆盖和预览失败状态 */
   useEffect(() => {
     setCurrentPageOverride(null)
-    setPagePreviewFailed(false)
   }, [material?.id, chunk.id])
 
-  /** 资料切换时重置所有原文预览相关状态 */
+  /** 资料切换时重置连续阅读定位状态，避免新资料沿用上一份资料的页码或预览失败标记。 */
   useEffect(() => {
-    setViewMode(initialViewMode || defaultReaderViewMode(material))
-    setOriginalUrl('')
-    setOriginalLoading(false)
-    setOriginalProgress({ loaded: 0, total: null })
-    setOriginalError('')
-    setTextPreviewBlob(null)
-    setTextWindowOffset(0)
-    setTextWindowText('')
-    setTextWindowLoading(false)
-    if (originalObjectUrlRef.current) {
-      URL.revokeObjectURL(originalObjectUrlRef.current)
-      originalObjectUrlRef.current = null
-    }
+    setCurrentPageOverride(null)
+    setPagePreviewFailed(false)
+    setPdfPreviewFailed(false)
+    pageRefs.current = {}
+    chunkRefs.current = {}
   }, [material?.id, material?.sourceType])
 
+  /** 加载预览 PDF：PDF.js 只负责显示，扫描件文字抽取仍由后端 OCR 产出 chunks。 */
   useEffect(() => {
-    if (initialViewMode) setViewMode(initialViewMode)
-  }, [initialViewMode])
-
-/**
- * 原文预览文件加载效果
- *
- * 当切换到原文预览模式时：
- * 1. 通过 createMaterialFileTicket 获取临时访问链接（有时效性）
- * 2. 根据资料类型选择不同的预览 URL（Office 走 /preview-file 接口）
- * 3. PDF/Office：通过 fetchBlobWithProgress 下载文件，创建 ObjectURL 用于 iframe
- * 4. TXT/MD：下载为 Blob，后续通过分段读取显示
- * 5. 组件卸载或切换时通过 AbortController 取消请求，释放 ObjectURL
- */
-  useEffect(() => {
-    if (!material?.id || !hasOriginalPreview || viewMode !== 'original') return
+    if (!material?.id || !hasPagePreview || !supportsPdfPreview(material) || pdfPreviewFailed) {
+      setPdfDocument(null)
+      return
+    }
 
     let cancelled = false
-    const controller = new AbortController()
-    if (originalObjectUrlRef.current) {
-      // 切换资料或预览类型前释放旧 ObjectURL，避免 iframe 资源泄漏。
-      URL.revokeObjectURL(originalObjectUrlRef.current)
-      originalObjectUrlRef.current = null
-    }
-    setOriginalLoading(true)
-    setOriginalUrl('')
-    setOriginalProgress({ loaded: 0, total: null })
-    setOriginalError('')
-    setTextPreviewBlob(null)
-    setTextWindowOffset(0)
-    setTextWindowText('')
-    if (previewKind === 'pdf' && hasPagePreview) {
-      setOriginalLoading(false)
-      return () => {
-        cancelled = true
-        controller.abort()
-      }
-    }
-    createMaterialFileTicket(material.id)
-      .then(async (ticket) => {
-        if (cancelled) return
-        const url = previewKind === 'office' ? previewTicketUrl(ticket.url) : normalizeTicketUrl(ticket.url)
-        const blob = await fetchBlobWithProgress(url, controller.signal, (nextProgress) => {
-          if (!cancelled) setOriginalProgress(nextProgress)
-        })
-        if (cancelled) return
-        if (previewKind === 'text') {
-          // 文本文件不直接创建 iframe，先保存 Blob，再由下方窗口化读取 effect 分段解码。
-          setTextWindowLoading(true)
-          setTextPreviewBlob(blob)
+    const token = getAuthToken()
+    const loadingTask = pdfjsLib.getDocument({
+      url: previewFileUrl(material.id),
+      httpHeaders: token ? { Authorization: `Bearer ${token}` } : undefined,
+      withCredentials: false,
+    })
+
+    loadingTask.promise
+      .then((document) => {
+        if (cancelled) {
+          document.destroy()
           return
         }
-        const objectUrl = URL.createObjectURL(blob)
-        originalObjectUrlRef.current = objectUrl
-        setOriginalUrl(objectUrl)
-      })
-      .catch((error) => {
-        if (error instanceof Error && error.name === 'AbortError') return
-        if (!cancelled) {
-          setOriginalError(error instanceof Error ? error.message : '原文预览加载失败')
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setOriginalLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-      controller.abort()
-      if (originalObjectUrlRef.current) {
-        URL.revokeObjectURL(originalObjectUrlRef.current)
-        originalObjectUrlRef.current = null
-      }
-    }
-  }, [hasOriginalPreview, hasPagePreview, material?.id, previewKind, viewMode])
-
-  useEffect(() => {
-    if (!textPreviewBlob || previewKind !== 'text') return
-
-    let cancelled = false
-    const start = Math.max(0, Math.min(textWindowOffset, Math.max(0, textPreviewBlob.size - 1)))
-    const end = Math.min(textPreviewBlob.size, start + TEXT_PREVIEW_BYTES)
-
-    setTextWindowLoading(true)
-    // 大文本按固定字节窗口读取，避免一次解码整份资料造成页面卡顿。
-    textPreviewBlob
-      .slice(start, end)
-      .arrayBuffer()
-      .then((buffer) => {
-        if (!cancelled) {
-          setTextWindowText(decodeTextWindow(buffer, textPreviewBlob.type))
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setOriginalError(error instanceof Error ? error.message : '文本预览加载失败')
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setTextWindowLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [previewKind, textPreviewBlob, textWindowOffset])
-
-  useEffect(() => {
-    if (!isOriginalView || previewKind !== 'text' || !textPreviewBlob) return
-    let cancelled = false
-    locateTextWindowOffset(textPreviewBlob, chunk, chunks)
-      .then((offset) => {
-        if (!cancelled) setTextWindowOffset(offset)
+        setPdfDocument(document)
       })
       .catch(() => {
-        if (!cancelled) setTextWindowOffset(fallbackTextWindowOffset(textPreviewBlob.size, chunk, chunks))
+        if (!cancelled) {
+          setPdfDocument(null)
+          setPdfPreviewFailed(true)
+        }
       })
+
     return () => {
       cancelled = true
+      loadingTask.destroy()
+      setPdfDocument((document) => {
+        document?.destroy()
+        return null
+      })
     }
-  }, [chunk.id, chunks, isOriginalView, previewKind, textPreviewBlob])
+  }, [hasPagePreview, material, pdfPreviewFailed])
 
-  // 切换内容时自动滚回顶部
   useEffect(() => {
-    scrollViewportRef.current?.scrollTo({ top: 0, left: 0 })
-  }, [chunk.id, currentPage?.pageNo, material?.id, textWindowOffset])
+    if (jumpFocused) return
+    setJumpValue(String(currentJumpPosition || 1))
+  }, [currentJumpPosition])
+
+  useEffect(() => {
+    lastContextKeyRef.current = ''
+  }, [material?.id])
 
   // 当覆盖页码不再有效时清除
   useEffect(() => {
@@ -818,9 +810,122 @@ export function ReaderPaper({
     }
   }, [currentPageOverride, pages.length])
 
+  useEffect(() => {
+    if (!onReadingContextChange || !chunks.length) return
+
+    const emitContext = (context: ReaderReadingContext) => {
+      const key = `${context.pageNo || ''}:${context.chunkIndex}:${context.chunkIds.map(String).join(',')}`
+      if (lastContextKeyRef.current === key) return
+      lastContextKeyRef.current = key
+      onReadingContextChange(context)
+    }
+
+    if (usesPageCanvas && currentPage) {
+      emitContext({
+        pageNo: currentPage.pageNo,
+        chunkIds: currentPage.chunkIds.length ? currentPage.chunkIds : pageChunkIndexes.map((index) => chunks[index]?.id).filter(Boolean),
+        chunkIndex: pageChunkIndexes[0] ?? activeChunkIndex,
+      })
+    } else {
+      emitContext({
+        pageNo: chunkPageNo,
+        chunkIds: chunk?.id ? [chunk.id] : [],
+        chunkIndex: activeChunkIndex,
+      })
+    }
+  }, [activeChunkIndex, chunk.id, chunkPageNo, chunks, currentPage, onReadingContextChange, pageChunkIndexes, usesPageCanvas])
+
+  useEffect(() => {
+    if (!scrollViewportRef.current || !chunks.length) return
+
+    const root = scrollViewportRef.current
+    const observedElements = (usesPageCanvas
+      ? visiblePages.map((page) => pageRefs.current[page.pageNo]).filter(Boolean)
+      : visibleChunks.map((candidate) => chunkRefs.current[String(candidate.id)]).filter(Boolean)) as Element[]
+    if (!observedElements.length) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0]
+        if (!visible) return
+
+        if (usesPageCanvas) {
+          const pageNo = Number((visible.target as HTMLElement).dataset.pageNo)
+          const page = pages.find((candidate) => candidate.pageNo === pageNo)
+          if (!page) return
+          const indexes = pageChunkIndexesByNo.get(page.pageNo) || []
+          const firstIndex = indexes[0] ?? 0
+          setCurrentPageOverride(page.pageNo)
+          if (!jumpFocused) {
+            setJumpValue(String(page.pageNo))
+          }
+          onReadingContextChange?.({
+            pageNo: page.pageNo,
+            chunkIds: page.chunkIds.length ? page.chunkIds : indexes.map((index) => chunks[index]?.id).filter(Boolean),
+            chunkIndex: firstIndex,
+          })
+          return
+        }
+
+        const chunkId = (visible.target as HTMLElement).dataset.chunkId
+        const nextIndex = chunks.findIndex((candidate) => String(candidate.id) === String(chunkId))
+        if (nextIndex < 0) return
+        const nextPageNo = pageNoForChunkIndex(nextIndex, chunks, pages)
+        if (!jumpFocused) {
+          setJumpValue(String(nextIndex + 1))
+        }
+        onReadingContextChange?.({
+          pageNo: nextPageNo,
+          chunkIds: [chunks[nextIndex].id],
+          chunkIndex: nextIndex,
+        })
+      },
+      {
+        root,
+        threshold: [0.15, 0.35, 0.6],
+        rootMargin: '-12% 0px -55% 0px',
+      },
+    )
+
+    observedElements.forEach((element) => observer.observe(element))
+    return () => observer.disconnect()
+  }, [chunks, jumpFocused, onReadingContextChange, pageChunkIndexesByNo, pages, usesPageCanvas, visibleChunks, visiblePages])
+
+  useEffect(() => {
+    const viewport = scrollViewportRef.current
+    if (!viewport) return
+    const pendingTarget = pendingScrollRef.current
+    if (!pendingTarget) return
+    const raf = window.requestAnimationFrame(() => {
+      if (pendingTarget.type === 'page') {
+        const target = pageRefs.current[pendingTarget.pageNo]
+        if (target) {
+          target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+          pendingScrollRef.current = null
+        }
+        return
+      }
+      const target = chunkRefs.current[pendingTarget.chunkId]
+      if (target) {
+        target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+        pendingScrollRef.current = null
+      }
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [activeChunkIndex, currentPage?.pageNo, material?.id, visiblePages, visibleChunks])
+
+  /** 外部 URL 带 pageNo 进入阅读器时，只在初次目标变化时定位一次。 */
+  useEffect(() => {
+    if (!targetPageNo || !usesPageCanvas) return
+    pendingScrollRef.current = { type: 'page', pageNo: targetPageNo }
+    setCurrentPageOverride(targetPageNo)
+  }, [material?.id, targetPageNo, usesPageCanvas])
+
   // 预加载相邻页面图片（提升翻页体验）
   useEffect(() => {
-    if (!material?.id || !hasPagePreview || !currentPage) return
+    if (!material?.id || !hasPagePreview || usesPdfPreview || !currentPage) return
     const token = getAuthToken()
     const headers: HeadersInit | undefined = token ? { Authorization: `Bearer ${token}` } : undefined
     const neighbors = [pages[currentPageIndex - 1], pages[currentPageIndex + 1]].filter(Boolean)
@@ -828,215 +933,198 @@ export function ReaderPaper({
       // 预加载失败不影响当前阅读，只用于提升下一页/上一页的响应速度。
       fetch(imageUrl(material.id, page.imageName), { headers }).catch(() => undefined)
     })
-  }, [currentPage, currentPageIndex, hasPagePreview, material?.id, pages])
+  }, [currentPage, currentPageIndex, hasPagePreview, material?.id, pages, usesPdfPreview])
 
-  /**
-   * 翻页处理（上一页/下一页）
-   * 1. 根据方向计算目标页面
-   * 2. 设置页码覆盖值（currentPageOverride）
-   * 3. 跳转到该页的第一个片段
-   */
-  const handlePageStep = (direction: -1 | 1) => {
-    if (!pages.length || currentPageIndex < 0) return
-    const nextPage = direction > 0
-      ? pages.slice(currentPageIndex + 1).find((page) => page.chunkIds.length > 0) || pages[currentPageIndex + direction]
-      : pages.slice(0, currentPageIndex).reverse().find((page) => page.chunkIds.length > 0) || pages[currentPageIndex + direction]
-    if (!nextPage) return
-    setCurrentPageOverride(nextPage.pageNo)
-    const nextPageChunkIds = new Set(nextPage.chunkIds.map(String))
-    const fallbackChunkRange = fallbackChunkRangeForPage(nextPage, pages, chunks.length)
-    const nextChunkIndex = chunks.findIndex((candidate) => (
-      Number(candidate.pageNo) === nextPage.pageNo || nextPageChunkIds.has(String(candidate.id))
-    ))
-    // 翻页后同步到该页首个片段，让目录高亮和右侧问答上下文跟随页面变化。
-    if (nextChunkIndex >= 0) onSelectChunk?.(nextChunkIndex)
-    else if (fallbackChunkRange) onSelectChunk?.(fallbackChunkRange.start)
+  const scrollToPage = (pageNo: number) => {
+    const targetPage = pages.find((page) => page.pageNo === pageNo)
+    if (!targetPage) return
+    pendingScrollRef.current = { type: 'page', pageNo: targetPage.pageNo }
+    setCurrentPageOverride(targetPage.pageNo)
+    const mountedTarget = pageRefs.current[targetPage.pageNo]
+    if (mountedTarget) {
+      mountedTarget.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      pendingScrollRef.current = null
+    }
+    const indexes = pageChunkIndexesByNo.get(targetPage.pageNo) || []
+    if (indexes[0] !== undefined) onSelectChunk?.(indexes[0])
+    onReadingContextChange?.({
+      pageNo: targetPage.pageNo,
+      chunkIds: targetPage.chunkIds.length ? targetPage.chunkIds : indexes.map((index) => chunks[index]?.id).filter(Boolean),
+      chunkIndex: indexes[0] ?? activeChunkIndex,
+    })
   }
 
-  /**
-   * renderOriginalPreview -- 原文预览渲染函数
-   * 根据资料类型渲染不同的预览内容：
-   * - 错误状态：显示错误信息 + 切换到智能阅读按钮
-   * - 加载中：显示进度条
-   * - 文本（TXT/MD）：分段预览，支持"上一段/下一段"导航
-   * - PDF/Office：iframe 嵌入
-   * - 不支持：显示降级提示 + 打开原文件按钮
-   */
-  const renderOriginalPreview = () => {
-    if (!material?.id) return null
-
-    if (originalError) {
-      return (
-        <div className="flex flex-1 items-center justify-center bg-[#eceff1] p-6 dark:bg-[#10131a]">
-          <div className="max-w-md rounded-lg border bg-background p-5 text-center shadow-sm">
-            <FileText className="mx-auto mb-3 h-9 w-9 text-muted-foreground" />
-            <p className="text-sm font-medium">原文预览加载失败</p>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">{originalError}</p>
-            <Button className="mt-4" size="sm" variant="outline" onClick={() => setViewMode('smart')}>
-              切换到智能阅读
-            </Button>
-          </div>
-        </div>
-      )
+  const scrollToChunkIndex = (chunkIndex: number) => {
+    const safeIndex = Math.max(0, Math.min(chunks.length - 1, chunkIndex))
+    const targetChunk = chunks[safeIndex]
+    if (!targetChunk) return
+    pendingScrollRef.current = { type: 'chunk', chunkId: String(targetChunk.id) }
+    const mountedTarget = chunkRefs.current[String(targetChunk.id)]
+    if (mountedTarget) {
+      mountedTarget.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      pendingScrollRef.current = null
     }
+    onSelectChunk?.(safeIndex)
+    onReadingContextChange?.({
+      pageNo: pageNoForChunkIndex(safeIndex, chunks, pages),
+      chunkIds: [targetChunk.id],
+      chunkIndex: safeIndex,
+    })
+  }
 
-    if (originalLoading && (previewKind === 'text' ? !textPreviewBlob : !originalUrl)) {
-      return (
-        <div className="flex flex-1 items-center justify-center bg-[#eceff1] p-6 text-sm text-muted-foreground dark:bg-[#10131a]">
-          <div className="w-full max-w-md rounded-lg border bg-background p-5 shadow-sm">
-            <div className="flex items-center gap-2 text-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span className="text-sm font-medium">正在加载原文</span>
-            </div>
-            <div className="mt-4 h-2 overflow-hidden rounded-full bg-muted">
-              <div
-                className={cn(
-                  'h-full rounded-full bg-primary transition-all',
-                  originalProgressPercent === null && 'w-1/2 animate-pulse',
-                )}
-                style={originalProgressPercent === null ? undefined : { width: `${originalProgressPercent}%` }}
-              />
-            </div>
-            <div className="mt-3 flex items-center justify-between gap-3 text-xs">
-              <span>
-                {formatBytes(originalProgress.loaded)}
-                {originalProgress.total ? ` / ${formatBytes(originalProgress.total)}` : ''}
-              </span>
-              <span>{originalProgressPercent === null ? '计算中' : `${originalProgressPercent}%`}</span>
-            </div>
-            <p className="mt-3 text-xs leading-5">
-              大文件会先完整加载，加载完成后再显示。TXT/MD 会按段预览，避免一次渲染整篇导致页面卡死。
-            </p>
-          </div>
-        </div>
-      )
+  const handleJumpSubmit = () => {
+    const value = Number(jumpValue)
+    if (!Number.isInteger(value) || value <= 0) return
+    if (usesPageCanvas) {
+      const pageNo = Math.max(1, Math.min(pages[pages.length - 1]?.pageNo || 1, value))
+      scrollToPage(pageNo)
+      setJumpValue(String(pageNo))
+      return
     }
+    const nextIndex = Math.max(0, Math.min(chunks.length - 1, value - 1))
+    scrollToChunkIndex(nextIndex)
+    setJumpValue(String(nextIndex + 1))
+  }
 
-    if (previewKind === 'text') {
-      if (!textPreviewBlob) return null
+  const handlePrevNavigation = () => {
+    if (!usesPageCanvas) {
+      onPrev()
+      return
+    }
+    const previousPage = pages[Math.max(0, currentPageIndex - 1)]
+    if (previousPage) {
+      scrollToPage(previousPage.pageNo)
+      setJumpValue(String(previousPage.pageNo))
+    }
+  }
 
-      return (
-        <div className="flex flex-1 flex-col overflow-hidden bg-[#eceff1] dark:bg-[#10131a]">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-background px-3 py-2 text-xs">
-            <span className="text-muted-foreground">
-              第 {textWindowIndex}/{textWindowCount} 段 · {formatBytes(textWindowOffset)} - {formatBytes(textWindowEnd)} / {formatBytes(textPreviewBlob.size)}
-            </span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-2 text-xs"
-                disabled={textWindowOffset <= 0 || textWindowLoading}
-                onClick={() => setTextWindowOffset((offset) => Math.max(0, offset - TEXT_PREVIEW_BYTES))}
-              >
-                上一段
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-2 text-xs"
-                disabled={textWindowEnd >= textPreviewBlob.size || textWindowLoading}
-                onClick={() => setTextWindowOffset((offset) => Math.min(textPreviewBlob.size - 1, offset + TEXT_PREVIEW_BYTES))}
-              >
-                下一段
-              </Button>
-            </div>
+  const handleNextNavigation = () => {
+    if (!usesPageCanvas) {
+      onNext()
+      return
+    }
+    const nextPage = pages[Math.min(pages.length - 1, currentPageIndex + 1)]
+    if (nextPage) {
+      scrollToPage(nextPage.pageNo)
+      setJumpValue(String(nextPage.pageNo))
+    }
+  }
+
+  const renderContinuousPages = () => (
+    <ScrollArea className="flex-1 bg-[#eceff1]" viewportRef={scrollViewportRef}>
+      <div className="min-h-full pb-4">
+        {material?.previewError && (
+          <p className="mx-auto mt-3 max-w-3xl rounded-md border border-dashed bg-background px-3 py-2 text-xs text-muted-foreground">
+            {material.previewError}
+          </p>
+        )}
+        {isPageWindowed && (
+          <div className="mx-auto max-w-3xl px-3 pt-3 text-center text-[11px] text-muted-foreground">
+            已启用按需渲染：当前只加载第 {visiblePages[0]?.pageNo || 1} - {visiblePages[visiblePages.length - 1]?.pageNo || 1} 页，避免长 PDF 卡顿。
           </div>
-          <div ref={scrollViewportRef} className="flex-1 overflow-auto p-3">
-            {textWindowLoading ? (
-              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                加载当前段...
+        )}
+        {visiblePages.map((page) => {
+          const indexes = pageChunkIndexesByNo.get(page.pageNo) || []
+          return (
+            <section
+              key={page.pageNo}
+              ref={(node) => {
+                pageRefs.current[page.pageNo] = node
+              }}
+              data-page-no={page.pageNo}
+              className="scroll-mt-3"
+            >
+              <div className="mx-auto max-w-3xl px-3 pt-4">
+                <Badge variant={page.pageNo === currentPage?.pageNo ? 'default' : 'outline'} className="text-[10px]">
+                  第 {page.pageNo} 页
+                </Badge>
               </div>
-            ) : (
-              <pre className="min-h-full min-w-max rounded-md bg-white p-4 font-mono text-[13px] leading-6 text-slate-900 shadow-sm ring-1 ring-black/10 dark:bg-[#0f1117] dark:text-slate-100 dark:ring-white/10">
-                {textWindowText}
-              </pre>
+              {material?.id && (
+                <PagePreviewCanvas
+                  materialId={material.id}
+                  page={page}
+                  zoom={zoom}
+                  pdfDocument={usesPdfPreview ? pdfDocument : null}
+                  pageChunkIndexes={indexes}
+                  chunks={chunks}
+                  activeChunkId={chunk.id}
+                  onSelectChunk={(index) => {
+                    onSelectChunk?.(index)
+                    const pageNo = pageNoForChunkIndex(index, chunks, pages) || page.pageNo
+                    pendingScrollRef.current = { type: 'page', pageNo }
+                    setCurrentPageOverride(pageNo)
+                  }}
+                  onError={() => {
+                    if (usesPdfPreview) {
+                      setPdfPreviewFailed(true)
+                      return
+                    }
+                    setPagePreviewFailed(true)
+                  }}
+                />
+              )}
+            </section>
+          )
+        })}
+      </div>
+    </ScrollArea>
+  )
+
+  const renderContinuousChunks = () => (
+    <ScrollArea className="flex-1 bg-[#eceff1]" viewportRef={scrollViewportRef}>
+      <div className="mx-auto min-h-full max-w-3xl space-y-3 bg-background px-4 py-4 md:px-6 md:py-6">
+        {(material?.previewError || pagePreviewFailed) && (
+          <p className="rounded-md border border-dashed bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            {pagePreviewFailed ? '页面图片暂时无法加载，已切换为解析文本连续阅读。' : material?.previewError}
+          </p>
+        )}
+        {isChunkWindowed && (
+          <p className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-center text-[11px] text-muted-foreground">
+            已启用长文本按需渲染：当前只加载第 {chunkRenderRange.start + 1} - {chunkRenderRange.end} 段，跳转或上一/下一会自动切换窗口。
+          </p>
+        )}
+        {visibleChunks.map((item, offset) => {
+          const index = chunkRenderRange.start + offset
+          return (
+          <section
+            key={item.id}
+            ref={(node) => {
+              chunkRefs.current[String(item.id)] = node
+            }}
+            data-chunk-id={String(item.id)}
+            className={cn(
+              'scroll-mt-4 rounded-md border px-4 py-4 transition-colors',
+              String(item.id) === String(chunk.id)
+                ? 'border-cyan-200 bg-cyan-50/40 dark:border-cyan-900 dark:bg-cyan-950/20'
+                : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0f1117]',
             )}
-          </div>
-        </div>
-      )
-    }
-
-    if (previewKind === 'pdf' && hasPagePreview && currentPage) {
-      return (
-        <ScrollArea className="flex-1 bg-[#eceff1]" viewportRef={scrollViewportRef}>
-          <PagePreviewCanvas
-            materialId={material.id}
-            currentPage={currentPage}
-            zoom={zoom}
-            pageChunkIndexes={pageChunkIndexes}
-            chunks={chunks}
-            activeChunkId={chunk.id}
-            onSelectChunk={onSelectChunk}
-            onError={() => setPagePreviewFailed(true)}
-          />
-        </ScrollArea>
-      )
-    }
-
-    if (previewKind === 'pdf' || previewKind === 'office') {
-      return (
-        <div className="flex-1 bg-[#2f3338]">
-          {originalUrl ? (
-            <iframe
-              key={`${material.id}-${previewKind}-${currentPageNo}-${originalUrl}`}
-              title={material.title || material.originalName || '原文预览'}
-              src={originalFrameUrl}
-              className="h-full w-full border-0 bg-white"
-            />
-          ) : null}
-        </div>
-      )
-    }
-
-    if (previewKind === 'unsupported') {
-      if (hasPagePreview && currentPage) {
-        return (
-          <ScrollArea className="flex-1 bg-[#eceff1]" viewportRef={scrollViewportRef}>
-            <div className="mx-auto mt-3 max-w-3xl rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100">
-              Word 在浏览器中无法保证 100% 原生还原；这里展示的是转换后的 PDF 版式预览，完整原文件可用右上角打开。
+          >
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <Badge variant={String(item.id) === String(chunk.id) ? 'default' : 'outline'} className="text-[10px]">
+                片段 {item.chunkIndex}
+              </Badge>
+              {item.pageNo && <Badge variant="secondary" className="text-[10px]">P{item.pageNo}</Badge>}
+              {item.sectionTitle && <h4 className="text-sm font-semibold text-primary">{item.sectionTitle}</h4>}
             </div>
-            <PagePreviewCanvas
-              materialId={material.id}
-              currentPage={currentPage}
-              zoom={zoom}
-              pageChunkIndexes={pageChunkIndexes}
-              chunks={chunks}
-              activeChunkId={chunk.id}
-              onSelectChunk={onSelectChunk}
-              onError={() => setPagePreviewFailed(true)}
-            />
-          </ScrollArea>
-        )
-      }
-
-      return (
-        <div className="flex flex-1 items-center justify-center bg-[#eceff1] p-6 dark:bg-[#10131a]">
-          <div className="max-w-md rounded-lg border bg-background p-5 text-center shadow-sm">
-            <FileText className="mx-auto mb-3 h-9 w-9 text-muted-foreground" />
-            <p className="text-sm font-medium">Word 版式预览暂不可用</p>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              {material.previewError || '请安装 LibreOffice/soffice 后重新解析，或打开原文件查看完整格式。'}
-            </p>
-            {onOpenFile && (
-              <Button className="mt-4" size="sm" variant="outline" onClick={onOpenFile}>
-                <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                打开原文件
-              </Button>
+            {item.hierarchyPath && (
+              <p className="mb-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] font-medium text-muted-foreground">
+                {item.hierarchyPath}
+              </p>
             )}
-          </div>
-        </div>
-      )
-    }
-
-    return null
-  }
+            <div className="whitespace-pre-wrap text-sm leading-7 text-foreground/90">
+              {material?.id ? <ChunkContent text={item.chunkText} materialId={material.id} /> : item.chunkText}
+            </div>
+          </section>
+          )
+        })}
+      </div>
+    </ScrollArea>
+  )
 
   // === 主渲染 ===
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      {/* ---- 顶部工具栏：标题、页码标签、阅读模式切换、缩放控制、原文件按钮、进度条 ---- */}
+    <div className="reader-paper flex-1 flex flex-col overflow-hidden">
+      {/* ---- 顶部工具栏：单一连续阅读状态、缩放控制、原文件按钮、进度条 ---- */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2 md:gap-3 md:px-6 md:py-3">
         <div className="flex min-w-[10rem] flex-1 items-center gap-2">
           <h3 className="text-sm font-medium truncate">
@@ -1045,57 +1133,18 @@ export function ReaderPaper({
           {showPageControls && currentPage && (
             <Badge variant="outline" className="text-xs">P{currentPage.pageNo}/{pages.length}</Badge>
           )}
-          {!showPageControls && !isOriginalView && chunkPageNo && (
+          {!showPageControls && chunkPageNo && (
             <Badge variant="outline" className="text-xs">P{chunkPageNo}</Badge>
           )}
-          {!showPageControls && isOriginalView && (previewKind === 'pdf' || previewKind === 'office') && currentPageNo && (
-            <Badge variant="outline" className="text-xs">P{currentPageNo}</Badge>
-          )}
-          {isOriginalView && previewKind === 'pdf' && (
-            <Badge variant="outline" className="text-xs">
-              {hasPagePreview ? 'PDF 版式预览' : 'PDF 原文'}
-            </Badge>
-          )}
-          {isOriginalView && previewKind === 'text' && (
-            <Badge variant="outline" className="text-xs">原始文本</Badge>
-          )}
-          {isOriginalView && previewKind === 'office' && (
-            <Badge variant="outline" className="text-xs">Word 转换预览</Badge>
-          )}
+          <Badge variant="secondary" className="text-xs">
+            {usesPageCanvas ? (usesPdfPreview ? 'PDF 阅读器' : '页面预览') : '连续片段'}
+          </Badge>
           {material?.previewStatus === 'DEGRADED' && (
             <Badge variant="secondary" className="text-xs">文本预览</Badge>
           )}
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5 md:gap-2">
-          {hasOriginalPreview && (
-            <div className="flex items-center rounded-md border bg-background p-0.5">
-              <button
-                type="button"
-                className={cn(
-                  'rounded px-2 py-1 text-xs transition-colors',
-                  viewMode === 'original'
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground',
-                )}
-                onClick={() => setViewMode('original')}
-              >
-                原文预览
-              </button>
-              <button
-                type="button"
-                className={cn(
-                  'rounded px-2 py-1 text-xs transition-colors',
-                  viewMode === 'smart'
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground',
-                )}
-                onClick={() => setViewMode('smart')}
-              >
-                智能阅读
-              </button>
-            </div>
-          )}
           {/* 缩放控制（仅页面预览模式） */}
           {showPageControls && (
             <div className="flex items-center rounded-md border bg-background">
@@ -1121,79 +1170,50 @@ export function ReaderPaper({
         </div>
       </div>
 
-      {/* 内容展示区 */}
-      {isOriginalView ? (
-        renderOriginalPreview()
-      ) : (
-        <ScrollArea className="flex-1 bg-[#eceff1]" viewportRef={scrollViewportRef}>
-          {hasPagePreview && currentPage && material?.id ? (
-            /* ---- 页面预览模式 ---- */
-            <PagePreviewCanvas
-              materialId={material.id}
-              currentPage={currentPage}
-              zoom={zoom}
-              pageChunkIndexes={pageChunkIndexes}
-              chunks={chunks}
-              activeChunkId={chunk.id}
-              onSelectChunk={onSelectChunk}
-              onError={() => setPagePreviewFailed(true)}
-            />
-          ) : (
-            /* ---- 文本模式 ---- */
-            <div className="mx-auto min-h-full max-w-2xl bg-background px-4 py-4 md:px-6 md:py-6">
-              {/* 页面预览失败的降级提示 */}
-              {(material?.previewError || pagePreviewFailed) && (
-                <p className="mb-3 rounded-md border border-dashed bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                  {pagePreviewFailed ? '当前页图片暂时无法加载，已切换为解析文本阅读。' : material?.previewError}
-                </p>
-              )}
-              {/* 章节标题 */}
-              {chunk.sectionTitle && (
-                <h4 className="text-base font-semibold mb-3 text-primary">{chunk.sectionTitle}</h4>
-              )}
-              {/* 层级路径 */}
-              {chunk.hierarchyPath && (
-                <p className="mb-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] font-medium text-muted-foreground">
-                  {chunk.hierarchyPath}
-                </p>
-              )}
-              {/* 片段正文（支持内嵌图片渲染） */}
-              <div className="text-sm leading-7 whitespace-pre-wrap text-foreground/90">
-                {material?.id
-                  ? <ChunkContent text={chunk.chunkText} materialId={material.id} />
-                  : chunk.chunkText}
-              </div>
-            </div>
-          )}
-        </ScrollArea>
-      )}
+      {/* 内容展示区：有页面预览则按页连续渲染，否则按解析片段连续渲染。 */}
+      {usesPageCanvas ? renderContinuousPages() : renderContinuousChunks()}
 
-      {/* 底部翻页导航栏 */}
+      {/* 底部导航栏：保留上一/下一片段，中间支持输入页码或片段序号跳转。 */}
       <div className="flex items-center justify-between gap-2 border-t px-3 py-2 md:px-6 md:py-3">
         <Button
           variant="outline"
           size="sm"
-          onClick={showPageControls ? () => handlePageStep(-1) : onPrev}
-          disabled={showPageControls ? currentPageIndex <= 0 : !originalChunkNavigationEnabled || !canPrev}
+          onClick={handlePrevNavigation}
+          disabled={usesPageCanvas ? currentPageIndex <= 0 : !canPrev}
         >
-          <ChevronLeft className="mr-1 h-4 w-4" /> {showPageControls ? '上一页' : '上一片段'}
+          <ChevronLeft className="mr-1 h-4 w-4" /> {usesPageCanvas ? '上一页' : '上一片段'}
         </Button>
-        <span className="min-w-0 truncate text-center text-xs text-muted-foreground">
-          {showPageControls && currentPage
-            ? `第 ${currentPage.pageNo} 页 / 共 ${pages.length} 页`
-            : isOriginalView
-              ? currentPageNo
-                ? `第 ${currentPageNo} 页 · 片段 #${chunk.chunkIndex}`
-                : '原文预览中，当前片段暂无页码映射'
-              : `片段 #${chunk.chunkIndex}`}
-        </span>
+        <form
+          className="flex min-w-0 items-center justify-center gap-2 text-xs text-muted-foreground"
+          onSubmit={(event) => {
+            event.preventDefault()
+            handleJumpSubmit()
+          }}
+        >
+          <span>{usesPageCanvas ? '第' : '第'}</span>
+          <input
+            value={jumpValue}
+            onChange={(event) => setJumpValue(event.target.value.replace(/[^\d]/g, ''))}
+            onFocus={() => setJumpFocused(true)}
+            onBlur={() => {
+              setJumpFocused(false)
+            }}
+            className="h-8 w-16 rounded-md border bg-background px-2 text-center text-sm text-foreground outline-none focus:border-cyan-400"
+            inputMode="numeric"
+            aria-label={usesPageCanvas ? '跳转页码' : '跳转片段编号'}
+          />
+          <span>{usesPageCanvas ? `页 / 共 ${jumpCount} 页` : `段 / 共 ${jumpCount} 段`}</span>
+          <Button variant="outline" size="sm" className="h-8 px-2 text-xs" type="submit">
+            跳转
+          </Button>
+        </form>
         <Button
           variant="outline"
           size="sm"
-          onClick={showPageControls ? () => handlePageStep(1) : onNext}
-          disabled={showPageControls ? currentPageIndex >= pages.length - 1 : !originalChunkNavigationEnabled || !canNext}
+          onClick={handleNextNavigation}
+          disabled={usesPageCanvas ? currentPageIndex >= pages.length - 1 : !canNext}
         >
-          {showPageControls ? '下一页' : '下一片段'} <ChevronRight className="ml-1 h-4 w-4" />
+          {usesPageCanvas ? '下一页' : '下一片段'} <ChevronRight className="ml-1 h-4 w-4" />
         </Button>
       </div>
     </div>

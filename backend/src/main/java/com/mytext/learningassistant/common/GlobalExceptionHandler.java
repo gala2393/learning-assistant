@@ -7,6 +7,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
@@ -71,7 +72,9 @@ public class GlobalExceptionHandler {
             case 500 -> HttpStatus.INTERNAL_SERVER_ERROR; // 服务器内部错误
             default  -> HttpStatus.BAD_REQUEST;        // 其他错误码统一返回 400
         };
-        return ResponseEntity.status(status).body(ApiResponse.error(exception.getCode(), exception.getMessage()));
+        return ResponseEntity.status(status)
+            .contentType(MediaType.APPLICATION_JSON)
+            .body(ApiResponse.error(exception.getCode(), exception.getMessage()));
     }
 
     /**
@@ -94,6 +97,7 @@ public class GlobalExceptionHandler {
             errors.putIfAbsent(fieldError.getField(), fieldError.getDefaultMessage());
         }
         return ResponseEntity.badRequest()
+            .contentType(MediaType.APPLICATION_JSON)
             .body(ApiResponse.error(400, "参数校验失败", errors));
     }
 
@@ -107,6 +111,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleMethodNotSupported(
             HttpRequestMethodNotSupportedException exception) {
         return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+            .contentType(MediaType.APPLICATION_JSON)
             .body(ApiResponse.error(405, "当前服务尚未支持该操作，请重启后端或刷新到最新版本"));
     }
 
@@ -119,6 +124,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<ApiResponse<Void>> handleNoResourceFound(NoResourceFoundException exception) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .contentType(MediaType.APPLICATION_JSON)
             .body(ApiResponse.error(404, "请求的资源不存在"));
     }
 
@@ -133,6 +139,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleUnexpected(Exception exception) {
         log.error("Unexpected request failure", exception); // 记录完整堆栈到日志
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+            .contentType(MediaType.APPLICATION_JSON)
             .body(ApiResponse.error(500, "服务器内部错误"));
     }
 
@@ -148,8 +155,10 @@ public class GlobalExceptionHandler {
         long maxUploadSize = exception.getMaxUploadSize();  // 配置的最大文件大小（字节）
         String message = maxUploadSize > 0
             ? "文件太大，请控制在" + formatMegabytes(maxUploadSize) + "以内后再导入。"
-            : "文件太大，请控制在500MB以内后再导入。";
-        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(ApiResponse.error(413, message));
+            : "文件太大，请控制在2GB以内后再导入。";
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+            .contentType(MediaType.APPLICATION_JSON)
+            .body(ApiResponse.error(413, message));
     }
 
     /**

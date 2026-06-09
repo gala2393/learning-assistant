@@ -10,7 +10,7 @@ public enum MaterialSourceType {
     /** PDF 文档 -- 使用 PDFBox 提取文本，支持 OCR */
     PDF,
 
-    /** 旧版 Word 文档（.doc）-- 当前不支持，请转换为 DOCX */
+    /** 旧版 Word 文档（.doc）-- 使用 Apache POI 提取文本，可选用 LibreOffice 生成预览 */
     WORD,
 
     /** 旧版 PowerPoint 文件（.ppt）-- 当前不支持，请转换为 PPTX */
@@ -32,5 +32,8 @@ public enum MaterialSourceType {
     DOCX,
 
     /** PowerPoint 文件（.pptx）-- 使用 Zip 解压解析 XML 提取文本 */
-    PPTX
+    PPTX,
+
+    /** Excel 文件（.xlsx）-- 优先交给 MinerU 解析并生成可选中文本层 */
+    XLSX
 }

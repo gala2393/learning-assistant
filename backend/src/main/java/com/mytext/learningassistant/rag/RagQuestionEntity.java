@@ -50,6 +50,10 @@ public class RagQuestionEntity {
     @Column(name = "conversation_id")
     private Long conversationId;
 
+    /** 资料问答所属资料 ID；通用问答为空，用于阅读器按资料恢复最近对话。 */
+    @Column(name = "material_id")
+    private Long materialId;
+
     /** 用户的问题文本 */
     @Column(name = "question_text", columnDefinition = "TEXT", nullable = false)
     private String questionText;
@@ -162,6 +166,14 @@ public class RagQuestionEntity {
 
     public void setConversationId(Long conversationId) {
         this.conversationId = conversationId;
+    }
+
+    public Long getMaterialId() {
+        return materialId;
+    }
+
+    public void setMaterialId(Long materialId) {
+        this.materialId = materialId;
     }
 
     public String getQuestionText() {

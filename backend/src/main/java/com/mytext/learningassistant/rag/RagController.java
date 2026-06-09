@@ -117,6 +117,30 @@ public class RagController {
     }
 
     /**
+     * 获取某份资料最近一段边读边问会话。
+     * 前端阅读器打开资料时调用；没有历史时 data 为 null。
+     */
+    @GetMapping("/history/materials/{materialId}/latest")
+    public ApiResponse<RagHistoryDetailResponse> latestMaterialHistory(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("materialId") long materialId
+    ) {
+        return ApiResponse.ok(ragService.latestMaterialHistory(currentUserId, materialId));
+    }
+
+    /**
+     * 获取某份资料的边读边问历史会话列表。
+     * 每个会话只返回最新一条记录，用于阅读器问答区历史弹窗。
+     */
+    @GetMapping("/history/materials/{materialId}")
+    public ApiResponse<List<RagHistoryItemResponse>> materialHistory(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("materialId") long materialId
+    ) {
+        return ApiResponse.ok(ragService.materialHistory(currentUserId, materialId));
+    }
+
+    /**
      * 删除指定对话历史及其整个会话。
      * <p>
      * 会同时删除该会话下所有问答记录的收藏、来源、反馈和评估数据。

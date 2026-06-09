@@ -282,27 +282,45 @@ public class ThirdPartyLlmClient {
 
     /**
      * 判断用户是否在问"你是什么模型"类问题。
-     * 支持多种中文表达方式（"你是什么模型"、"当前模型"、"调用的是什么大模型"等）。
+     * 只匹配明确询问助手身份或当前调用模型的表达，避免普通技术问题里提到"模型"时被误判。
+     * 支持多种中文表达方式（"你是什么模型"、"你是什么 AI"、"当前使用的是什么模型"等）。
      * 只检查最后一行文本（多轮对话中用户可能在最后一行才问）。
      */
     public boolean isModelIdentityQuestion(String question) {
         String compactQuestion = nullToEmpty(latestQuestionLine(question))
             .toLowerCase(Locale.ROOT)
             .replaceAll("[\\s\\p{Punct}\\u3000-\\u303f\\uff00-\\uffef]+", "");
-        // 精确匹配常见表达
-        if (compactQuestion.contains("你是什么模型") || compactQuestion.contains("你是什么大模型")
-            || compactQuestion.contains("你是哪个模型") || compactQuestion.contains("你是哪个大模型")
-            || compactQuestion.contains("你用的是什么模型") || compactQuestion.contains("当前是什么模型")
-            || compactQuestion.contains("当前模型") || compactQuestion.contains("调用的模型")
-            || compactQuestion.contains("大模型名称")) {
-            return true;
-        }
-        // 模糊匹配：包含"模型"+"你/当前/调用/使用"等关键词
-        String normalized = nullToEmpty(latestQuestionLine(question)).toLowerCase(Locale.ROOT)
-            .replaceAll("[\\s\\p{Punct}，。？！、：；\"\"''（）()【】\\[\\]《》<>]+", "");
-        boolean mentionsModel = normalized.contains("模型") || normalized.contains("大模型") || normalized.contains("model");
-        boolean asksCurrent = normalized.contains("你") || normalized.contains("当前") || normalized.contains("调用") || normalized.contains("使用");
-        return mentionsModel && asksCurrent;
+        return compactQuestion.contains("你是什么模型")
+            || compactQuestion.contains("你是什么大模型")
+            || compactQuestion.contains("你是什么ai")
+            || compactQuestion.contains("你是什么人工智能")
+            || compactQuestion.contains("你是哪个模型")
+            || compactQuestion.contains("你是哪一个模型")
+            || compactQuestion.contains("你是哪个ai")
+            || compactQuestion.contains("你是哪一个ai")
+            || compactQuestion.contains("你用的是什么模型")
+            || compactQuestion.contains("你使用的是什么模型")
+            || compactQuestion.contains("你调用的是什么模型")
+            || compactQuestion.contains("当前使用的是什么模型")
+            || compactQuestion.contains("现在使用的是什么模型")
+            || compactQuestion.contains("正在使用的是什么模型")
+            || compactQuestion.contains("当前调用的是什么模型")
+            || compactQuestion.contains("现在调用的是什么模型")
+            || compactQuestion.contains("正在调用的是什么模型")
+            || compactQuestion.contains("调用的是哪个模型")
+            || compactQuestion.contains("调用的是什么大模型")
+            || compactQuestion.contains("当前调用的模型是什么")
+            || compactQuestion.contains("当前调用的大模型是什么")
+            || compactQuestion.contains("现在调用的模型是什么")
+            || compactQuestion.contains("现在调用的大模型是什么")
+            || compactQuestion.contains("正在调用的模型是什么")
+            || compactQuestion.contains("正在调用的大模型是什么")
+            || compactQuestion.contains("当前使用的模型是什么")
+            || compactQuestion.contains("当前使用的大模型是什么")
+            || compactQuestion.contains("现在使用的模型是什么")
+            || compactQuestion.contains("现在使用的大模型是什么")
+            || compactQuestion.contains("正在使用的模型是什么")
+            || compactQuestion.contains("正在使用的大模型是什么");
     }
 
     /** 提取最后一行文本（多轮对话中用户可能在最后一行才问模型身份） */
@@ -396,8 +414,8 @@ public class ThirdPartyLlmClient {
 
     /** 模型身份指令（追加到系统提示词末尾，防止 LLM 说出真实模型名） */
     private String modelIdentityInstruction(Long userId) {
-        return "\n\n模型身份规则：如果用户询问你是什么模型、当前模型、当前大模型或调用模型，必须只按当前配置回答：当前使用的是 "
-            + currentModelLabel(userId) + "。不要回答训练模型、供应商默认身份或其他模型名称。";
+        return "\n\n模型身份规则：仅当用户明确询问“你是什么模型”“你是什么 AI”“当前使用的是什么模型”或“正在调用哪个模型”等助手身份问题时，才按当前配置回答：当前使用的是 "
+            + currentModelLabel(userId) + "。其他提到模型的普通问题，按问题本身正常回答，不要主动返回当前模型名称。";
     }
 
     private Optional<LlmCompletion> answerGeneralFast(Long userId, String question) {

@@ -168,7 +168,7 @@ export function MaterialUploadForm({ onSubmit, loading, progress, progressItems 
             </label>
             <Input
               type="file"
-              accept=".pdf,.doc,.docx,.pptx,.txt,.md,.html,.htm"  // 支持的文件类型
+              accept=".pdf,.doc,.docx,.pptx,.xlsx,.txt,.md,.html,.htm"  // 支持的文件类型
               multiple  // 允许多选
               className={`${fieldClass} cursor-pointer file:mr-3 file:rounded-lg file:border-0 file:bg-[#eef0f2] file:px-3 file:py-1.5 file:text-sm file:text-[#4b5563] hover:file:bg-[#e3e6e9] dark:file:bg-[#262d38] dark:file:text-slate-200 dark:hover:file:bg-[#303846]`}
               {...register('file')}

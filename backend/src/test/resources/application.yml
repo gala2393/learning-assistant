@@ -28,8 +28,8 @@ app:
     password: test-admin-123456
     nickname: admin
   material:
-    # 测试环境文件大小限制（500MB）
-    max-file-bytes: 524288000
+    # 测试环境文件大小限制（2GB）
+    max-file-bytes: 2147483648
     max-web-bytes: 524288000
   security:
     outbound:

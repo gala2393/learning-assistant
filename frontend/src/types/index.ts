@@ -99,7 +99,7 @@ export interface UsernameCheckResult {
 // ==================== 资料管理相关 ====================
 
 /** 资料来源类型枚举 */
-export type SourceType = 'PDF' | 'DOCX' | 'WORD' | 'PPT' | 'TXT' | 'MD' | 'HTML' | 'WEB'
+export type SourceType = 'PDF' | 'DOCX' | 'WORD' | 'PPT' | 'PPTX' | 'XLSX' | 'TXT' | 'MD' | 'HTML' | 'WEB'
 
 /** 资料解析状态枚举 */
 export type ParseStatus = 'SUCCESS' | 'PARSED' | 'PROCESSING' | 'PARSING' | 'PENDING' | 'FAILED'
@@ -159,6 +159,24 @@ export interface MaterialPage {
 // ==================== 聊天与 RAG 相关 ====================
 
 /** 普通聊天请求体 */
+/** 资料页面透明文本层块，用于在原文页面上直接选中划词。 */
+export interface MaterialPageTextBlock {
+  id: string
+  pageNo: number
+  blockIndex: number
+  text: string
+  blockType?: string | null
+  source?: string | null
+  chunkId?: string | number | null
+  pageWidth?: number | null
+  pageHeight?: number | null
+  bboxX?: number | null
+  bboxY?: number | null
+  bboxWidth?: number | null
+  bboxHeight?: number | null
+  confidence?: number | null
+}
+
 export interface ChatPayload {
   question: string                            // 用户问题
   mode: 'GENERAL' | 'MATERIAL'               // 模式：通用/资料

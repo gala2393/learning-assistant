@@ -40,7 +40,7 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
  *   <li>{@code status}  - 当前处理阶段（如"正在检索相关资料..."）</li>
  *   <li>{@code chunk}   - 回答文本的逐段推送</li>
  *   <li>{@code sources} - 引用来源列表</li>
- *   <li>{@code done}    - 流式完成，包含完整回答和对话 ID</li>
+ *   <li>{@code done}    - 流式完成，包含问答 ID、对话 ID 和可选完整回答</li>
  *   <li>{@code error}   - 错误信息</li>
  * </ul>
  * <p>
@@ -96,7 +96,7 @@ public class RagStreamController {
      *   <li>发送 SSE 心跳填充（防止代理缓冲）</li>
      *   <li>调用 {@code RagService.chatStream} 执行 RAG 流程，每当 LLM 返回一个片段时，通过回调推送给前端</li>
      *   <li>发送 {@code sources} 事件，推送引用来源</li>
-     *   <li>发送 {@code done} 事件，携带完整的回答文本和对话 ID</li>
+     *   <li>发送 {@code done} 事件，携带问答 ID 和对话 ID；长回答不重复携带全文，避免最后一帧过大导致前端误判中断</li>
      * </ol>
      *
      * @param currentUserId 当前登录用户 ID（由拦截器注入）
@@ -139,11 +139,7 @@ public class RagStreamController {
 
                 // 流式完成：推送引用来源和完成信号
                 sendEvent(outputStream, "sources", Map.of("sources", result.sources()));
-                sendEvent(outputStream, "done", Map.of(
-                    "questionId", result.questionId(),
-                    "conversationId", result.conversationId(),
-                    "answer", result.answer()
-                ));
+                sendEvent(outputStream, "done", donePayload(result));
             } catch (Exception e) {
                 // 发生异常时推送错误事件
                 try {
@@ -178,6 +174,24 @@ public class RagStreamController {
         // 每个事件写完立即 flush，减少代理和 Servlet 缓冲导致的首包延迟。
         outputStream.write(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         outputStream.flush();
+    }
+
+    /**
+     * 构造流式完成事件。
+     * <p>
+     * 前端已经通过 {@code chunk} 事件累积了完整回答，因此长回答完成时不再把全文重复放入
+     * {@code done.answer}。这可以避免 1 万字以上回答在最后一帧形成巨大 JSON，导致浏览器、
+     * 代理或本地持久化失败后被误显示为"回答已中断"。
+     */
+    private Map<String, Object> donePayload(RagStreamResult result) {
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("questionId", result.questionId());
+        payload.put("conversationId", result.conversationId());
+        String answer = result.answer() == null ? "" : result.answer();
+        boolean includeAnswer = answer.length() <= 4_000;
+        payload.put("answerIncluded", includeAnswer);
+        payload.put("answer", includeAnswer ? answer : "");
+        return payload;
     }
 
     /**

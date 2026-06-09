@@ -22,6 +22,9 @@ export const CHAT_DRAFT_KEY = 'learning-assistant.chat.current'
 const CHAT_DRAFT_BACKUP_KEY = 'learning-assistant.chat.current.backup'
 export const CHAT_HISTORY_CONVERSATION_KEY = 'learning-assistant.chat.history-conversations'
 const CHAT_CONVERSATION_ARCHIVE_KEY = 'learning-assistant.chat.conversation-archive'
+
+// 前端只保留最近 24 条原文上下文给后端；更早内容由后端长期摘要记忆承接。
+const RECENT_CONVERSATION_HISTORY_LIMIT = 24
 /**
  * 临时资料持久化文本上限。
  *
@@ -47,7 +50,7 @@ export interface ChatSessionSnapshot {
   materialId: string | null          // 资料模式绑定的资料 ID
   chunkId: string | null             // 资料模式绑定的分块 ID
   messages: ChatMessage[]            // 消息列表（用户问题 + AI 回答）
-  conversationHistory: ConversationMessage[]  // 多轮对话上下文（最近 10 条）
+  conversationHistory: ConversationMessage[]  // 多轮对话上下文（最近 24 条，更多内容由后端摘要承接）
   streaming: boolean                 // 是否正在流式输出
   images: ChatImagePayload[]         // 附带的图片（图片问答功能）
   temporaryMaterial: TemporaryMaterial | null  // 智能问答临时资料上下文
@@ -88,6 +91,7 @@ const defaultState: ChatSessionSnapshot = {
 // ===== 全局状态 =====
 let activeController: AbortController | null = null  // 当前活跃的 SSE 流（用于取消）
 let activeRunId: string | null = null                 // 防止旧的回调污染新请求
+let lastStreamPersistAt = 0                           // 流式长文输出期间的本地持久化节流时间戳
 const listeners = new Set<() => void>()               // 订阅者列表（React 组件）
 let state: ChatSessionSnapshot = restoreSnapshot()    // 全局状态（从 localStorage 恢复）
 
@@ -222,6 +226,7 @@ export function startChatSessionStream(params: {
   let sources: RagSource[] = []
 
   activeRunId = runId
+  lastStreamPersistAt = 0
   // 立即更新 UI（显示用户消息 + 思考中占位）
   state = {
     ...state, selectedHistoryId: null, conversationId: conversationIdBefore,
@@ -260,7 +265,8 @@ export function startChatSessionStream(params: {
         state = { ...state, messages: state.messages.map((m) =>
           m.id === assistantId ? { ...m, thinking: firstChunk ? false : m.thinking, text: cleanText } : m) }
         firstChunk = false
-        persistSnapshot(); notify()
+        persistStreamSnapshot()
+        notify()
       },
       // 来源回调：收到检索到的资料来源
       onSources: (nextSources) => {
@@ -274,13 +280,16 @@ export function startChatSessionStream(params: {
         if (activeRunId !== runId) return
         const questionId = String(result.questionId)
         const conversationId = String(result.conversationId || state.conversationId || questionId)
-        const cleanAnswer = sanitizeAiText(result.answer)
-        // 更新多轮对话上下文（保留最近 10 条）
+        // 长文流式时后端 done 事件不再重复携带完整正文，避免最后一帧 JSON 过大。
+        // 这时直接使用前面 chunk 已经累积好的 answer 完成落盘和历史更新。
+        const finalAnswer = typeof result.answer === 'string' && result.answer.trim() ? result.answer : answer
+        const cleanAnswer = sanitizeAiText(finalAnswer)
+        // 更新多轮对话上下文（保留最近 24 条，避免前端请求体无限增长）
         const nextConversationHistory = [
           ...historyBefore,
           { role: 'user', content: params.question },
           { role: 'assistant', content: cleanAnswer },
-        ].slice(-10)
+        ].slice(-RECENT_CONVERSATION_HISTORY_LIMIT)
 
         activeRunId = null; activeController = null
         state = {
@@ -301,7 +310,21 @@ export function startChatSessionStream(params: {
       // 错误回调：显示错误信息
       onError: (message) => {
         if (activeRunId !== runId) return
+        const cleanAnswer = sanitizeAiText(answer)
         activeRunId = null; activeController = null
+        // 如果已经收到部分正文，说明模型确实在持续生成；此时保留已有内容并附加中断提示。
+        // 注意这里不要设置 error 字段，否则消息组件会只渲染红色错误卡片，反而盖掉已生成正文。
+        if (cleanAnswer.trim()) {
+          const interruptedText = `${cleanAnswer}\n\n回答生成已中断，以上为已收到的内容。`
+          state = {
+            ...state, messages: state.messages.map((m) =>
+              m.id === assistantId ? { ...m, thinking: false, error: undefined, text: interruptedText } : m),
+            streaming: false,
+          }
+          persistSnapshot(); notify()
+          queryClient.invalidateQueries({ queryKey: ['history'] })
+          return
+        }
         state = {
           ...state, messages: state.messages.map((m) =>
             m.id === assistantId ? { ...m, thinking: false, error: message, text: '' } : m),
@@ -312,6 +335,20 @@ export function startChatSessionStream(params: {
       },
     },
   )
+}
+
+/**
+ * 流式输出期间的持久化节流。
+ * <p>
+ * 1 万字长文会产生大量 chunk，如果每个 chunk 都把完整消息写入 sessionStorage/localStorage，
+ * 浏览器容易卡顿，甚至因为存储写入失败导致页面恢复为"回答已中断"。这里保留页面刷新恢复能力，
+ * 但把写入频率降到约每 1.5 秒一次；流结束时仍会通过 persistSnapshot() 保存最终全文。
+ */
+function persistStreamSnapshot() {
+  const now = Date.now()
+  if (now - lastStreamPersistAt < 1500) return
+  lastStreamPersistAt = now
+  persistSnapshot()
 }
 
 /** 将后端返回的状态码转换为用户友好的中文提示 */

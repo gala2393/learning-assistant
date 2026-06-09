@@ -276,6 +276,14 @@ class MaterialApiTest {
             .andExpect(jsonPath("$.data[0].imageName").value("page-1.png"))
             .andExpect(jsonPath("$.data[0].renderStatus").value("PENDING"));
 
+        mockMvc.perform(get("/api/materials/" + materialId + "/pages/1/text-layer")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data[0].pageNo").value(1))
+            .andExpect(jsonPath("$.data[0].text").value("RAG PDF import parses readable course material text."))
+            .andExpect(jsonPath("$.data[0].source").value("LEGACY"));
+
         mockMvc.perform(get("/api/materials/" + materialId + "/images/page-1.png")
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
@@ -647,6 +655,7 @@ class MaterialApiTest {
     @Test
     void chunkedUploadAcceptsChunkWithoutChecksum() throws Exception {
         String token = registerAndLogin(uniqueName("chunk-upload-user"));
+        byte[] chunkBytes = "chunked upload without checksum".getBytes(StandardCharsets.UTF_8);
 
         var sessionResult = mockMvc.perform(post("/api/materials/upload-sessions")
                 .header("Authorization", "Bearer " + token)
@@ -658,10 +667,10 @@ class MaterialApiTest {
                       "originalName": "chunk-probe.txt",
                       "sourceType": "TXT",
                       "sourceUrl": "",
-                      "fileSize": 32,
+                      "fileSize": %d,
                       "chunkSize": 5242880
                     }
-                    """))
+                    """.formatted(chunkBytes.length)))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data.status").value("UPLOADING"))
             .andReturn();
@@ -671,7 +680,7 @@ class MaterialApiTest {
             "chunk",
             "chunk-probe.txt",
             MediaType.TEXT_PLAIN_VALUE,
-            "chunked upload without checksum".getBytes(StandardCharsets.UTF_8)
+            chunkBytes
         );
 
         mockMvc.perform(multipart("/api/materials/upload-sessions/" + sessionId + "/chunks")
@@ -705,7 +714,49 @@ class MaterialApiTest {
     }
 
     /**
-     * 测试场景：分片上传时文件大小超过限制。
+     * 测试场景：分片实际大小与创建会话时声明的 fileSize/chunkSize 不一致。
+     * 预期结果：后端立即拒绝该分片，避免大文件缺片或短片被误判为上传完成。
+     */
+    @Test
+    void chunkedUploadRejectsChunkSizeMismatch() throws Exception {
+        String token = registerAndLogin(uniqueName("chunk-upload-size-user"));
+
+        var sessionResult = mockMvc.perform(post("/api/materials/upload-sessions")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "clientUploadId": "chunk-size-mismatch-probe",
+                      "title": "Chunk Size Mismatch Probe",
+                      "originalName": "chunk-size-mismatch.txt",
+                      "sourceType": "TXT",
+                      "sourceUrl": "",
+                      "fileSize": 32,
+                      "chunkSize": 5242880
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        String sessionId = extractString(sessionResult.getResponse().getContentAsString(), "sessionId");
+        MockMultipartFile chunk = new MockMultipartFile(
+            "chunk",
+            "chunk-size-mismatch.txt",
+            MediaType.TEXT_PLAIN_VALUE,
+            "short chunk body".getBytes(StandardCharsets.UTF_8)
+        );
+
+        mockMvc.perform(multipart("/api/materials/upload-sessions/" + sessionId + "/chunks")
+                .file(chunk)
+                .header("Authorization", "Bearer " + token)
+                .param("chunkIndex", "0")
+                .param("totalChunks", "1"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("Chunk size mismatch")));
+    }
+
+    /**
+     * 测试场景：分片上传时文件大小超过 2GB 持久资料限制。
      * 预期结果：创建上传会话返回 400，错误消息包含 "too large"。
      */
     @Test
@@ -722,13 +773,77 @@ class MaterialApiTest {
                       "originalName": "too-large.pdf",
                       "sourceType": "PDF",
                       "sourceUrl": "",
-                      "fileSize": 524288001,
-                      "chunkSize": 5242880
+                      "fileSize": 2147483649,
+                      "chunkSize": 1048576
                     }
                     """))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.code").value(400))
             .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("too large")));
+    }
+
+    /**
+     * 测试场景：长中文文件名的 PDF 和旧版 Word 创建分片上传会话。
+     * 预期结果：服务端会把旧前端生成的超长 clientUploadId 归一化为短摘要，不再因为数据库字段长度返回 500。
+     */
+    @Test
+    void createsChunkedUploadSessionForLongChinesePdfAndDocNames() throws Exception {
+        String token = registerAndLogin(uniqueName("chunk-upload-long-name-user"));
+        String longTitle = "2025年12月四级真题-第一套-含听力原文和答案解析-用于资料管理上传测试";
+
+        assertLongNameUploadSessionCreated(token, longTitle + ".pdf", "PDF");
+        assertLongNameUploadSessionCreated(token, longTitle + ".doc", "WORD");
+    }
+
+    /**
+     * 测试场景：旧前端已经用 5MB 分片创建了 UPLOADING 会话，新前端改用 1MB 分片后再次上传同一文件。
+     * 预期结果：服务端自动丢弃未完成旧会话并重建新会话，避免用户看到 Upload metadata mismatch。
+     */
+    @Test
+    void recreatesUploadingSessionWhenChunkMetadataChanged() throws Exception {
+        String token = registerAndLogin(uniqueName("chunk-upload-metadata-user"));
+
+        var oldSessionResult = mockMvc.perform(post("/api/materials/upload-sessions")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "clientUploadId": "chunk-metadata-probe",
+                      "title": "Chunk Metadata Probe",
+                      "originalName": "metadata-probe.pdf",
+                      "sourceType": "PDF",
+                      "sourceUrl": "",
+                      "fileSize": 3145728,
+                      "chunkSize": 5242880
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.chunkSize").value(5242880))
+            .andReturn();
+
+        String oldSessionId = extractString(oldSessionResult.getResponse().getContentAsString(), "sessionId");
+
+        var newSessionResult = mockMvc.perform(post("/api/materials/upload-sessions")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "clientUploadId": "chunk-metadata-probe",
+                      "title": "Chunk Metadata Probe",
+                      "originalName": "metadata-probe.pdf",
+                      "sourceType": "PDF",
+                      "sourceUrl": "",
+                      "fileSize": 3145728,
+                      "chunkSize": 1048576
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.chunkSize").value(1048576))
+            .andExpect(jsonPath("$.data.totalChunks").value(3))
+            .andReturn();
+
+        String newSessionId = extractString(newSessionResult.getResponse().getContentAsString(), "sessionId");
+        org.junit.jupiter.api.Assertions.assertNotEquals(oldSessionId, newSessionId);
     }
 
     /**
@@ -950,6 +1065,31 @@ class MaterialApiTest {
     /** 生成唯一名称，避免测试间数据冲突 */
     private String uniqueName(String prefix) {
         return prefix + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    }
+
+    /** 使用旧前端风格的超长 clientUploadId 创建上传会话，验证服务端会归一化为数据库安全长度。 */
+    private void assertLongNameUploadSessionCreated(String token, String originalName, String sourceType) throws Exception {
+        String clientUploadId = ("web-" + originalName + "-1048577-1710000000000-1048576-" + originalName)
+            .replaceAll("[^A-Za-z0-9._-]", "_");
+
+        mockMvc.perform(post("/api/materials/upload-sessions")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "clientUploadId": "%s",
+                      "title": "%s",
+                      "originalName": "%s",
+                      "sourceType": "%s",
+                      "sourceUrl": "",
+                      "fileSize": 1048577,
+                      "chunkSize": 1048576
+                    }
+                    """.formatted(clientUploadId, originalName, originalName, sourceType)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.status").value("UPLOADING"))
+            .andExpect(jsonPath("$.data.clientUploadId", org.hamcrest.Matchers.hasLength(64)));
     }
 
     /** 从 JSON 响应体中提取指定字符串字段 */

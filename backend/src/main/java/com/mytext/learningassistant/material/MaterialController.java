@@ -134,7 +134,7 @@ public class MaterialController {
     /**
      * 创建分片上传会话。
      *
-     * <p>大文件（如超过 50MB）需要使用分片上传方式：前端先调用此接口创建会话获取 sessionId，
+     * <p>持久资料使用分片上传方式：前端先调用此接口创建会话获取 sessionId，
      * 然后通过 {@code uploadChunk} 接口逐个上传分片，所有分片上传完成后系统自动合并并解析。
      *
      * <p>同一个 clientUploadId 的重复请求具有幂等性（返回已有会话）。
@@ -258,6 +258,26 @@ public class MaterialController {
         @PathVariable("id") long id
     ) {
         return ApiResponse.ok(materialService.pages(currentUserId, id));
+    }
+
+    /**
+     * 获取指定页面的可选中文本层。
+     *
+     * <p>阅读器会把这些文本块覆盖到页面视觉层上，用于扫描 PDF、Office 文档等资料的原位划词。
+     * 接口按页懒加载，避免大文件一次返回全部页面文本层导致前端卡顿。
+     *
+     * @param currentUserId 当前登录用户 ID
+     * @param id            资料 ID
+     * @param pageNo        页码，从 1 开始
+     * @return 当前页面的文本层块列表
+     */
+    @GetMapping("/{id}/pages/{pageNo}/text-layer")
+    public ApiResponse<List<MaterialPageTextBlockResponse>> pageTextLayer(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("id") long id,
+        @PathVariable("pageNo") int pageNo
+    ) {
+        return ApiResponse.ok(materialService.pageTextLayer(currentUserId, id, pageNo));
     }
 
     /**

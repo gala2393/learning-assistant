@@ -2,7 +2,7 @@ import { useRef, useEffect, useState } from 'react'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
-import { Bot, FileText, Lock, Paperclip, Send, X } from 'lucide-react'
+import { BookOpen, Bot, FileText, Lock, Paperclip, Send, X } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
 import type { ChatImagePayload, TemporaryMaterial } from '@/types'
 import { ImagePreviewDialog, type PreviewImage } from './ImagePreviewDialog'
@@ -62,6 +62,7 @@ type TemporaryAttachmentItem = SelectedFileListItem & {
  * @property centered - 是否居中布局（ChatPage 首页空状态使用大卡片样式）
  * @property usageLabel - 使用量提示文字（如"今日剩余：5/10"）
  * @property modelLabel - 当前模型名称（显示在切换按钮上）
+ * @property boundMaterialLabel - 资料问答当前绑定资料名，显示在输入框上方作为轻量上下文提示
  * @property customModelEnabled - 是否启用了自定义模型
  * @property onOpenModelSettings - 打开模型设置弹窗的回调
  * @property images - 待发送的图片列表（Base64 DataURL 格式）
@@ -93,6 +94,7 @@ interface ChatComposerProps {
   centered?: boolean
   usageLabel?: string
   modelLabel?: string
+  boundMaterialLabel?: string
   customModelEnabled?: boolean
   onOpenModelSettings?: () => void
   images?: ChatImagePayload[]
@@ -114,7 +116,7 @@ interface ChatComposerProps {
 
 export function ChatComposer({
   value, onChange, onSubmit, loading, mode, quickPrompts, disabled, disabledHint,
-  centered, usageLabel, modelLabel, customModelEnabled, onOpenModelSettings,
+  centered, usageLabel, modelLabel, boundMaterialLabel, customModelEnabled, onOpenModelSettings,
   images = [], onImagesChange, onOpenUploadMaterial, onUploadMaterialFile, onUploadMaterialFiles, onUploadTemporaryMaterial, onUploadTemporaryMaterials,
   temporaryMaterialUploading, temporaryMaterial, temporaryUploadFile, temporaryUploadProgress, temporaryUploadFiles = [], temporaryUploadError, onClearTemporaryMaterial, onRemoveTemporaryMaterialFile,
 }: ChatComposerProps) {
@@ -140,7 +142,7 @@ export function ChatComposer({
   /** 附件按钮的提示文字（通用模式和资料模式不同） */
   const attachmentTooltip = mode === 'GENERAL'
     ? '可上传图片和文件；智能问答临时文件最大 500MB'
-    : '可上传图片和文件；资料文件最大 500MB'
+    : '可上传图片和文件；资料文件最大 2GB'
   /** 临时文件附件列表（用于在输入框上方显示已上传的临时文件卡片） */
   const temporaryFileItems: TemporaryAttachmentItem[] = temporaryUploadFiles.length > 0
     ? temporaryUploadFiles
@@ -309,6 +311,16 @@ export function ChatComposer({
             {attachmentError}
           </div>
         )}
+        {/* ---- 资料问答绑定提示：贴近输入框，用户提问前能看见当前上下文。 ---- */}
+        {mode === 'MATERIAL' && boundMaterialLabel && (
+          <div className="flex max-w-full items-center gap-2 rounded-full border border-cyan-100 bg-cyan-50/70 px-3 py-1.5 text-xs text-cyan-900 shadow-sm dark:border-cyan-900/50 dark:bg-cyan-950/25 dark:text-cyan-100">
+            <BookOpen className="h-3.5 w-3.5 shrink-0" />
+            <span className="shrink-0 font-medium">已绑定</span>
+            <span className="min-w-0 truncate text-cyan-800/90 dark:text-cyan-100/90" title={boundMaterialLabel}>
+              {boundMaterialLabel}
+            </span>
+          </div>
+        )}
 
         {/* ---- 输入区域主体 ---- */}
         <div
@@ -410,10 +422,10 @@ export function ChatComposer({
           )}
         </div>
 
-        {/* ---- 底部提示文字（AI 免责声明 + 使用量） ---- */}
-        <div className="flex min-h-4 items-center justify-center gap-2 text-[11px] text-slate-400 dark:text-slate-500">
+        {/* ---- 底部提示文字（AI 免责声明 + 使用量；手机端也显示次数，空间不足时自动换行） ---- */}
+        <div className="flex min-h-4 flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-center text-[11px] text-slate-400 dark:text-slate-500">
           <span>内容由 AI 生成，请仔细甄别</span>
-          {usageLabel && <span className="hidden sm:inline">· {usageLabel}</span>}
+          {usageLabel && <span className="whitespace-nowrap">· {usageLabel}</span>}
         </div>
       </div>
 

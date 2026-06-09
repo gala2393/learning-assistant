@@ -13,6 +13,7 @@
  * 3. 删除操作通过 useDeleteFavorite() 发送到后端
  */
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useFavorites, useDeleteFavorite } from '@/api/favorites'
 import { useDebounce } from '@/hooks/useDebounce'
@@ -28,10 +29,11 @@ import { formatDate, truncate } from '@/lib/utils'
 import { useAuth } from '@/context/AuthContext'
 import { useToast } from '@/components/ui/toast'
 import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
-import { Search, Star, Trash2, Eye } from 'lucide-react'
+import { Search, Star, Trash2, Eye, MessageSquare } from 'lucide-react'
 import type { FavoriteItem } from '@/types'
 
 export function FavoritesPage() {
+  const navigate = useNavigate()
   const { isAuthenticated } = useAuth()
   const { showToast } = useToast()
   // 获取收藏列表数据和加载状态
@@ -57,6 +59,20 @@ export function FavoritesPage() {
         f.answer.toLowerCase().includes(debouncedKeyword.toLowerCase())
       )
     : items
+
+  /**
+   * 回到收藏对应的历史对话。
+   * 收藏项的 questionId 指向被收藏的具体问答记录；conversationId 只表示所属会话，
+   * 不作为主跳转 ID，避免同一会话内收藏较早问答时恢复到错误位置。
+   */
+  const openFavoriteConversation = (item: FavoriteItem) => {
+    if (!isAuthenticated) {
+      showToast(LOGIN_REQUIRED_MESSAGE, 2000)
+      redirectToLogin()
+      return
+    }
+    navigate(`/workspace/chat?historyId=${encodeURIComponent(String(item.questionId))}`)
+  }
 
   // 确认删除收藏的回调
   const handleDeleteConfirm = () => {
@@ -110,7 +126,11 @@ export function FavoritesPage() {
           )}
           {/* 遍历渲染每条收藏卡片 */}
           {filtered.map((item) => (
-            <Card key={item.id} className="hover:shadow-sm transition-shadow">
+            <Card
+              key={item.id}
+              className="cursor-pointer hover:shadow-sm transition-shadow"
+              onClick={() => openFavoriteConversation(item)}
+            >
               <CardContent className="py-3 px-4 space-y-2">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-1.5 min-w-0">
@@ -121,11 +141,17 @@ export function FavoritesPage() {
                   {/* 操作按钮：查看详情、取消收藏 */}
                   <div className="flex items-center gap-1 shrink-0">
                     <Button variant="ghost" size="icon" className="h-6 w-6"
-                      onClick={() => setViewTarget(item)}>
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setViewTarget(item)
+                      }}>
                       <Eye className="h-3.5 w-3.5" />
                     </Button>
                     <Button variant="ghost" size="icon" className="h-6 w-6"
-                      onClick={() => setDeleteTarget(item.id)}>
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setDeleteTarget(item.id)
+                      }}>
                       <Trash2 className="h-3.5 w-3.5 text-destructive" />
                     </Button>
                   </div>
@@ -173,6 +199,16 @@ export function FavoritesPage() {
                 </div>
               )}
               <p className="text-[10px] text-muted-foreground">{formatDate(viewTarget.createdAt)}</p>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setViewTarget(null)}>关闭</Button>
+                <Button
+                  className="bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-slate-200"
+                  onClick={() => openFavoriteConversation(viewTarget)}
+                >
+                  <MessageSquare className="mr-1.5 h-4 w-4" />
+                  回到对话
+                </Button>
+              </DialogFooter>
             </div>
           )}
         </DialogContent>

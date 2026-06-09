@@ -17,7 +17,7 @@
  *
  * 【SSE 流式回答流程】
  * 1. 用户输入问题 -> 创建用户消息 + AI 占位消息（thinking 状态）
- * 2. 调用 chatStream() 发起 SSE 连接
+ * 2. 调用 reader-ask-session 中的模块级流式任务发起 SSE 连接
  * 3. onStatus: 收到状态更新（如"正在检索"）-> 显示状态文字
  * 4. onChunk: 收到文本片段 -> 累积到缓冲区 -> 逐字更新 UI
  * 5. onSources: 收到检索来源 -> 存入 sourcesRef
@@ -25,21 +25,32 @@
  * 7. onError: 出错 -> 显示错误信息
  * 8. 完成后刷新使用额度缓存
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { chatStream, suggestQuestions, useRagUsage } from '@/api/rag'
-import { ChatThread, type ChatMessage } from './ChatThread'
-import { Send, Bot, ArrowRight, MousePointer, Sparkles, Trash2 } from 'lucide-react'
+import { getHistory, suggestQuestions, useLatestMaterialHistory, useMaterialHistory, useRagUsage } from '@/api/rag'
+import { ChatThread } from './ChatThread'
+import { Send, Bot, ArrowRight, MousePointer, Sparkles, Trash2, History, Plus, MessagesSquare, Loader2, RefreshCw } from 'lucide-react'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
-import { queryClient } from '@/lib/query-client'
 import { cn, truncate } from '@/lib/utils'
 import { useAuth } from '@/context/AuthContext'
 import { useToast } from '@/components/ui/toast'
 import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
-import type { Material, MaterialChunk, RagSource } from '@/types'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  ensureReaderAskMaterial,
+  getReaderAskSnapshot,
+  restoreReaderAskHistory,
+  startNewReaderAskConversation,
+  startReaderAskStream,
+  subscribeReaderAsk,
+  updateReaderAskQuestion,
+  updateReaderAskSelection,
+} from '@/lib/reader-ask-session'
+import type { HistoryItem, Material, MaterialChunk, RagSource } from '@/types'
 
 /**
  * ReaderAsk 组件属性
@@ -58,12 +69,9 @@ interface ReaderAskProps {
   chunks?: MaterialChunk[]
   currentPageNo?: number | null
   currentPageChunkIds?: Array<string | number>
-  onNavigateToChunk?: (chunkIndex: number, options?: { view?: 'smart' | 'original' }) => void
+  onNavigateToChunk?: (chunkIndex: number, options?: { view?: 'smart' | 'original'; pageNo?: number | null }) => void
   className?: string
 }
-
-/** 消息类型别名（复用 ChatMessage） */
-type ReaderMessage = ChatMessage
 
 /**
  * buildContextLabel -- 构建上下文标签文字
@@ -93,38 +101,48 @@ export function ReaderAsk({
   // === Refs ===
   /** 输入框引用（用于聚焦控制） */
   const questionRef = useRef<HTMLTextAreaElement>(null)
-  /** AbortController 引用（用于取消当前流式请求） */
-  const abortRef = useRef<AbortController | null>(null)
-  /**
-   * 流式回答缓冲区
-   * 在 SSE 流式接收过程中，delta 文本片段逐步累积到此引用中。
-   * 使用 ref 而非 state 避免频繁重渲染。
-   */
-  const answerBufferRef = useRef('')
   /** 用户选中文本的引用版本（不触发渲染，提交时使用） */
   const selectionRef = useRef<string | null>(null)
-  /** 各消息的检索来源缓存（ref 版本，避免闭包问题） */
-  const sourcesRef = useRef<Record<string, RagSource[]>>({})
 
-  // === 状态 ===
-  /** 用户输入的问题文本 */
-  const [question, setQuestion] = useState('')
-  /** AI 是否正在回答（流式进行中） */
-  const [loading, setLoading] = useState(false)
-  /** 用户在文档中选中的文本（5-500 字符才生效） */
-  const [selectedText, setSelectedText] = useState<string | null>(null)
+  /**
+   * 边读边问核心状态来自模块级 store。
+   * 普通路由切换会卸载 ReaderAsk，但 store 不会销毁，因此 SSE 会继续接收并更新消息；
+   * 重新进入阅读页后，这里会重新订阅并恢复同一份会话快照。
+   */
+  const askSession = useSyncExternalStore(
+    subscribeReaderAsk,
+    getReaderAskSnapshot,
+    getReaderAskSnapshot,
+  )
+  const {
+    question,
+    loading,
+    selectedText,
+    messages,
+    sourcesByMessageId,
+    errorByMessageId,
+    conversationId,
+    skipAutoRestoreForMaterialId,
+  } = askSession
+
   /** AI 生成的推荐问题列表 */
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([])
-  /** 对话消息列表 */
-  const [messages, setMessages] = useState<ReaderMessage[]>([])
-  /** 每条 AI 消息对应的检索来源映射（消息 ID -> 来源列表） */
-  const [sourcesByMessageId, setSourcesByMessageId] = useState<Record<string, RagSource[]>>({})
-  /** 每条 AI 消息对应的错误信息映射（消息 ID -> 错误文字） */
-  const [errorByMessageId, setErrorByMessageId] = useState<Record<string, string>>({})
+  /** 当前是否打开资料历史会话弹窗。 */
+  const [historyDialogOpen, setHistoryDialogOpen] = useState(false)
+  /** 点击历史记录后异步加载详情；加载期间禁用重复点击，避免多次恢复互相覆盖。 */
+  const [loadingHistoryId, setLoadingHistoryId] = useState<string | null>(null)
 
   // === 数据获取 ===
   /** 获取今日使用额度 */
   const { data: ragUsage } = useRagUsage()
+  /** 当前资料最近一段问答历史，阅读器打开资料时用于自动恢复。 */
+  const { data: latestMaterialHistory } = useLatestMaterialHistory(isAuthenticated ? material?.id || null : null)
+  /** 当前资料的历史会话列表，供“历史”弹窗选择。 */
+  const {
+    data: materialHistoryItems = [],
+    isFetching: materialHistoryFetching,
+    refetch: refetchMaterialHistory,
+  } = useMaterialHistory(historyDialogOpen && isAuthenticated && material?.id ? material.id : null)
   const usageLabel = ragUsage
     ? ragUsage.unlimited
       ? '今日问答：不限'
@@ -148,40 +166,37 @@ export function ReaderAsk({
     [selectedText, currentPageNo],
   )
   /** 片段 ID -> 片段索引的映射（用于点击来源时跳转） */
-  const chunkIndexById = useMemo(() => {
-    const map = new Map<string, number>()
-    ;(chunks || []).forEach((candidate, index) => {
-      // 来源里的 chunkId 可能是 number 或 string，统一转 string 做稳定匹配。
-      map.set(String(candidate.id), index)
-    })
-    return map
-  }, [chunks])
+  const chunkIndexById = useMemo(() => buildChunkIndexById(chunks || []), [chunks])
 
   // === 副作用 ===
 
+  /** 切换资料时同步 store 的资料归属；同一资料重新挂载不会清空或中断正在生成的回答。 */
+  useEffect(() => {
+    if (!material?.id) return
+    ensureReaderAskMaterial(material?.id || null)
+    selectionRef.current = null
+    setLoadingHistoryId(null)
+  }, [material?.id])
+
   /**
-   * 监听鼠标松开事件，捕获用户选中的文本
-   * 选中文字长度在 5~500 字符之间时生效
-   * 这样用户可以在文档中选中一段文字，然后在问答面板中围绕它提问
+   * 历史弹窗打开后刷新当前资料的历史列表。
+   * 放在 effect 中执行，确保 useMaterialHistory 已经拿到“弹窗打开 + 当前资料 ID”的 queryKey，
+   * 避免按钮点击瞬间调用到弹窗打开前的旧 refetch。
    */
   useEffect(() => {
-    const handleMouseUp = () => {
-      const sel = window.getSelection()
-      const text = sel?.toString().trim()
-      if (text && text.length > 5 && text.length < 500) {
-        // 只接收短选区，避免整页误选导致 prompt 过长或覆盖用户当前问题。
-        setSelectedText(text)
-        selectionRef.current = text
-      }
-    }
-    document.addEventListener('mouseup', handleMouseUp)
-    return () => document.removeEventListener('mouseup', handleMouseUp)
-  }, [])
+    if (!historyDialogOpen || !material?.id || !isAuthenticated) return
+    refetchMaterialHistory()
+  }, [historyDialogOpen, isAuthenticated, material?.id, refetchMaterialHistory])
 
-  /** 组件卸载时取消未完成的流式请求 */
+  /**
+   * 自动恢复当前资料最近一段问答。
+   * 只在没有本地消息且用户没有主动开启新对话时执行，避免覆盖正在进行的新会话。
+   */
   useEffect(() => {
-    return () => abortRef.current?.abort()
-  }, [])
+    if (!material?.id || !latestMaterialHistory || messages.length > 0) return
+    if (skipAutoRestoreForMaterialId === material.id) return
+    restoreHistory(latestMaterialHistory)
+  }, [latestMaterialHistory, material?.id, messages.length, skipAutoRestoreForMaterialId])
 
   /**
    * 当资料或片段变化时，请求推荐问题
@@ -204,18 +219,49 @@ export function ReaderAsk({
   // === 核心交互逻辑 ===
 
   /**
-   * 点击检索来源时，跳转到对应的片段
-   * 通过 chunkIndexById 查找片段索引，然后调用 onNavigateToChunk 回调
+   * 点击检索来源时定位阅读区。
+   * 优先按 chunkId 精确跳转；PDF/旧数据里 chunkId 可能不在当前列表，则按 pageNo 和摘录文本兜底。
    */
   const openSource = useCallback(
     (source: RagSource) => {
-      const idx = chunkIndexById.get(String(source.chunkId))
+      const idx = locateSourceChunkIndex(source, chunks || [], chunkIndexById)
       if (idx !== undefined) {
-        onNavigateToChunk?.(idx, { view: 'smart' })
+        onNavigateToChunk?.(idx, { pageNo: source.pageNo || null })
       }
     },
-    [chunkIndexById, onNavigateToChunk],
+    [chunkIndexById, chunks, onNavigateToChunk],
   )
+
+  /** 将某段历史会话恢复到问答面板，并记录 conversationId 供后续追问续接。 */
+  function restoreHistory(history: HistoryItem) {
+    restoreReaderAskHistory(history, material?.id || null)
+    selectionRef.current = null
+  }
+
+  /** 开启当前资料的新问答会话，不再沿用最近历史的 conversationId。 */
+  const startNewConversation = () => {
+    startNewReaderAskConversation(material?.id || null)
+    selectionRef.current = null
+  }
+
+  /**
+   * 点击历史记录后恢复到边读边问面板。
+   * 先用列表项立即回填一轮问答，保证用户有即时反馈；再请求详情补全同一 conversationId 下的多轮消息。
+   */
+  const selectHistory = async (item: HistoryItem) => {
+    restoreHistory(item)
+    setLoadingHistoryId(item.id)
+    try {
+      const detail = await getHistory(String(item.id))
+      restoreHistory(detail)
+      setHistoryDialogOpen(false)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '历史详情加载失败，已恢复列表中的最近一轮对话', 2000)
+      setHistoryDialogOpen(false)
+    } finally {
+      setLoadingHistoryId(null)
+    }
+  }
 
   /**
    * submitQuestion -- 提交问题的核心逻辑（SSE 流式请求）
@@ -225,7 +271,7 @@ export function ReaderAsk({
    * 2. 生成唯一消息 ID
    * 3. 构建对话历史（最近 8 轮，排除错误和思考中的消息）
    * 4. 创建用户消息 + AI 占位消息（thinking 状态）
-   * 5. 调用 chatStream() 发起 SSE 连接
+   * 5. 调用模块级 reader-ask-session 发起 SSE 连接
    * 6. 通过回调逐步更新消息：
    *    - onStatus: 显示状态文字（如"正在检索相关资料..."）
    *    - onChunk: 累积文本片段到缓冲区并更新 UI
@@ -238,132 +284,22 @@ export function ReaderAsk({
     if (!requireLogin()) return
     const q = rawQuestion.trim()
     if (!q || loading || !material) return
-
-    // 生成唯一的消息 ID（时间戳 + 随机字符串）
-    const userId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const assistantId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-    // 构建对话历史（最近 8 轮，排除错误和思考中的消息）
-    const history = messages
-      .filter((msg) => !msg.thinking && !msg.error)
-      .slice(-8)
-      .map((msg) => ({
-        role: msg.role,
-        content: msg.text,
-      }))
-
-    setLoading(true)
-    setQuestion('')
-    // 添加用户消息和 AI 思考中占位消息
-    setMessages((prev) => [
-      ...prev,
-      { id: userId, role: 'user', text: q },
-      { id: assistantId, role: 'assistant', text: '', thinking: true },
-    ])
-    // 初始化来源缓存
-    sourcesRef.current = { ...sourcesRef.current, [assistantId]: [] }
-    setSourcesByMessageId((prev) => ({ ...prev, [assistantId]: [] }))
-    setErrorByMessageId((prev) => ({ ...prev, [assistantId]: '' }))
-    answerBufferRef.current = ''
-    // 新问题发起前取消旧流，防止旧 SSE 回调继续写入新的 assistant 消息。
-    abortRef.current?.abort()
-
-    // 发起 SSE 流式请求
-    abortRef.current = chatStream(
-      {
-        question: q,
-        mode: 'MATERIAL',
-        materialId: material.id,
-        chunkId: chunk?.id,
-        currentPageNo: currentPageNo || undefined,
-        currentPageChunkIds: currentPageChunkIds && currentPageChunkIds.length > 0 ? currentPageChunkIds : undefined,
-        selectedText: selection || undefined,
-        answerStyle: 'HOMEWORK',  // 作业风格回答
-        history,
-      },
-      {
-        /**
-         * onStatus: 收到状态更新（如"正在检索"、"正在准备回答"）
-         * 仅在还没有实际内容时显示，避免覆盖已有的回答文本
-         */
-        onStatus: (status) => {
-          if (answerBufferRef.current.trim()) return  // 已有内容时忽略状态消息
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantId
-                ? { ...msg, text: streamStatusText(status), thinking: false }
-                : msg,
-            ),
-          )
-        },
-        /**
-         * onChunk: 收到流式文本片段（delta）
-         * 累积到缓冲区，然后更新 AI 消息的文本
-         * 这是 SSE 流式输出的核心回调，每秒可能触发多次
-         */
-        onChunk: (delta) => {
-          answerBufferRef.current += delta
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantId
-                ? { ...msg, text: answerBufferRef.current, thinking: false }
-                : msg,
-            ),
-          )
-        },
-        /** onSources: 收到 RAG 检索来源 */
-        onSources: (sources) => {
-          // 来源先写 ref，再写 state；onDone 闭包读取 ref，避免拿到过期 sources。
-          sourcesRef.current = { ...sourcesRef.current, [assistantId]: sources }
-          setSourcesByMessageId((prev) => ({ ...prev, [assistantId]: sources }))
-        },
-        /**
-         * onDone: 流式回答完成
-         * 设置最终的完整回答和来源，清除 loading 状态
-         * 刷新使用额度缓存
-         */
-        onDone: (result) => {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantId
-                ? {
-                    ...msg,
-                    text: result.answer || answerBufferRef.current,
-                    thinking: false,
-                    sources: sourcesRef.current[assistantId] || [],
-                  }
-                : msg,
-            ),
-          )
-          setLoading(false)
-          // 刷新使用额度缓存
-          queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
-          queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
-        },
-        /** onError: 请求出错时显示错误信息 */
-        onError: (msg) => {
-          setErrorByMessageId((prev) => ({ ...prev, [assistantId]: msg }))
-          setMessages((prev) =>
-            prev.map((item) =>
-              item.id === assistantId
-                ? { ...item, thinking: false, error: msg, text: '' }
-                : item,
-            ),
-          )
-          setLoading(false)
-          queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
-          queryClient.invalidateQueries({ queryKey: ['admin', 'usage-records'] })
-        },
-      },
-    )
-  }, [chunk?.id, currentPageChunkIds, currentPageNo, loading, material, messages, requireLogin])
+    startReaderAskStream({
+      question: q,
+      materialId: material.id,
+      chunkId: chunk?.id,
+      currentPageNo,
+      currentPageChunkIds,
+      selectedText: selection,
+    })
+  }, [chunk?.id, currentPageChunkIds, currentPageNo, loading, material, requireLogin])
 
   /** 提交问题（组合选中文本一起发送） */
   const handleSubmit = () => {
     const selection = selectionRef.current ?? selectedText
     submitQuestion(question, selection)
-    setSelectedText(null)
     selectionRef.current = null
+    updateReaderAskSelection(null)
   }
 
   /** 键盘快捷键：Enter 提交（Shift+Enter 换行） */
@@ -378,68 +314,55 @@ export function ReaderAsk({
   return (
     <div className={cn('flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-t bg-muted/10 lg:border-l lg:border-t-0', className)}>
 
-      {/* ---- 面板头部：标题 + 使用额度 ---- */}
-      <div className="space-y-2 border-b p-3">
+      {/* ---- 面板头部：资料名、会话状态、历史入口和使用额度，压缩为紧凑信息区。 ---- */}
+      <div className="space-y-1.5 border-b px-3 py-2">
         <div className="flex items-center justify-between gap-2">
-          <p className="flex items-center gap-1 text-xs font-semibold text-muted-foreground">
-            <Bot className="h-3.5 w-3.5" /> AI 问答
-          </p>
+          <div className="min-w-0">
+            <p className="flex items-center gap-1 text-xs font-semibold text-muted-foreground">
+              <Bot className="h-3.5 w-3.5" /> AI 问答
+            </p>
+            <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+              {material?.title || material?.originalName || '未选择资料'}
+            </p>
+          </div>
           {usageLabel && (
             <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-[10px] font-medium">
               {usageLabel}
             </Badge>
           )}
         </div>
-        {/* 上下文标签（"已选中文本 · 当前页 P3"） */}
-        {contextLabel && (
-          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <div className="flex items-center justify-between gap-2">
+          <Badge variant="outline" className="max-w-[52%] truncate text-[10px]">
+            <MessagesSquare className="mr-1 h-3 w-3" />
+            {conversationId ? '已恢复资料会话' : '新对话'}
+          </Badge>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={startNewConversation} disabled={!material || loading}>
+              <Plus className="mr-1 h-3 w-3" /> 新对话
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => setHistoryDialogOpen(true)}
+              disabled={!material}
+            >
+              <History className="mr-1 h-3 w-3" /> 历史
+            </Button>
+          </div>
+        </div>
+        {/* 当前上下文只保留一行摘要，避免把聊天区顶得过低。 */}
+        {(contextLabel || chunk) && (
+          <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+            {contextLabel && (
             <Badge variant="secondary" className="text-[10px]">
               <Sparkles className="mr-1 h-3 w-3" /> {contextLabel}
             </Badge>
+            )}
+            {chunk && <span className="min-w-0 truncate">{truncate(chunk.chunkText, 56)}</span>}
           </div>
         )}
       </div>
-
-      {/* ---- 当前片段上下文预览 ---- */}
-      {chunk && (
-        <div className="border-b px-3 py-2">
-          <Badge variant="outline" className="mb-1 text-[10px]">当前上下文</Badge>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            {truncate(chunk.chunkText, 70)}
-          </p>
-        </div>
-      )}
-
-      {/* ---- 选中文本面板（用户在文档中选中文字后显示） ---- */}
-      {selectedText && (
-        <div className="space-y-2 border-b bg-primary/5 px-3 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <Badge variant="secondary" className="text-[10px]">
-              <MousePointer className="mr-0.5 h-3 w-3" /> 选中文本
-            </Badge>
-            <button
-              className="text-[10px] text-muted-foreground hover:text-foreground"
-              onClick={() => {
-                setSelectedText(null)
-                selectionRef.current = null
-              }}
-            >
-              清除
-            </button>
-          </div>
-          <p className="line-clamp-2 rounded-md bg-background/70 px-2 py-1.5 text-[11px] leading-relaxed text-foreground/80">
-            {truncate(selectedText, 90)}
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 w-full text-xs"
-            onClick={() => questionRef.current?.focus()}
-          >
-            在下方提问
-          </Button>
-        </div>
-      )}
 
       {/* ---- 对话消息流（复用 ChatThread 组件） ---- */}
       <div className="min-h-0 flex-1 overflow-hidden">
@@ -476,10 +399,26 @@ export function ReaderAsk({
 
       {/* ---- 底部输入区域 ---- */}
       <div className="shrink-0 space-y-2 border-t p-3">
+        {/* 选中文本短提示条：完整文本仍保存在状态里提交给后端，这里只展示摘要和清除入口。 */}
+        {selectedText && (
+          <div className="flex items-center gap-2 rounded-md border border-cyan-100 bg-cyan-50/70 px-2 py-1.5 text-[11px] text-cyan-900 dark:border-cyan-900/50 dark:bg-cyan-950/30 dark:text-cyan-100">
+            <MousePointer className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{truncate(selectedText, 96)}</span>
+            <button
+              className="shrink-0 text-[10px] text-cyan-700 hover:text-cyan-950 dark:text-cyan-200 dark:hover:text-white"
+              onClick={() => {
+                selectionRef.current = null
+                updateReaderAskSelection(null)
+              }}
+            >
+              清除
+            </button>
+          </div>
+        )}
         <Textarea
           ref={questionRef}
           value={question}
-          onChange={(e) => setQuestion(e.target.value)}
+          onChange={(e) => updateReaderAskQuestion(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={material
             ? usageExhausted
@@ -507,17 +446,10 @@ export function ReaderAsk({
           <Button
             variant="outline"
             size="sm"
-            onClick={() => {
-              setMessages([])
-              setSourcesByMessageId({})
-              setErrorByMessageId({})
-              sourcesRef.current = {}
-              setSelectedText(null)
-              selectionRef.current = null
-            }}
+            onClick={startNewConversation}
             disabled={messages.length === 0 && !selectedText}
           >
-            <Trash2 className="mr-1 h-3.5 w-3.5" /> 清空
+            <Trash2 className="mr-1 h-3.5 w-3.5" /> 新对话
           </Button>
         </div>
         {/* "在聊天中继续"按钮：跳转到独立聊天页面，携带当前资料和片段上下文 */}
@@ -536,17 +468,105 @@ export function ReaderAsk({
           在聊天中继续 <ArrowRight className="ml-1 h-3.5 w-3.5" />
         </Button>
       </div>
+      <Dialog open={historyDialogOpen} onOpenChange={setHistoryDialogOpen}>
+        <DialogContent className="max-h-[76vh] max-w-md overflow-hidden p-0">
+          <DialogHeader className="border-b bg-slate-50 px-5 py-4 dark:border-slate-800 dark:bg-slate-950/60">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <History className="h-4 w-4" />
+              资料问答历史
+            </DialogTitle>
+            <DialogDescription>
+              选择一段历史会话继续追问，或关闭后使用新对话。
+            </DialogDescription>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3 h-8 w-fit text-xs"
+              onClick={() => refetchMaterialHistory()}
+              disabled={materialHistoryFetching}
+            >
+              {materialHistoryFetching ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}
+              刷新历史
+            </Button>
+          </DialogHeader>
+          <ScrollArea className="max-h-[56vh]">
+            <div className="space-y-2 p-4">
+              {materialHistoryFetching && materialHistoryItems.length === 0 ? (
+                <p className="rounded-lg border border-dashed px-3 py-8 text-center text-xs text-muted-foreground">
+                  正在加载历史记录...
+                </p>
+              ) : materialHistoryItems.length === 0 ? (
+                <p className="rounded-lg border border-dashed px-3 py-8 text-center text-xs text-muted-foreground">
+                  当前资料还没有历史对话
+                </p>
+              ) : materialHistoryItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-left transition-colors hover:border-cyan-200 hover:bg-cyan-50/50 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-cyan-900 dark:hover:bg-cyan-950/30"
+                  onClick={() => selectHistory(item)}
+                  disabled={!!loadingHistoryId}
+                >
+                  <span className="flex items-center gap-2">
+                    {loadingHistoryId === item.id && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-cyan-600" />}
+                    <span className="block min-w-0 truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+                      {item.title || item.question}
+                    </span>
+                  </span>
+                  <span className="mt-1 block line-clamp-2 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                    {item.question}
+                  </span>
+                  <span className="mt-1 block text-[11px] text-slate-400">{item.createdAt}</span>
+                </button>
+              ))}
+            </div>
+          </ScrollArea>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
 
+/** 构建来源定位用的片段 ID 索引，统一转成字符串以兼容后端 number/string 混用。 */
+function buildChunkIndexById(chunks: MaterialChunk[]) {
+  const map = new Map<string, number>()
+  chunks.forEach((candidate, index) => {
+    map.set(String(candidate.id), index)
+  })
+  return map
+}
+
 /**
- * streamStatusText -- 将流式请求的状态阶段转换为中文提示文字
- * 用于在 AI 回答尚未开始时显示"正在检索相关资料..."等状态信息
+ * 根据来源信息定位片段索引。
+ * PDF 来源点击失败通常不是没有来源，而是来源只可靠带了页码/摘录；这里用多级兜底保证能跳到对应页。
  */
-function streamStatusText(status: { stage?: string; message?: string }) {
-  if (status.message?.trim()) return status.message.trim()
-  if (status.stage === 'searching') return '正在检索相关资料...'
-  if (status.stage === 'thinking') return '正在准备回答...'
-  return '正在准备回答...'
+function locateSourceChunkIndex(source: RagSource, chunks: MaterialChunk[], chunkIndexById: Map<string, number>) {
+  const byId = chunkIndexById.get(String(source.chunkId))
+  if (byId !== undefined) return byId
+
+  const pageNo = Number(source.pageNo)
+  if (Number.isFinite(pageNo) && pageNo > 0) {
+    const samePage = chunks
+      .map((chunk, index) => ({ chunk, index }))
+      .filter(({ chunk }) => Number(chunk.pageNo) === pageNo)
+    const byExcerpt = samePage.find(({ chunk }) => sourceMatchesChunkText(source, chunk))
+    if (byExcerpt) return byExcerpt.index
+    if (samePage[0]) return samePage[0].index
+  }
+
+  const byExcerpt = chunks.findIndex((chunk) => sourceMatchesChunkText(source, chunk))
+  return byExcerpt >= 0 ? byExcerpt : undefined
+}
+
+/** 用来源摘录匹配片段正文，处理空白、换行和 OCR 文本差异。 */
+function sourceMatchesChunkText(source: RagSource, chunk: MaterialChunk) {
+  const excerpt = compactSourceText(source.excerpt || '')
+  if (excerpt.length < 16) return false
+  const text = compactSourceText([chunk.chunkText, chunk.excerpt, chunk.summary].filter(Boolean).join('\n'))
+  if (!text) return false
+  return text.includes(excerpt.slice(0, Math.min(120, excerpt.length)))
+}
+
+function compactSourceText(value: string) {
+  return value.replace(/\s+/g, '').toLowerCase()
 }

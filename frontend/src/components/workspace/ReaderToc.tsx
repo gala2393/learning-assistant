@@ -78,7 +78,7 @@ export function ReaderToc({
   return (
     <div className={cn('flex h-full min-h-0 w-full shrink-0 flex-col border-b border-slate-200 bg-white lg:h-full lg:border-b-0 lg:border-r dark:border-slate-800 dark:bg-[#171a21]', className)}>
       {/* ---- 资料列表区域（上半部分） ---- */}
-      <div className="border-b border-slate-200 px-4 py-4 dark:border-slate-800">
+      <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
         <div className="mb-2 flex items-center justify-between">
           <p className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
             <BookOpen className="h-3.5 w-3.5" />
@@ -86,8 +86,8 @@ export function ReaderToc({
           </p>
           <span className="text-[11px] text-slate-400">{materials.length} 份</span>
         </div>
-        <ScrollArea className="h-24 lg:h-28">
-          <div className="space-y-1 pr-1">
+        <ScrollArea className="h-28">
+          <div className="grid gap-1 pr-1 sm:grid-cols-2">
             {materials.map((m) => (
               <Button
                 key={m.id}
@@ -111,7 +111,7 @@ export function ReaderToc({
       </div>
 
       {/* ---- 片段列表区域（下半部分，4 列网格布局） ---- */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-4">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-3">
         <div className="mb-3 flex items-center justify-between">
           <p className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
             <Layers3 className="h-3.5 w-3.5" />
@@ -148,7 +148,7 @@ export function ReaderToc({
           </div>
         )}
         <ScrollArea className="flex-1">
-          <div className="grid grid-cols-4 gap-1.5 pr-1">
+          <div className="grid grid-cols-4 gap-1.5 pr-1 sm:grid-cols-6 md:grid-cols-8">
             {chunkWindow.items.map((c, localIndex) => {
               const i = chunkWindow.start + localIndex
               return (

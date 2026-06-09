@@ -44,7 +44,8 @@ app:
   redis:
     enabled: ${APP_REDIS_ENABLED:false}
   material:
-    max-file-bytes: ${APP_MATERIAL_MAX_FILE_BYTES:524288000}
+    # 持久资料文件大小限制（字节）：2GB，大 PDF 通过分片上传后后台解析
+    max-file-bytes: ${APP_MATERIAL_MAX_FILE_BYTES:2147483648}
     max-temporary-file-bytes: ${APP_MATERIAL_MAX_TEMPORARY_FILE_BYTES:524288000}
     max-web-bytes: ${APP_MATERIAL_MAX_WEB_BYTES:10485760}
   security:
@@ -115,12 +116,15 @@ app:
     top-k: ${EMBEDDING_TOP_K:8}
     score-threshold: ${EMBEDDING_SCORE_THRESHOLD:0.35}
   ocr:
-    # 生产环境默认关闭 OCR（按需开启，需安装 Tesseract）
-    enabled: ${OCR_ENABLED:false}
+    # 生产环境默认启用 OCR，用于扫描版 PDF 图片文字提取；服务器镜像需安装 Tesseract 和对应语言包。
+    enabled: ${OCR_ENABLED:true}
     lang: ${OCR_LANG:eng+chi_sim}
     command: ${OCR_COMMAND:tesseract}
     command-template: ${OCR_COMMAND_TEMPLATE:}
-    timeout: ${OCR_TIMEOUT:20s}
+    timeout: ${OCR_TIMEOUT:60s}
+    # 内联 PDF OCR 限制：超过限制时只保留页面图片，不阻塞整份资料解析。
+    inline-pdf-max-bytes: ${APP_OCR_INLINE_PDF_MAX_BYTES:524288000}
+    inline-pdf-max-pages: ${APP_OCR_INLINE_PDF_MAX_PAGES:1000}
   document-preview:
     render-dpi: ${DOCUMENT_PREVIEW_RENDER_DPI:144}
     converter:

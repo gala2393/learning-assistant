@@ -33,6 +33,7 @@ import {
   useUpdateMaterial,
   useReparseMaterial,
   createMaterialFileTicket,
+  LARGE_UPLOAD_CHUNK_SIZE,
   uploadMaterialInChunks,
 } from '@/api/materials'
 import { useDebounce } from '@/hooks/useDebounce'
@@ -156,8 +157,8 @@ export function MaterialsPage() {
           setUploadProgressItems((current) => updateUploadProgressItem(current, id, {
             phase: 'processing',
             percent: 100,
-            uploadedChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),
-            totalChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),
+            uploadedChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
+            totalChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
             stage: '解析完成',
             message: '资料已上传完成',
           }, 'success'))
@@ -466,7 +467,7 @@ function createUploadProgressItems(files: File[]): UploadProgressItem[] {
     phase: 'uploading',
     percent: 0,
     uploadedChunks: 0,
-    totalChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),  // 分片大小 5MB
+    totalChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
     message: '等待上传',
   }))
 }

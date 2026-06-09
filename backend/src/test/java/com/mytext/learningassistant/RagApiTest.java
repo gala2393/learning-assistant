@@ -5,6 +5,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static org.hamcrest.Matchers.hasSize;
@@ -12,6 +13,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.atLeastOnce;
@@ -22,6 +24,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,6 +33,7 @@ import com.mytext.learningassistant.llm.LlmCompletion;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
 import com.mytext.learningassistant.material.MaterialChunkRepository;
 import com.mytext.learningassistant.rag.RagEvaluationSuiteScheduler;
+import com.mytext.learningassistant.rag.RagQuestionRepository;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,6 +60,9 @@ class RagApiTest {
 
     @Autowired
     private MaterialChunkRepository materialChunkRepository;
+
+    @Autowired
+    private RagQuestionRepository ragQuestionRepository;
 
     @Autowired
     private RagEvaluationSuiteScheduler ragEvaluationSuiteScheduler;
@@ -470,6 +477,182 @@ class RagApiTest {
     }
 
     @Test
+    void materialChatPersistsMaterialIdAndRestoresLatestConversation() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-material-history-user"));
+        Long materialId = uploadMaterialAndReturnId(token, "Reader History Material", "RAG material history should restore the latest reader conversation.");
+
+        var firstResult = mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "What should the reader restore?",
+                      "mode": "MATERIAL",
+                      "materialId": %d
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.conversationId").isNumber())
+            .andReturn();
+
+        Long firstQuestionId = extractLong(firstResult.getResponse().getContentAsString(), "questionId");
+        Long conversationId = extractLong(firstResult.getResponse().getContentAsString(), "conversationId");
+        org.assertj.core.api.Assertions.assertThat(ragQuestionRepository.findById(firstQuestionId).orElseThrow().getMaterialId())
+            .isEqualTo(materialId);
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "Continue this reader conversation.",
+                      "mode": "MATERIAL",
+                      "materialId": %d,
+                      "conversationId": %d
+                    }
+                    """.formatted(materialId, conversationId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.conversationId").value(conversationId.intValue()));
+
+        mockMvc.perform(get("/api/rag/history/materials/" + materialId + "/latest")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.conversationId").value(conversationId.intValue()))
+            .andExpect(jsonPath("$.data.messages", hasSize(4)))
+            .andExpect(jsonPath("$.data.messages[2].text").value("Continue this reader conversation."));
+
+        mockMvc.perform(get("/api/rag/history/materials/" + materialId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data", hasSize(1)))
+            .andExpect(jsonPath("$.data[0].conversationId").value(conversationId.intValue()))
+            .andExpect(jsonPath("$.data[0].question").value("Continue this reader conversation."));
+    }
+
+    @Test
+    void streamMaterialChatPersistsMaterialHistoryForReaderRestore() throws Exception {
+        when(thirdPartyLlmClient.effectiveModelName(any())).thenReturn("mock-model");
+        when(thirdPartyLlmClient.answerStream(
+            anyLong(),
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && !excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.eq(false),
+            org.mockito.ArgumentMatchers.eq("HOMEWORK")
+        )).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            java.util.function.Consumer<String> onChunk = invocation.getArgument(4);
+            onChunk.accept("流式资料回答");
+            return "流式资料回答";
+        });
+        String token = registerAndLogin(uniqueName("rag-stream-material-history-user"));
+        Long materialId = uploadMaterialAndReturnId(token, "Stream Reader Material", "RAG stream reader history should be saved with material id.");
+        Long chunkId = extractChunkIdContaining(
+            mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                    .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString(),
+            "RAG stream reader history"
+        );
+
+        var started = mockMvc.perform(post("/api/rag/chat/stream")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "边读边问流式问题会保存吗？",
+                      "mode": "MATERIAL",
+                      "materialId": %d,
+                      "chunkId": %d,
+                      "answerStyle": "HOMEWORK"
+                    }
+                    """.formatted(materialId, chunkId)))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.request().asyncStarted())
+            .andReturn();
+
+        started.getAsyncResult(30_000);
+        var result = mockMvc.perform(asyncDispatch(started))
+            .andExpect(status().isOk())
+            .andReturn();
+        Long questionId = extractLong(result.getResponse().getContentAsString(StandardCharsets.UTF_8), "questionId");
+        Long conversationId = extractLong(result.getResponse().getContentAsString(StandardCharsets.UTF_8), "conversationId");
+
+        org.assertj.core.api.Assertions.assertThat(questionId).isPositive();
+        org.assertj.core.api.Assertions.assertThat(conversationId).isPositive();
+        org.assertj.core.api.Assertions.assertThat(ragQuestionRepository.findById(questionId).orElseThrow().getMaterialId())
+            .isEqualTo(materialId);
+
+        mockMvc.perform(get("/api/rag/history/materials/" + materialId + "/latest")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.conversationId").value(conversationId.intValue()))
+            .andExpect(jsonPath("$.data.messages", hasSize(2)))
+            .andExpect(jsonPath("$.data.sources[0].chunkId").value(chunkId.intValue()));
+    }
+
+    @Test
+    void latestMaterialHistoryReturnsNullWhenMaterialHasNoChatHistory() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-empty-material-history-user"));
+        Long materialId = uploadMaterialAndReturnId(token, "Empty Reader History Material", "This material has no reader question yet.");
+
+        mockMvc.perform(get("/api/rag/history/materials/" + materialId + "/latest")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data").doesNotExist());
+
+        mockMvc.perform(get("/api/rag/history/materials/" + materialId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data").isEmpty());
+    }
+
+    @Test
+    void materialHistoryFallsBackToSourceMaterialIdForOldQuestions() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-old-material-history-user"));
+        Long materialId = uploadMaterialAndReturnId(token, "Old Reader History Material", "Old rows only know the material through their saved RAG sources.");
+
+        var chatResult = mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "Restore old reader history by source.",
+                      "mode": "MATERIAL",
+                      "materialId": %d
+                    }
+                    """.formatted(materialId)))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        Long questionId = extractLong(chatResult.getResponse().getContentAsString(), "questionId");
+        ragQuestionRepository.findById(questionId).ifPresent(question -> {
+            // 模拟迁移前旧数据：问答主表没有 material_id，但来源表仍保留资料归属。
+            question.setMaterialId(null);
+            ragQuestionRepository.save(question);
+        });
+
+        mockMvc.perform(get("/api/rag/history/materials/" + materialId + "/latest")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.id").value(questionId.intValue()))
+            .andExpect(jsonPath("$.data.question").value("Restore old reader history by source."));
+
+        mockMvc.perform(get("/api/rag/history/materials/" + materialId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data", hasSize(1)))
+            .andExpect(jsonPath("$.data[0].id").value(questionId.intValue()));
+    }
+
+    @Test
     void clearsAllHistoryQuestionsWithSourcesAndFavorites() throws Exception {
         String token = registerAndLogin(uniqueName("rag-clear-history-user"));
         uploadMaterial(token);
@@ -798,13 +981,187 @@ class RagApiTest {
     }
 
     @Test
+    void nonStreamingLongDocumentRequestStopsAfterFirstPartAndPromptsContinue() throws Exception {
+        AtomicInteger partCounter = new AtomicInteger();
+        when(thirdPartyLlmClient.effectiveModelName(any())).thenReturn("mock-model");
+        when(thirdPartyLlmClient.answer(
+            org.mockito.ArgumentMatchers.argThat(question ->
+                question != null && question.contains("【超长文档分段生成指令】")
+            ),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        )).thenAnswer(invocation -> {
+            int part = partCounter.incrementAndGet();
+            return Optional.of(new LlmCompletion("第 " + part + " 段内容", "mock-model"));
+        });
+        String token = registerAndLogin(uniqueName("rag-long-document-user"));
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "请写一篇10000字的学习方法文档",
+                      "mode": "GENERAL"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("第 1 段内容")))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("输入“继续”生成第 2/4 部分")))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("第 4 段内容"))))
+            .andExpect(jsonPath("$.data.sources").isEmpty());
+
+        org.assertj.core.api.Assertions.assertThat(partCounter.get()).isEqualTo(1);
+    }
+
+    @Test
+    void nonStreamingLongDocumentContinueUsesPreviousConversation() throws Exception {
+        AtomicInteger partCounter = new AtomicInteger();
+        when(thirdPartyLlmClient.effectiveModelName(any())).thenReturn("mock-model");
+        when(thirdPartyLlmClient.answer(
+            org.mockito.ArgumentMatchers.argThat(question ->
+                question != null && question.contains("【超长文档分段生成指令】")
+            ),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        )).thenAnswer(invocation -> {
+            int part = partCounter.incrementAndGet();
+            return Optional.of(new LlmCompletion("第 " + part + " 段内容", "mock-model"));
+        });
+        String token = registerAndLogin(uniqueName("rag-long-document-continue-user"));
+
+        var firstResult = mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "请写一篇10000字的学习方法文档",
+                      "mode": "GENERAL"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andReturn();
+        Long conversationId = extractLong(firstResult.getResponse().getContentAsString(), "conversationId");
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "继续",
+                      "mode": "GENERAL",
+                      "conversationId": %d
+                    }
+                    """.formatted(conversationId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("第 2 段内容")))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("输入“继续”生成第 3/4 部分")))
+            .andExpect(jsonPath("$.data.sources").isEmpty());
+
+        org.assertj.core.api.Assertions.assertThat(partCounter.get()).isEqualTo(2);
+    }
+
+    @Test
+    void streamingDoneEventDoesNotRepeatVeryLongAnswer() throws Exception {
+        String longAnswer = "长文内容".repeat(1001);
+        when(thirdPartyLlmClient.effectiveModelName(any())).thenReturn("mock-model");
+        when(thirdPartyLlmClient.answerStream(
+            anyLong(),
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.eq(true),
+            org.mockito.ArgumentMatchers.eq("STUDY")
+        )).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            java.util.function.Consumer<String> onChunk = invocation.getArgument(4);
+            onChunk.accept(longAnswer);
+            return longAnswer;
+        });
+        String token = registerAndLogin(uniqueName("rag-stream-long-done-user"));
+
+        var started = mockMvc.perform(post("/api/rag/chat/stream")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "请生成普通文本",
+                      "mode": "GENERAL"
+                    }
+                    """))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.request().asyncStarted())
+            .andReturn();
+
+        started.getAsyncResult(30_000);
+        var result = mockMvc.perform(asyncDispatch(started))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
+        org.assertj.core.api.Assertions.assertThat(body).contains("event: chunk");
+        org.assertj.core.api.Assertions.assertThat(body).contains("event: done");
+        org.assertj.core.api.Assertions.assertThat(body).contains("\"answerIncluded\":false");
+        org.assertj.core.api.Assertions.assertThat(body).contains("\"answer\":\"\"");
+    }
+
+    @Test
+    void streamingLongDocumentFirstPartPromptsManualContinue() throws Exception {
+        when(thirdPartyLlmClient.effectiveModelName(any())).thenReturn("mock-model");
+        when(thirdPartyLlmClient.answerStream(
+            anyLong(),
+            org.mockito.ArgumentMatchers.argThat(question ->
+                question != null && question.contains("【超长文档分段生成指令】")
+            ),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.eq(true),
+            org.mockito.ArgumentMatchers.eq("STUDY")
+        )).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            java.util.function.Consumer<String> onChunk = invocation.getArgument(4);
+            onChunk.accept("第 1 段流式内容");
+            return "第 1 段流式内容";
+        });
+        String token = registerAndLogin(uniqueName("rag-stream-long-document-continue-user"));
+
+        var started = mockMvc.perform(post("/api/rag/chat/stream")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "请写一篇10000字的学习方法文档",
+                      "mode": "GENERAL"
+                    }
+                    """))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.request().asyncStarted())
+            .andReturn();
+
+        started.getAsyncResult(30_000);
+        var result = mockMvc.perform(asyncDispatch(started))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
+        org.assertj.core.api.Assertions.assertThat(body).contains("event: chunk");
+        org.assertj.core.api.Assertions.assertThat(body).contains("第 1 段流式内容");
+        org.assertj.core.api.Assertions.assertThat(body).contains("输入“继续”生成第 2/4 部分");
+        org.assertj.core.api.Assertions.assertThat(body).contains("event: done");
+    }
+
+    @Test
     void nonStreamingChatIncludesHistoryInLlmQuestion() throws Exception {
         when(thirdPartyLlmClient.answer(
             org.mockito.ArgumentMatchers.argThat(question ->
                 question != null
-                    && question.contains("\u5bf9\u8bdd\u5386\u53f2")
+                    && question.contains("\u6700\u8fd1\u5bf9\u8bdd\u539f\u6587")
                     && question.contains("\u6211\u53eb\u5c0f\u660e")
-                    && question.contains("\u6211\u53eb\u4ec0\u4e48")
+                    && question.contains("\u5f53\u524d\u95ee\u9898\uff1a\u6211\u53eb\u4ec0\u4e48")
             ),
             org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
             org.mockito.ArgumentMatchers.anyList(),
@@ -833,9 +1190,75 @@ class RagApiTest {
         verify(thirdPartyLlmClient).answer(
             org.mockito.ArgumentMatchers.argThat(question ->
                 question != null
-                    && question.contains("\u5bf9\u8bdd\u5386\u53f2")
+                    && question.contains("\u6700\u8fd1\u5bf9\u8bdd\u539f\u6587")
                     && question.contains("\u6211\u53eb\u5c0f\u660e")
-                    && question.contains("\u6211\u53eb\u4ec0\u4e48")
+                    && question.contains("\u5f53\u524d\u95ee\u9898\uff1a\u6211\u53eb\u4ec0\u4e48")
+            ),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        );
+    }
+
+    @Test
+    void nonStreamingChatUsesLongTermMemoryAfterRecentWindow() throws Exception {
+        when(thirdPartyLlmClient.answer(
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        )).thenReturn(Optional.of(new LlmCompletion("Memory answer", "mock-model")));
+        String token = registerAndLogin(uniqueName("rag-long-memory-user"));
+
+        var firstResult = mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "我的项目代号是 memory-anchor-alpha",
+                      "mode": "GENERAL"
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andReturn();
+        Long conversationId = extractLong(firstResult.getResponse().getContentAsString(), "conversationId");
+
+        for (int i = 1; i <= 8; i++) {
+            mockMvc.perform(post("/api/rag/chat")
+                    .header("Authorization", "Bearer " + token)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("""
+                        {
+                          "question": "第 %d 轮普通追问",
+                          "mode": "GENERAL",
+                          "conversationId": %d
+                        }
+                        """.formatted(i, conversationId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0));
+        }
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "请根据之前信息回答项目代号",
+                      "mode": "GENERAL",
+                      "conversationId": %d
+                    }
+                    """.formatted(conversationId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Memory answer")));
+
+        verify(thirdPartyLlmClient).answer(
+            org.mockito.ArgumentMatchers.argThat(question ->
+                question != null
+                    && question.contains("长期会话摘要")
+                    && question.contains("memory-anchor-alpha")
+                    && question.contains("当前问题：请根据之前信息回答项目代号")
             ),
             org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
             org.mockito.ArgumentMatchers.anyList(),

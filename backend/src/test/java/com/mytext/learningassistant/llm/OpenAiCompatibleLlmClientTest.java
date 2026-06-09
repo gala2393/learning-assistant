@@ -12,6 +12,7 @@ import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.sun.net.httpserver.HttpServer;
 
@@ -138,6 +139,24 @@ class OpenAiCompatibleLlmClientTest {
     }
 
     @Test
+    void responsesRequestUses4096OutputTokenLimit() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>("");
+        server = startRecordingServer("/v1/responses", requestBody, """
+            {
+              "output_text": "Responses answer"
+            }
+            """);
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(
+            new LlmProperties(true, baseUrl(), "test-key", "test-model", "responses", Duration.ofSeconds(2))
+        );
+
+        Optional<LlmResult> result = client.chat("You are helpful.", "Question?");
+
+        assertThat(result).isPresent();
+        assertThat(requestBody.get()).contains("\"max_output_tokens\":4096");
+    }
+
+    @Test
     void chatStreamForwardsResponsesDeltasBeforeProviderCompletes() throws Exception {
         CountDownLatch firstChunkReceived = new CountDownLatch(1);
         AtomicBoolean firstChunkReachedClientBeforeSecondChunk = new AtomicBoolean(false);
@@ -168,6 +187,19 @@ class OpenAiCompatibleLlmClientTest {
         httpServer.createContext(path, exchange -> {
             byte[] response = body.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(status, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        httpServer.start();
+        return httpServer;
+    }
+
+    private HttpServer startRecordingServer(String path, AtomicReference<String> requestBody, String body) throws IOException {
+        HttpServer httpServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        httpServer.createContext(path, exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
             exchange.getResponseBody().write(response);
             exchange.close();
         });

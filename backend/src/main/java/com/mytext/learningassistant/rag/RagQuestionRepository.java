@@ -31,6 +31,15 @@ public interface RagQuestionRepository extends JpaRepository<RagQuestionEntity, 
     List<RagQuestionEntity> findByUserIdAndConversationIdOrderByCreatedAtAsc(Long userId, Long conversationId);
 
     /**
+     * 查询指定用户在某份资料上的问答记录（按创建时间倒序）。
+     *
+     * @param userId     用户 ID
+     * @param materialId 资料 ID
+     * @return 资料问答记录列表
+     */
+    List<RagQuestionEntity> findByUserIdAndMaterialIdOrderByCreatedAtDesc(Long userId, Long materialId);
+
+    /**
      * 按 ID 和用户 ID 查找问答记录（确保用户只能访问自己的记录）。
      *
      * @param id     问答 ID

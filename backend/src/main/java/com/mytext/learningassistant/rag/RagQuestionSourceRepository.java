@@ -21,6 +21,16 @@ public interface RagQuestionSourceRepository extends JpaRepository<RagQuestionSo
     List<RagQuestionSourceEntity> findByQuestionIdOrderByRankScoreDesc(Long questionId);
 
     /**
+     * 查询某份资料关联过的问答 ID，按来源记录创建时间倒序。
+     * 用于兼容 material_id 字段上线前的旧问答历史。
+     *
+     * @param materialId 资料 ID
+     * @return 问答 ID 列表
+     */
+    @Query("select source.questionId from RagQuestionSourceEntity source where source.materialId = :materialId order by source.createdAt desc")
+    List<Long> findQuestionIdsByMaterialIdOrderByCreatedAtDesc(@Param("materialId") Long materialId);
+
+    /**
      * 按问答 ID 删除来源记录。
      *
      * @param questionId 问答记录 ID

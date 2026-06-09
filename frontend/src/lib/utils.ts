@@ -93,13 +93,13 @@ export function cleanTemporaryMaterialText(text: string): string {
 
 /**
  * 将文件切分为多个 chunk（用于分片上传）。
- * 大文件会被切成多个 5MB 的小块，逐片上传，支持断点续传。
+ * 大文件会被切成多个 1MB 的小块，逐片上传，支持断点续传。
  *
  * @param file 要切分的文件对象
- * @param chunkSize 每片大小（默认 5MB）
+ * @param chunkSize 每片大小（默认 1MB）
  * @returns Blob 数组（每片是一个 Blob）
  */
-export function buildUploadChunks(file: File, chunkSize = 5 * 1024 * 1024): Blob[] {
+export function buildUploadChunks(file: File, chunkSize = 1 * 1024 * 1024): Blob[] {
   const chunks: Blob[] = []
   for (let offset = 0; offset < file.size; offset += chunkSize) {
     // slice 只创建 Blob 视图，不会一次性复制整份文件内容。
@@ -116,8 +116,9 @@ export function inferSourceType(fileName: string): string {
   const lower = fileName.toLowerCase()
   if (lower.endsWith('.pdf')) return 'PDF'
   if (lower.endsWith('.doc')) return 'WORD'
-  if (lower.endsWith('.docx')) return 'WORD'
-  if (lower.endsWith('.pptx')) return 'PPT'
+  if (lower.endsWith('.docx')) return 'DOCX'
+  if (lower.endsWith('.pptx')) return 'PPTX'
+  if (lower.endsWith('.xlsx')) return 'XLSX'
   if (lower.endsWith('.md')) return 'MD'
   if (lower.endsWith('.txt')) return 'TXT'
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'WEB'

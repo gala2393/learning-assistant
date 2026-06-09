@@ -80,4 +80,100 @@
     background-color: hsl(var(--border));
     border-radius: 3px;
   }
+
+  /*
+   * PDF.js 文字层：canvas 负责显示页面，文字层负责划词和复制。
+   * 文字本身保持透明，只显示浏览器选区高亮，避免和 PDF 原图重影。
+   */
+  .pdf-text-layer {
+    position: absolute;
+    inset: 0;
+    overflow: clip;
+    opacity: 1;
+    line-height: 1;
+    text-align: initial;
+    -webkit-text-size-adjust: none;
+    -moz-text-size-adjust: none;
+    text-size-adjust: none;
+    transform-origin: 0 0;
+    user-select: text;
+  }
+
+  .pdf-text-layer :is(span, br) {
+    position: absolute;
+    color: transparent;
+    white-space: pre;
+    cursor: text;
+    transform-origin: 0% 0%;
+  }
+
+  .pdf-text-layer > :not(.markedContent),
+  .pdf-text-layer .markedContent span:not(.markedContent) {
+    z-index: 1;
+  }
+
+  .pdf-text-layer span.markedContent {
+    top: 0;
+    height: 0;
+  }
+
+  .pdf-text-layer span[role='img'],
+  .pdf-text-layer .endOfContent {
+    user-select: none;
+    cursor: default;
+  }
+
+  .pdf-text-layer ::selection {
+    background: rgb(15 23 42 / 0.22);
+  }
+
+  .pdf-text-layer ::-moz-selection {
+    background: rgb(15 23 42 / 0.22);
+  }
+
+  .pdf-text-layer br::selection,
+  .pdf-text-layer br::-moz-selection {
+    background: transparent;
+  }
+
+  .pdf-text-layer .endOfContent {
+    display: block;
+    position: absolute;
+    inset: 100% 0 0;
+    z-index: 0;
+  }
+
+  .pdf-text-layer.selecting .endOfContent {
+    top: 0;
+  }
+
+  /*
+   * 后端/MinerU 文本层：用于扫描 PDF、Office 转 PDF 等没有 PDF.js 原生文本层的页面。
+   * 文本保持透明，只暴露浏览器选区高亮，避免和原文页面重复显示。
+   */
+  .backend-text-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    user-select: text;
+    pointer-events: auto;
+  }
+
+  .backend-text-layer__block {
+    position: absolute;
+    display: block;
+    color: transparent;
+    white-space: pre-wrap;
+    overflow: hidden;
+    cursor: text;
+    user-select: text;
+  }
+
+  .backend-text-layer__block::selection {
+    background: rgb(15 23 42 / 0.22);
+  }
+
+  .backend-text-layer__block::-moz-selection {
+    background: rgb(15 23 42 / 0.22);
+  }
 }

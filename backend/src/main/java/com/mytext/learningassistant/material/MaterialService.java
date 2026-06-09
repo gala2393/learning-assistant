@@ -13,15 +13,18 @@ import java.nio.charset.Charset;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.net.http.HttpHeaders;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -39,6 +43,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import javax.imageio.ImageIO;
 
 /* ======================== 第三方库导入 ======================== */
@@ -63,6 +68,8 @@ import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.poi.hwpf.HWPFDocument;
+import org.apache.poi.hwpf.extractor.WordExtractor;
 
 /* ======================== Spring 框架导入 ======================== */
 import org.springframework.stereotype.Service;
@@ -99,7 +106,7 @@ import jakarta.annotation.PreDestroy;
  *       避免重复请求，缓存上限 2048 条。超限时清空缓存重新积累。</li>
  *   <li><b>PDF 解析</b>：使用 PDFBox 逐页提取文本，对于扫描件（无可抽取文本的页面）
  *       支持可选的 OCR（Tesseract）或保留图片标记供多模态问答使用。大 PDF 可选先压缩。</li>
- *   <li><b>分片上传</b>：大文件（超过 50MB）采用分片上传策略，前端将文件切分为固定大小的分片，
+ *   <li><b>分片上传</b>：持久资料采用分片上传策略，前端将文件切分为固定大小的分片，
  *       逐个上传到服务端临时目录，全部上传完毕后在后台合并、校验、解析。</li>
  * </ul>
  *
@@ -132,10 +139,10 @@ public class MaterialService {
     /** 相邻分块之间的重叠字符数，用于保持上下文连贯 */
     private static final int CHUNK_OVERLAP = 120;
 
-    /** 单次上传文件默认最大大小：50MB */
-    private static final long DEFAULT_MAX_MATERIAL_BYTES = 50L * 1024L * 1024L;
+    /** 持久资料默认最大大小：2GB；大 PDF 通过分片上传进入后台解析。 */
+    private static final long DEFAULT_MAX_MATERIAL_BYTES = 2L * 1024L * 1024L * 1024L;
 
-    /** 智能问答临时资料默认最大大小：100MB */
+    /** 智能问答临时资料默认最大大小：500MB；更大的文件建议先作为持久资料上传。 */
     private static final long DEFAULT_MAX_TEMPORARY_MATERIAL_BYTES = 500L * 1024L * 1024L;
 
     /** 网页导入内容默认最大大小：10MB */
@@ -177,6 +184,15 @@ public class MaterialService {
     /** PDF 压缩的目标 DPI */
     private static final int DEFAULT_PDF_COMPRESSION_TARGET_DPI = 144;
 
+    /** MinerU 输出的默认归一化页面尺寸，content_list 的 bbox 通常使用 0~1000 坐标系。 */
+    private static final double MINERU_NORMALIZED_PAGE_SIZE = 1000.0;
+
+    /** 单个文本层块最大保留字符数，避免异常解析结果把整份文档塞进一个 overlay 节点。 */
+    private static final int PAGE_TEXT_BLOCK_MAX_LENGTH = 4000;
+
+    /** 上传会话客户端幂等 ID 的最大长度，兼容仍停留在旧迁移状态的数据库字段。 */
+    private static final int CLIENT_UPLOAD_ID_MAX_LENGTH = 64;
+
     /** Embedding 向量缓存的最大条目数 */
     private static final int EMBEDDING_CACHE_MAX_ENTRIES = 2_048;
 
@@ -189,6 +205,9 @@ public class MaterialService {
     /** 写入向量库时的批大小，避免超大资料解析时长时间持有全部切片和向量 */
     private static final int VECTOR_UPSERT_BATCH_SIZE = 200;
 
+    /** 超过该切片数时先完成上传，再由后台补齐向量索引，避免大资料进度条长时间假死。 */
+    private static final int DEFER_VECTOR_INDEX_CHUNK_THRESHOLD = 300;
+
     /** 关键词停用词列表，这些常见词不会作为关键词输出 */
     private static final List<String> KEYWORD_STOP_WORDS = List.of(
         "the", "and", "for", "with", "that", "this", "from", "into", "are", "was", "were", "has", "have",
@@ -199,6 +218,7 @@ public class MaterialService {
     // ======================== 依赖注入的仓库和工具 ========================
     private final LearningMaterialRepository learningMaterialRepository;
     private final MaterialChunkRepository materialChunkRepository;
+    private final MaterialPageTextBlockRepository materialPageTextBlockRepository;
     private final MaterialSummaryRepository materialSummaryRepository;
     private final RagQuestionSourceRepository ragQuestionSourceRepository;
     private final MaterialUploadSessionRepository materialUploadSessionRepository;
@@ -248,6 +268,22 @@ public class MaterialService {
     private final long pdfCompressionMinBytes;
     /** PDF 压缩的目标 DPI */
     private final int pdfCompressionTargetDpi;
+    /** 文档解析器提供方：legacy 表示使用内置解析器，mineru 表示优先调用 MinerU。 */
+    private final String documentParserProvider;
+    /** MinerU CLI 命令，支持直接写 mineru，也支持写完整可执行文件路径。 */
+    private final String mineruCommand;
+    /** MinerU 输出工作区，按资料生成独立子目录，避免不同上传互相覆盖。 */
+    private final Path mineruWorkspace;
+    /** MinerU 单次解析超时时间。 */
+    private final Duration mineruTimeout;
+    /** MinerU 模型下载来源；Windows 下可设置为 modelscope，避免 HuggingFace 缓存符号链接权限问题。 */
+    private final String mineruModelSource;
+    /** MinerU 失败时是否自动回退到 legacy 解析器。 */
+    private final boolean mineruFallbackEnabled;
+    /** PDF 已包含原生文本时是否跳过 MinerU，避免大文本 PDF 先等待 MinerU 超时再回退。 */
+    private final boolean mineruSkipTextPdf;
+    /** 判断 PDF 是否已有原生文本时最多抽样的页数。 */
+    private final int mineruTextPdfDetectPages;
     private final long maxMaterialBytes;
     private final long maxTemporaryMaterialBytes;
     private final long maxWebBytes;
@@ -255,6 +291,8 @@ public class MaterialService {
     // ======================== 线程和缓存 ========================
     /** 上传会话后台处理线程池（2 个线程） */
     private final ExecutorService uploadExecutor = Executors.newFixedThreadPool(2);
+    /** 外部命令输出读取线程池，避免 MinerU 等命令输出过多时阻塞进程结束。 */
+    private final ExecutorService processOutputExecutor = Executors.newCachedThreadPool();
     /** PDF 页面渲染并发信号量（限制同时渲染 2 个页面，防止内存溢出） */
     private final Semaphore renderSemaphore = new Semaphore(2);
     /** Embedding 向量缓存（key 为文本 SHA-256，value 为 JSON 格式的向量） */
@@ -267,6 +305,7 @@ public class MaterialService {
     public MaterialService(
         LearningMaterialRepository learningMaterialRepository,
         MaterialChunkRepository materialChunkRepository,
+        MaterialPageTextBlockRepository materialPageTextBlockRepository,
         MaterialSummaryRepository materialSummaryRepository,
         RagQuestionSourceRepository ragQuestionSourceRepository,
         MaterialUploadSessionRepository materialUploadSessionRepository,
@@ -293,12 +332,21 @@ public class MaterialService {
         @Value("${app.pdf.compression.timeout:180s}") Duration pdfCompressionTimeout,
         @Value("${app.pdf.compression.min-bytes:67108864}") long pdfCompressionMinBytes,
         @Value("${app.pdf.compression.target-dpi:144}") int pdfCompressionTargetDpi,
-        @Value("${app.material.max-file-bytes:52428800}") long maxMaterialBytes,
-        @Value("${app.material.max-temporary-file-bytes:104857600}") long maxTemporaryMaterialBytes,
+        @Value("${app.document-parser.provider:legacy}") String documentParserProvider,
+        @Value("${app.mineru.command:mineru}") String mineruCommand,
+        @Value("${app.mineru.workspace:${user.dir}/target/mineru-output}") String mineruWorkspace,
+        @Value("${app.mineru.timeout:15m}") Duration mineruTimeout,
+        @Value("${app.mineru.model-source:}") String mineruModelSource,
+        @Value("${app.mineru.fallback-enabled:true}") boolean mineruFallbackEnabled,
+        @Value("${app.mineru.skip-text-pdf:true}") boolean mineruSkipTextPdf,
+        @Value("${app.mineru.text-pdf-detect-pages:5}") int mineruTextPdfDetectPages,
+        @Value("${app.material.max-file-bytes:2147483648}") long maxMaterialBytes,
+        @Value("${app.material.max-temporary-file-bytes:524288000}") long maxTemporaryMaterialBytes,
         @Value("${app.material.max-web-bytes:10485760}") long maxWebBytes
     ) {
         this.learningMaterialRepository = learningMaterialRepository;
         this.materialChunkRepository = materialChunkRepository;
+        this.materialPageTextBlockRepository = materialPageTextBlockRepository;
         this.materialSummaryRepository = materialSummaryRepository;
         this.ragQuestionSourceRepository = ragQuestionSourceRepository;
         this.materialUploadSessionRepository = materialUploadSessionRepository;
@@ -325,6 +373,20 @@ public class MaterialService {
         this.pdfCompressionTimeout = pdfCompressionTimeout == null ? Duration.ofSeconds(180) : pdfCompressionTimeout;
         this.pdfCompressionMinBytes = pdfCompressionMinBytes <= 0 ? DEFAULT_PDF_COMPRESSION_MIN_BYTES : pdfCompressionMinBytes;
         this.pdfCompressionTargetDpi = pdfCompressionTargetDpi <= 0 ? DEFAULT_PDF_COMPRESSION_TARGET_DPI : pdfCompressionTargetDpi;
+        this.documentParserProvider = documentParserProvider == null || documentParserProvider.isBlank()
+            ? "legacy"
+            : documentParserProvider.trim().toLowerCase(Locale.ROOT);
+        this.mineruCommand = mineruCommand == null || mineruCommand.isBlank() ? "mineru" : mineruCommand.trim();
+        this.mineruWorkspace = Path.of(mineruWorkspace == null || mineruWorkspace.isBlank()
+                ? Path.of(System.getProperty("user.dir"), "target", "mineru-output").toString()
+                : mineruWorkspace)
+            .toAbsolutePath()
+            .normalize();
+        this.mineruTimeout = mineruTimeout == null ? Duration.ofMinutes(15) : mineruTimeout;
+        this.mineruModelSource = normalizeOptionalText(mineruModelSource);
+        this.mineruFallbackEnabled = mineruFallbackEnabled;
+        this.mineruSkipTextPdf = mineruSkipTextPdf;
+        this.mineruTextPdfDetectPages = mineruTextPdfDetectPages <= 0 ? 5 : mineruTextPdfDetectPages;
         this.maxMaterialBytes = maxMaterialBytes <= 0 ? DEFAULT_MAX_MATERIAL_BYTES : maxMaterialBytes;
         this.maxTemporaryMaterialBytes = maxTemporaryMaterialBytes <= 0 ? DEFAULT_MAX_TEMPORARY_MATERIAL_BYTES : maxTemporaryMaterialBytes;
         this.maxWebBytes = maxWebBytes <= 0 ? DEFAULT_MAX_WEB_BYTES : maxWebBytes;
@@ -340,6 +402,7 @@ public class MaterialService {
     @PreDestroy
     public void shutdown() {
         uploadExecutor.shutdownNow();
+        processOutputExecutor.shutdownNow();
     }
 
     /**
@@ -502,10 +565,20 @@ public class MaterialService {
             .findByOwnerIdAndClientUploadId(ownerId, clientUploadId)
             .orElse(null);
         if (existing != null) {
-            validateUploadSessionMetadata(existing, title, originalName, sourceType, sourceUrl, fileSize, chunkSize, totalChunks);
-            if (existing.getStatus() == MaterialUploadSessionStatus.FAILED) {
+            boolean recreateSession = false;
+            if (!sameUploadSessionMetadata(existing, title, originalName, sourceType, sourceUrl, fileSize, chunkSize, totalChunks)) {
+                if (isDiscardableUploadSession(existing)) {
+                    discardFailedUploadSession(existing);
+                    recreateSession = true;
+                } else {
+                    throw new BusinessException(409, "Upload metadata mismatch");
+                }
+            }
+            if (!recreateSession && existing.getStatus() == MaterialUploadSessionStatus.FAILED) {
                 discardFailedUploadSession(existing);
-            } else {
+                recreateSession = true;
+            }
+            if (!recreateSession) {
                 return toUploadSessionResponse(existing);
             }
         }
@@ -599,35 +672,45 @@ public class MaterialService {
         if (chunkIndex < 0 || chunkIndex >= totalChunks) {
             throw new BusinessException(400, "Invalid chunk index");
         }
+        long expectedChunkSize = expectedPartSize(session, chunkIndex);
+        if (chunk.getSize() != expectedChunkSize) {
+            throw new BusinessException(400, "Chunk size mismatch");
+        }
         Path partPath = partPath(session, chunkIndex);
+        Path tempPartPath = partPath.resolveSibling(partPath.getFileName() + ".uploading-" + UUID.randomUUID());
         try {
             Files.createDirectories(partPath.getParent());
-            byte[] bytes = chunk.getBytes();
+            chunk.transferTo(tempPartPath);
             String expectedChecksum = normalizeOptionalText(checksumSha256);
             // 单个分片允许独立校验，尽早发现前端重传或网络传输造成的内容损坏。
             if (expectedChecksum != null && !expectedChecksum.isBlank()) {
-                String actualChecksum = sha256(bytes);
+                String actualChecksum = sha256(tempPartPath);
                 if (!expectedChecksum.equalsIgnoreCase(actualChecksum)) {
                     throw new BusinessException(400, "chunk checksum mismatch");
                 }
             }
             if (Files.exists(partPath)) {
-                byte[] existing = Files.readAllBytes(partPath);
                 // 相同分片重复上传视为幂等成功，内容不同则拒绝覆盖，避免合并出混合版本文件。
-                if (existing.length == bytes.length && sha256(existing).equalsIgnoreCase(sha256(bytes))) {
+                if (Files.size(partPath) == Files.size(tempPartPath) && sameFileHash(partPath, tempPartPath)) {
                     refreshSessionProgress(session);
                     return toUploadSessionResponse(session);
                 }
                 throw new BusinessException(409, "Chunk content mismatch");
             }
-            Files.write(partPath, bytes);
+            moveUploadedPart(tempPartPath, partPath);
         } catch (IOException exception) {
             throw new BusinessException(500, "failed to save chunk");
+        } finally {
+            try {
+                Files.deleteIfExists(tempPartPath);
+            } catch (IOException ignored) {
+                // 临时分片清理失败不影响上传主流程；后续同名正式分片不会被它覆盖。
+            }
         }
 
         refreshSessionProgress(session);
-        if (session.getUploadedChunks() != null && session.getTotalChunks() != null
-            && session.getUploadedChunks() >= session.getTotalChunks()
+        if (session.getTotalChunks() != null
+            && hasAllUploadedParts(session)
             && session.getStatus() == MaterialUploadSessionStatus.UPLOADING) {
             // 只有第一次观察到全部分片齐全时才切换到处理态，避免并发请求重复调度后台合并。
             session.setStatus(MaterialUploadSessionStatus.PROCESSING);
@@ -852,6 +935,13 @@ public class MaterialService {
             path = renderPdfPageAsset(sourcePath, previewPath, safeName);
         }
         if (path == null) {
+            log.warn(
+                "Material image is unavailable after lazy render. materialId={}, ownerId={}, fileName={}, sourcePath={}",
+                materialId,
+                ownerId,
+                safeName,
+                sourcePath
+            );
             throw new BusinessException(404, "资料图片不存在，请重新解析或重新上传该资料");
         }
         try {
@@ -952,8 +1042,11 @@ public class MaterialService {
         materialSummaryRepository.deleteByMaterialIdAndUserId(materialId, ownerId);
         ragQuestionSourceRepository.deleteByMaterialId(materialId);
         vectorStoreClient.deleteMaterial(ownerId, materialId);
+        materialPageTextBlockRepository.deleteByMaterialId(materialId);
         materialChunkRepository.deleteByMaterialId(materialId);
-        saveChunks(material, chunks, true);
+        boolean deferVectorIndex = shouldDeferVectorIndexing(material.getSourceType(), chunks.size());
+        saveChunks(material, chunks, true, !deferVectorIndex);
+        savePageTextBlocks(material, parsed);
 
         updateMaterialParseProgress(material.getId(), material.getOwnerId(), 92, "生成预览", "正在生成阅读预览信息");
         applyPreviewMetadata(material, sourcePath, material.getSourceType());
@@ -963,7 +1056,11 @@ public class MaterialService {
         material.setParseMessage("资料已经可以用于阅读和问答");
         material.setSummaryStatus(MaterialSummaryStatus.PENDING);
         material.setChunkCount(chunks.size());
-        return toDetailResponse(learningMaterialRepository.save(material));
+        LearningMaterialEntity savedMaterial = learningMaterialRepository.save(material);
+        if (deferVectorIndex) {
+            scheduleVectorIndexRebuildAfterCommit(savedMaterial.getOwnerId(), savedMaterial.getId());
+        }
+        return toDetailResponse(savedMaterial);
     }
 
     /**
@@ -991,6 +1088,7 @@ public class MaterialService {
         materialSummaryRepository.deleteByMaterialIdAndUserId(materialId, ownerId);
         ragQuestionSourceRepository.deleteByMaterialId(materialId);
         vectorStoreClient.deleteMaterial(ownerId, materialId);
+        materialPageTextBlockRepository.deleteByMaterialId(materialId);
         materialChunkRepository.deleteByMaterialId(materialId);
         learningMaterialRepository.delete(material);
         deleteStoredAssets(material.getStoragePath());
@@ -1113,8 +1211,11 @@ public class MaterialService {
             updateMaterialParseProgress(material.getId(), material.getOwnerId(), 82, "写入向量库", "正在保存知识片段和向量");
             // 重新解析时先清理旧索引和旧切片，再写入新切片，保证数据库和 Vector Store 不混用两版内容。
             vectorStoreClient.deleteMaterial(material.getOwnerId(), material.getId());
+            materialPageTextBlockRepository.deleteByMaterialId(material.getId());
             materialChunkRepository.deleteByMaterialId(material.getId());
-            saveChunks(material, chunks, true);
+            boolean deferVectorIndex = shouldDeferVectorIndexing(sourceType, chunks.size());
+            saveChunks(material, chunks, true, !deferVectorIndex);
+            savePageTextBlocks(material, parsed);
             updateMaterialParseProgress(material.getId(), material.getOwnerId(), 96, "收尾处理", "正在更新导入状态");
             material.setParseStatus(MaterialParseStatus.SUCCESS);
             material.setParseProgressPercent(100);
@@ -1128,6 +1229,9 @@ public class MaterialService {
               materialUploadSessionRepository.save(session);
               recordMaterialLog(material.getOwnerId(), "UPLOAD_MATERIAL", material.getId(), material.getTitle(), material.getOriginalName(), material.getFileSize());
               cleanupPartDir(session);
+              if (deferVectorIndex) {
+                  scheduleVectorIndexRebuildAfterCommit(material.getOwnerId(), material.getId());
+              }
         } catch (Exception exception) {
             log.error("Upload session processing failed: sessionId={}, materialId={}", sessionId, session.getMaterialId(), exception);
             MaterialUploadSessionEntity failedSession = materialUploadSessionRepository.findById(sessionId).orElse(null);
@@ -1165,6 +1269,7 @@ public class MaterialService {
      */
     private void assembleUploadedFile(MaterialUploadSessionEntity session, Path finalPath) throws IOException {
         Path partDir = partDir(session);
+        validateAllUploadedParts(session);
         try (var output = Files.newOutputStream(finalPath)) {
             for (int index = 0; index < session.getTotalChunks(); index++) {
                 Path partPath = partDir.resolve(partFileName(index));
@@ -1190,6 +1295,55 @@ public class MaterialService {
         int uploaded = countUploadedParts(session);
         session.setUploadedChunks(uploaded);
         materialUploadSessionRepository.save(session);
+    }
+
+    /**
+     * 判断所有分片是否都已按序存在。
+     *
+     * <p>不能只统计 .part 文件数量，因为目录里如果缺少中间片但多出异常文件，数量判断会误报完成。
+     */
+    private boolean hasAllUploadedParts(MaterialUploadSessionEntity session) {
+        try {
+            validateAllUploadedParts(session);
+            return true;
+        } catch (BusinessException exception) {
+            return false;
+        }
+    }
+
+    /**
+     * 合并前逐片校验文件存在性和大小。
+     *
+     * <p>除最后一片外，每片必须等于会话 chunkSize；最后一片必须大于 0 且不超过 chunkSize。
+     * 这样可以尽早发现断点续传、网关截断或并发覆盖造成的不完整上传。
+     */
+    private void validateAllUploadedParts(MaterialUploadSessionEntity session) {
+        if (session == null || session.getTotalChunks() == null || session.getChunkSize() == null || session.getFileSize() == null) {
+            throw new BusinessException(400, "Invalid upload session");
+        }
+        Path partDir = partDir(session);
+        for (int index = 0; index < session.getTotalChunks(); index++) {
+            Path partPath = partDir.resolve(partFileName(index));
+            if (!Files.exists(partPath) || !Files.isRegularFile(partPath)) {
+                throw new BusinessException(400, "Missing upload chunk: " + index);
+            }
+            try {
+                long actualSize = Files.size(partPath);
+                long expectedSize = expectedPartSize(session, index);
+                if (actualSize != expectedSize) {
+                    throw new BusinessException(400, "Invalid upload chunk size: " + index);
+                }
+            } catch (IOException exception) {
+                throw new BusinessException(500, "failed to read upload chunk");
+            }
+        }
+    }
+
+    private long expectedPartSize(MaterialUploadSessionEntity session, int index) {
+        long chunkSize = session.getChunkSize();
+        long fileSize = session.getFileSize();
+        long start = (long) index * chunkSize;
+        return Math.min(chunkSize, fileSize - start);
     }
 
     /**
@@ -1226,13 +1380,13 @@ public class MaterialService {
     }
 
     /**
-     * 丢弃失败的上传会话及其关联的资料数据。
+     * 丢弃可重建的上传会话及其关联的资料数据。
      *
      * <p>清理范围：分片目录、原始文件、预览文件、资源目录、
      * 资料摘要、问答来源、向量索引、知识片段和资料记录本身。
-     * 用于幂等创建时遇到失败状态的旧会话需要重新创建的场景。
+     * 用于幂等创建时遇到失败状态，或旧前端分片策略留下的未完成会话需要重新创建的场景。
      *
-     * @param session 失败的上传会话实体
+     * @param session 可丢弃的上传会话实体
      */
     private void discardFailedUploadSession(MaterialUploadSessionEntity session) {
         cleanupPartDir(session);
@@ -1249,18 +1403,19 @@ public class MaterialService {
                 materialSummaryRepository.deleteByMaterialIdAndUserId(material.getId(), material.getOwnerId());
                 ragQuestionSourceRepository.deleteByMaterialId(material.getId());
                 vectorStoreClient.deleteMaterial(material.getOwnerId(), material.getId());
+                materialPageTextBlockRepository.deleteByMaterialId(material.getId());
                 materialChunkRepository.deleteByMaterialId(material.getId());
                 learningMaterialRepository.delete(material);
             });
     }
 
     /**
-     * 校验已有上传会话的元数据与新请求是否一致（用于幂等性检查）。
+     * 判断已有上传会话的元数据与新请求是否一致（用于幂等性检查）。
      *
      * <p>检查标题、文件名、来源类型、来源 URL、文件大小、分片大小和总分片数是否完全一致。
-     * 不一致时抛出 409 冲突异常。
+     * 分片大小变更后，旧的 UPLOADING 残留会话会和新请求不一致，调用方会按状态决定是否清理重建。
      */
-    private void validateUploadSessionMetadata(
+    private boolean sameUploadSessionMetadata(
         MaterialUploadSessionEntity session,
         String title,
         String originalName,
@@ -1270,17 +1425,24 @@ public class MaterialService {
         int chunkSize,
         int totalChunks
     ) {
-        boolean same =
-            Objects.equals(normalizeText(session.getTitle(), ""), title)
-                && Objects.equals(normalizeText(session.getOriginalName(), ""), originalName)
-                && session.getSourceType() == sourceType
-                && Objects.equals(normalizeOptionalText(session.getSourceUrl()), sourceUrl)
-                && Objects.equals(session.getFileSize(), fileSize)
-                && Objects.equals(session.getChunkSize(), chunkSize)
-                && Objects.equals(session.getTotalChunks(), totalChunks);
-        if (!same) {
-            throw new BusinessException(409, "Upload metadata mismatch");
-        }
+        return Objects.equals(normalizeText(session.getTitle(), ""), title)
+            && Objects.equals(normalizeText(session.getOriginalName(), ""), originalName)
+            && session.getSourceType() == sourceType
+            && Objects.equals(normalizeOptionalText(session.getSourceUrl()), sourceUrl)
+            && Objects.equals(session.getFileSize(), fileSize)
+            && Objects.equals(session.getChunkSize(), chunkSize)
+            && Objects.equals(session.getTotalChunks(), totalChunks);
+    }
+
+    /**
+     * 判断旧上传会话是否可以自动丢弃。
+     *
+     * <p>只有尚未完成的 UPLOADING 和明确失败的 FAILED 可以重建；
+     * PROCESSING/SUCCESS 代表资料可能正在解析或已经可用，继续保留 409 保护，避免误删有效资料。
+     */
+    private boolean isDiscardableUploadSession(MaterialUploadSessionEntity session) {
+        return session.getStatus() == MaterialUploadSessionStatus.UPLOADING
+            || session.getStatus() == MaterialUploadSessionStatus.FAILED;
     }
 
     /**
@@ -1325,7 +1487,12 @@ public class MaterialService {
         applyPreviewMetadata(material, storagePath, sourceType);
         material.setChunkCount(chunks.size());
         LearningMaterialEntity saved = learningMaterialRepository.save(material);
-        saveChunks(saved, chunks, false);
+        boolean deferVectorIndex = shouldDeferVectorIndexing(sourceType, chunks.size());
+        saveChunks(saved, chunks, false, !deferVectorIndex);
+        savePageTextBlocks(saved, parsed);
+        if (deferVectorIndex) {
+            scheduleVectorIndexRebuildAfterCommit(saved.getOwnerId(), saved.getId());
+        }
         recordMaterialLog(ownerId, "UPLOAD_MATERIAL", saved.getId(), saved.getTitle(), saved.getOriginalName(), saved.getFileSize());
         return toResponse(saved);
     }
@@ -1373,7 +1540,12 @@ public class MaterialService {
      * @param chunks         知识片段草稿列表
      * @param updateProgress 是否更新解析进度（分片上传模式需要实时更新进度）
      */
-    private void saveChunks(LearningMaterialEntity material, List<ChunkDraft> chunks, boolean updateProgress) {
+    private void saveChunks(
+        LearningMaterialEntity material,
+        List<ChunkDraft> chunks,
+        boolean updateProgress,
+        boolean buildVectorsNow
+    ) {
         List<MaterialChunkEntity> savedChunks = new ArrayList<>();
         Map<Long, List<Double>> embeddingsByChunkId = new LinkedHashMap<>();
         for (int index = 0; index < chunks.size(); index++) {
@@ -1390,7 +1562,7 @@ public class MaterialService {
             chunk.setSummary(buildChunkSummary(draft.text()));
             chunk.setKeywords(buildChunkKeywords(draft.text()));
             // Embedding 先落库为 JSON，随后解析成向量批量写入 Vector Store，便于后续重建索引。
-            String embeddingJson = toEmbeddingJson(draft.text());
+            String embeddingJson = buildVectorsNow ? toEmbeddingJson(draft.text()) : null;
             chunk.setEmbeddingJson(embeddingJson);
             chunk.setCreatedAt(java.time.LocalDateTime.now());
             MaterialChunkEntity saved = materialChunkRepository.save(chunk);
@@ -1399,7 +1571,7 @@ public class MaterialService {
             if (embedding != null && saved.getId() != null) {
                 embeddingsByChunkId.put(saved.getId(), embedding);
             }
-            if (savedChunks.size() >= VECTOR_UPSERT_BATCH_SIZE) {
+            if (buildVectorsNow && savedChunks.size() >= VECTOR_UPSERT_BATCH_SIZE) {
                 // 分批 flush 控制内存峰值，并减少一次性向量写入失败的影响范围。
                 flushVectorBatch(material, savedChunks, embeddingsByChunkId);
             }
@@ -1409,7 +1581,18 @@ public class MaterialService {
                     "正在保存知识片段 " + (index + 1) + "/" + chunks.size());
             }
         }
-        flushVectorBatch(material, savedChunks, embeddingsByChunkId);
+        if (buildVectorsNow) {
+            if (updateProgress && !savedChunks.isEmpty()) {
+                updateMaterialParseProgress(material.getId(), material.getOwnerId(), 92, "写入向量库", "正在提交最后一批向量索引");
+            }
+            flushVectorBatch(material, savedChunks, embeddingsByChunkId);
+            return;
+        }
+        if (updateProgress) {
+            updateMaterialParseProgress(material.getId(), material.getOwnerId(), 94, "后台建索引", "知识片段已保存，向量索引将在后台自动补齐");
+        }
+        savedChunks.clear();
+        embeddingsByChunkId.clear();
     }
 
     /**
@@ -1422,6 +1605,84 @@ public class MaterialService {
      * @param savedChunks        已保存到数据库的知识片段列表（写入后清空）
      * @param embeddingsByChunkId 片段 ID 到 Embedding 向量的映射（写入后清空）
      */
+    /**
+     * 判断本次上传是否需要延迟建向量索引。
+     *
+     * <p>TXT/MD/HTML/WEB 经常会被切成大量短片段；如果同步逐段请求 Embedding，
+     * 用户会看到上传卡在最后阶段。这里先保证资料可阅读、可按关键词问答，再后台补语义向量。</p>
+     */
+    private boolean shouldDeferVectorIndexing(MaterialSourceType sourceType, int chunkCount) {
+        if (chunkCount <= 0) {
+            return false;
+        }
+        boolean textLike = sourceType == MaterialSourceType.TXT
+            || sourceType == MaterialSourceType.MD
+            || sourceType == MaterialSourceType.HTML
+            || sourceType == MaterialSourceType.WEB;
+        return textLike || chunkCount >= DEFER_VECTOR_INDEX_CHUNK_THRESHOLD;
+    }
+
+    /**
+     * 在事务提交后异步重建资料向量索引。
+     *
+     * <p>如果当前没有 Spring 事务，直接提交后台任务；如果有事务，等提交成功后再跑，
+     * 防止后台线程读到尚未提交的切片数据。</p>
+     */
+    private void scheduleVectorIndexRebuildAfterCommit(long ownerId, Long materialId) {
+        if (materialId == null) {
+            return;
+        }
+        Runnable task = () -> uploadExecutor.submit(() -> rebuildMaterialVectorIndex(ownerId, materialId));
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            task.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                task.run();
+            }
+        });
+    }
+
+    /**
+     * 后台补齐资料切片的 Embedding，并重建 Vector Store 数据。
+     */
+    private void rebuildMaterialVectorIndex(long ownerId, Long materialId) {
+        try {
+            LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, ownerId).orElse(null);
+            if (material == null || material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+                return;
+            }
+            List<MaterialChunkEntity> chunks = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(materialId);
+            if (chunks.isEmpty()) {
+                return;
+            }
+            vectorStoreClient.deleteMaterial(ownerId, materialId);
+            List<MaterialChunkEntity> vectorBatch = new ArrayList<>();
+            Map<Long, List<Double>> embeddingsByChunkId = new LinkedHashMap<>();
+            for (MaterialChunkEntity chunk : chunks) {
+                String embeddingJson = toEmbeddingJson(chunk.getChunkText());
+                if (embeddingJson != null && !Objects.equals(embeddingJson, chunk.getEmbeddingJson())) {
+                    chunk.setEmbeddingJson(embeddingJson);
+                    materialChunkRepository.save(chunk);
+                }
+                List<Double> embedding = parseEmbeddingJson(embeddingJson);
+                if (embedding != null && chunk.getId() != null) {
+                    embeddingsByChunkId.put(chunk.getId(), embedding);
+                }
+                vectorBatch.add(chunk);
+                if (vectorBatch.size() >= VECTOR_UPSERT_BATCH_SIZE) {
+                    flushVectorBatch(material, vectorBatch, embeddingsByChunkId);
+                }
+            }
+            flushVectorBatch(material, vectorBatch, embeddingsByChunkId);
+            log.info("Material vector index rebuilt in background: materialId={}, chunks={}", materialId, chunks.size());
+        } catch (Exception exception) {
+            log.warn("Background vector index rebuild failed: materialId={}", materialId, exception);
+        }
+    }
+
     private void flushVectorBatch(
         LearningMaterialEntity material,
         List<MaterialChunkEntity> savedChunks,
@@ -1431,6 +1692,75 @@ public class MaterialService {
             vectorStoreClient.upsertChunks(material.getOwnerId(), material, savedChunks, embeddingsByChunkId);
             savedChunks.clear();
             embeddingsByChunkId.clear();
+        }
+    }
+
+    /**
+     * 保存页面文本层。
+     *
+     * <p>当前旧解析器只能稳定提供页级文本，因此先把每个 ParsedBlock 保存为整页文本块。
+     * MinerU 接入后可写入更细粒度的 bbox 行/段落块；即使 bbox 为空，前端也能在页面内展示
+     * 兜底文本层，从而取消页面下方重复解析正文。
+     */
+    private void savePageTextBlocks(LearningMaterialEntity material, ParsedMaterial parsed) {
+        if (material == null || material.getId() == null || parsed == null || parsed.blocks() == null) {
+            return;
+        }
+        Map<Integer, List<Long>> chunkIdsByPage = chunksByPage(
+            material.getId(),
+            material.getPageCount() == null ? 0 : material.getPageCount()
+        );
+        Map<Integer, Integer> blockIndexByPage = new LinkedHashMap<>();
+        List<MaterialPageTextBlockEntity> blocks = new ArrayList<>();
+        if (parsed.textLayers() != null && !parsed.textLayers().isEmpty()) {
+            for (PageTextLayerDraft draft : parsed.textLayers()) {
+                String text = draft.text() == null ? "" : draft.text().trim();
+                if (text.isBlank()) {
+                    continue;
+                }
+                int pageNo = draft.pageNo() == null || draft.pageNo() <= 0 ? 1 : draft.pageNo();
+                MaterialPageTextBlockEntity block = new MaterialPageTextBlockEntity();
+                block.setMaterialId(material.getId());
+                block.setPageNo(pageNo);
+                block.setBlockIndex(blockIndexByPage.merge(pageNo, 1, Integer::sum) - 1);
+                block.setText(text);
+                block.setBlockType(normalizeText(draft.blockType(), "paragraph"));
+                block.setSource(normalizeText(draft.source(), "MINERU"));
+                List<Long> pageChunkIds = chunkIdsByPage.getOrDefault(pageNo, List.of());
+                block.setChunkId(pageChunkIds.isEmpty() ? null : pageChunkIds.get(0));
+                block.setPageWidth(draft.pageWidth());
+                block.setPageHeight(draft.pageHeight());
+                block.setBboxX(draft.bboxX());
+                block.setBboxY(draft.bboxY());
+                block.setBboxWidth(draft.bboxWidth());
+                block.setBboxHeight(draft.bboxHeight());
+                block.setConfidence(draft.confidence());
+                blocks.add(block);
+            }
+        }
+        if (!blocks.isEmpty()) {
+            materialPageTextBlockRepository.saveAll(blocks);
+            return;
+        }
+        for (ParsedBlock parsedBlock : parsed.blocks()) {
+            String text = parsedBlock.text() == null ? "" : parsedBlock.text().trim();
+            if (text.isBlank()) {
+                continue;
+            }
+            int pageNo = parsedBlock.pageNo() == null || parsedBlock.pageNo() <= 0 ? 1 : parsedBlock.pageNo();
+            MaterialPageTextBlockEntity block = new MaterialPageTextBlockEntity();
+            block.setMaterialId(material.getId());
+            block.setPageNo(pageNo);
+            block.setBlockIndex(blockIndexByPage.merge(pageNo, 1, Integer::sum) - 1);
+            block.setText(text);
+            block.setBlockType("paragraph");
+            block.setSource("LEGACY");
+            List<Long> pageChunkIds = chunkIdsByPage.getOrDefault(pageNo, List.of());
+            block.setChunkId(pageChunkIds.isEmpty() ? null : pageChunkIds.get(0));
+            blocks.add(block);
+        }
+        if (!blocks.isEmpty()) {
+            materialPageTextBlockRepository.saveAll(blocks);
         }
     }
 
@@ -1547,6 +1877,25 @@ public class MaterialService {
         );
     }
 
+    private MaterialPageTextBlockResponse toPageTextBlockResponse(MaterialPageTextBlockEntity block) {
+        return new MaterialPageTextBlockResponse(
+            block.getId(),
+            block.getPageNo(),
+            block.getBlockIndex(),
+            block.getText(),
+            block.getBlockType(),
+            block.getSource(),
+            block.getChunkId(),
+            block.getPageWidth(),
+            block.getPageHeight(),
+            block.getBboxX(),
+            block.getBboxY(),
+            block.getBboxWidth(),
+            block.getBboxHeight(),
+            block.getConfidence()
+        );
+    }
+
     private MaterialUploadSessionResponse toUploadSessionResponse(MaterialUploadSessionEntity session) {
         int uploadedChunks = session.getUploadedChunks() == null ? countUploadedParts(session) : session.getUploadedChunks();
         LearningMaterialEntity material = session.getMaterialId() == null
@@ -1627,6 +1976,9 @@ public class MaterialService {
         }
         if (lowerName.endsWith(".pptx")) {
             return MaterialSourceType.PPTX;
+        }
+        if (lowerName.endsWith(".xlsx")) {
+            return MaterialSourceType.XLSX;
         }
         if (lowerName.endsWith(".pdf")) {
             return MaterialSourceType.PDF;
@@ -1875,6 +2227,25 @@ public class MaterialService {
     }
 
     /**
+     * 查询指定页面的文本层块。
+     *
+     * <p>页面文本层用于阅读器原位划词。MinerU 可提供精确坐标；旧解析器只有页级文本时也会返回
+     * 一个整页兜底块，保证前端不再需要在页面下方展示重复解析正文。
+     */
+    @Transactional(readOnly = true)
+    public List<MaterialPageTextBlockResponse> pageTextLayer(long ownerId, long materialId, int pageNo) {
+        if (pageNo <= 0) {
+            throw new BusinessException(400, "Invalid page number");
+        }
+        learningMaterialRepository.findByIdAndOwnerId(materialId, ownerId)
+            .orElseThrow(() -> new BusinessException(404, "Material not found"));
+        return materialPageTextBlockRepository.findByMaterialIdAndPageNoOrderByBlockIndexAsc(materialId, pageNo)
+            .stream()
+            .map(this::toPageTextBlockResponse)
+            .toList();
+    }
+
+    /**
      * 解析资料文件，提取文本内容（不带进度回调的简化版本）。
      *
      * @param sourceType 资料来源类型（决定使用哪个解析器）
@@ -1909,15 +2280,29 @@ public class MaterialService {
                 || sourceType == MaterialSourceType.DOCX
                 || sourceType == MaterialSourceType.WORD
                 || sourceType == MaterialSourceType.PPTX
-                || sourceType == MaterialSourceType.PPT) {
+                || sourceType == MaterialSourceType.PPT
+                || sourceType == MaterialSourceType.XLSX) {
                 // 重新解析前清掉旧图片资源，避免页面图和 Office 内嵌图残留到新解析结果。
                 deleteStoredAssets(storedFile.toString());
+            }
+            if (shouldUseMineru(sourceType, storedFile)) {
+                try {
+                    reportProgress(progressListener, 24, "MinerU 解析", "正在调用 MinerU 生成原文文本层");
+                    return parseWithMineru(sourceType, storedFile, progressListener);
+                } catch (Exception exception) {
+                    if (!mineruFallbackEnabled) {
+                        throw exception;
+                    }
+                    log.warn("MinerU parsing failed for {}, falling back to legacy parser", storedFile, exception);
+                    reportProgress(progressListener, 28, "内置解析", "MinerU 不可用，已切换到内置解析器");
+                }
             }
             return switch (sourceType) {
                 case TXT, MD, HTML, WEB -> ParsedMaterial.single(readTextFile(storedFile));
                 case DOCX -> parseWord(storedFile);
                 case WORD -> parseLegacyWord(storedFile, progressListener);
                 case PPTX, PPT -> parsePowerPoint(storedFile);
+                case XLSX -> throw new BusinessException(400, "XLSX 文件需要启用 MinerU 解析后才能上传");
                 case PDF -> parsePdf(storedFile, preparePdfProcessingFile(storedFile), progressListener);
             };
         } catch (Exception exception) {
@@ -1944,6 +2329,449 @@ public class MaterialService {
             .map(String::trim)
             .collect(Collectors.joining("\n\n"))
             .trim();
+    }
+
+    private boolean shouldUseMineru(MaterialSourceType sourceType, Path storedFile) {
+        if (!"mineru".equalsIgnoreCase(documentParserProvider)) {
+            return false;
+        }
+        if (sourceType == MaterialSourceType.PDF && mineruSkipTextPdf && pdfHasExtractableText(storedFile)) {
+            log.info("Skip MinerU for text-based PDF {}, PDF.js/PDFBox text layer is enough for selectable reading", storedFile);
+            return false;
+        }
+        return sourceType == MaterialSourceType.PDF
+            || sourceType == MaterialSourceType.DOCX
+            || sourceType == MaterialSourceType.WORD
+            || sourceType == MaterialSourceType.PPTX
+            || sourceType == MaterialSourceType.PPT
+            || sourceType == MaterialSourceType.XLSX;
+    }
+
+    /**
+     * 快速判断 PDF 是否已经包含可抽取文本。
+     *
+     * <p>普通文本 PDF 可以直接用 PDFBox 生成问答分块，并由前端 PDF.js 提供原生文本层，
+     * 不需要先等待 MinerU。扫描件或无法抽取文本的 PDF 会返回 false，继续交给 MinerU/OCR
+     * 生成阅读器可划选的后端文本层。
+     */
+    private boolean pdfHasExtractableText(Path pdfFile) {
+        if (pdfFile == null || !Files.exists(pdfFile)) {
+            return false;
+        }
+        try (var document = Loader.loadPDF(pdfFile.toFile())) {
+            int pageCount = document.getNumberOfPages();
+            if (pageCount <= 0) {
+                return false;
+            }
+            PDFTextStripper stripper = new PDFTextStripper();
+            stripper.setSortByPosition(true);
+            int detectPages = Math.min(pageCount, mineruTextPdfDetectPages);
+            for (int pageNo = 1; pageNo <= detectPages; pageNo++) {
+                stripper.setStartPage(pageNo);
+                stripper.setEndPage(pageNo);
+                String text = stripper.getText(document);
+                if (text != null && !text.trim().isBlank()) {
+                    return true;
+                }
+            }
+        } catch (IOException exception) {
+            log.debug("Unable to inspect PDF text layer before MinerU routing: {}", pdfFile, exception);
+        }
+        return false;
+    }
+
+    private ParsedMaterial parseWithMineru(
+        MaterialSourceType sourceType,
+        Path storedFile,
+        ParseProgressListener progressListener
+    ) throws IOException, InterruptedException {
+        Path mineruInput = storedFile;
+        if (sourceType == MaterialSourceType.WORD || sourceType == MaterialSourceType.PPT) {
+            Path convertedPdf = convertOfficeToPdf(storedFile);
+            if (convertedPdf == null) {
+                throw new BusinessException(400, "旧版 Office 文件需要先转换为 PDF 才能交给 MinerU 解析");
+            }
+            mineruInput = convertedPdf;
+        }
+        Files.createDirectories(mineruWorkspace);
+        Path runDir = mineruWorkspace.resolve("mineru-" + UUID.randomUUID()).normalize();
+        if (!runDir.startsWith(mineruWorkspace)) {
+            throw new BusinessException(500, "invalid MinerU workspace");
+        }
+        Files.createDirectories(runDir);
+        mineruInput = prepareMineruInput(mineruInput, runDir);
+        List<String> command = buildMineruCommand(mineruInput, runDir);
+        ProcessBuilder processBuilder = new ProcessBuilder(command)
+            .redirectErrorStream(true);
+        if (mineruModelSource != null) {
+            processBuilder.environment().put("MINERU_MODEL_SOURCE", mineruModelSource);
+        }
+        Process process = processBuilder.start();
+        CompletableFuture<String> outputFuture = readProcessOutputAsync(process);
+        boolean finished = process.waitFor(mineruTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            throw new BusinessException(500, "MinerU parsing timed out");
+        }
+        String output = processOutput(outputFuture);
+        if (process.exitValue() != 0) {
+            log.warn("MinerU parsing failed exitCode={} command={} output={}", process.exitValue(), command, truncateProcessOutput(output));
+            throw new BusinessException(500, "MinerU parsing failed: " + truncateProcessOutput(output));
+        }
+        reportProgress(progressListener, 42, "MinerU 解析", "正在读取 MinerU 输出文本层");
+        ParsedMaterial parsed = readMineruParsedMaterial(runDir);
+        if (parsed.isBlank()) {
+            throw new BusinessException(400, "MinerU did not extract readable text");
+        }
+        return parsed;
+    }
+
+    private Path prepareMineruInput(Path sourceFile, Path runDir) throws IOException {
+        String extension = extensionOf(sourceFile.getFileName().toString());
+        if (extension.isBlank()) {
+            extension = "bin";
+        }
+        Path inputDir = runDir.resolve("input").normalize();
+        if (!inputDir.startsWith(runDir)) {
+            throw new BusinessException(500, "invalid MinerU input path");
+        }
+        Files.createDirectories(inputDir);
+        Path shortInput = inputDir.resolve("input." + extension).normalize();
+        if (!shortInput.startsWith(inputDir)) {
+            throw new BusinessException(500, "invalid MinerU input file");
+        }
+        Files.copy(sourceFile, shortInput, StandardCopyOption.REPLACE_EXISTING);
+        return shortInput;
+    }
+
+    private List<String> buildMineruCommand(Path input, Path outputDir) {
+        List<String> command = new ArrayList<>(tokenizeCommandTemplate(mineruCommand));
+        if (command.isEmpty()) {
+            command.add("mineru");
+        }
+        command.add("-p");
+        command.add(input.toString());
+        command.add("-o");
+        command.add(outputDir.toString());
+        return command;
+    }
+
+    private ParsedMaterial readMineruParsedMaterial(Path runDir) throws IOException {
+        List<PageTextLayerDraft> textLayers = new ArrayList<>();
+        textLayers.addAll(readMineruContentList(findMineruOutputFile(runDir, "content_list_v2.json"), true));
+        if (textLayers.isEmpty()) {
+            textLayers.addAll(readMineruContentList(findMineruOutputFile(runDir, "content_list.json"), false));
+        }
+        if (textLayers.isEmpty()) {
+            textLayers.addAll(readMineruMiddleJson(findMineruOutputFile(runDir, "middle.json")));
+        }
+        List<ParsedBlock> blocks = textLayers.stream()
+            .filter(layer -> layer.text() != null && !layer.text().isBlank())
+            .map(layer -> new ParsedBlock(layer.text(), layer.pageNo(), layer.blockType()))
+            .toList();
+        if (blocks.isEmpty()) {
+            blocks = readMineruMarkdownBlocks(runDir);
+        }
+        return new ParsedMaterial(blocks, textLayers);
+    }
+
+    private Path findMineruOutputFile(Path runDir, String fileName) throws IOException {
+        if (runDir == null || !Files.exists(runDir)) {
+            return null;
+        }
+        try (Stream<Path> paths = Files.walk(runDir)) {
+            return paths
+                .filter(path -> Files.isRegularFile(path) && isMineruOutputFileName(path.getFileName().toString(), fileName))
+                .sorted((left, right) -> left.toString().compareToIgnoreCase(right.toString()))
+                .findFirst()
+                .orElse(null);
+        }
+    }
+
+    private boolean isMineruOutputFileName(String actualName, String expectedName) {
+        if (actualName == null || expectedName == null) {
+            return false;
+        }
+        String normalizedActual = actualName.toLowerCase(Locale.ROOT);
+        String normalizedExpected = expectedName.toLowerCase(Locale.ROOT);
+        return normalizedActual.equals(normalizedExpected)
+            || normalizedActual.endsWith("_" + normalizedExpected);
+    }
+
+    private List<PageTextLayerDraft> readMineruContentList(Path path, boolean groupedByPage) throws IOException {
+        if (path == null || !Files.exists(path)) {
+            return List.of();
+        }
+        JsonNode root = objectMapper.readTree(path.toFile());
+        List<PageTextLayerDraft> result = new ArrayList<>();
+        if (!root.isArray()) {
+            return result;
+        }
+        if (groupedByPage && root.size() > 0 && root.get(0).has("page_idx") && root.get(0).has("items")) {
+            for (JsonNode page : root) {
+                int pageNo = pageIndexToPageNo(page.get("page_idx"));
+                JsonNode items = page.get("items");
+                if (items != null && items.isArray()) {
+                    appendMineruContentItems(result, items, pageNo);
+                }
+            }
+            return result;
+        }
+        appendMineruContentItems(result, root, null);
+        return result;
+    }
+
+    private void appendMineruContentItems(List<PageTextLayerDraft> result, JsonNode items, Integer defaultPageNo) {
+        int localIndex = 0;
+        for (JsonNode item : items) {
+            String text = mineruItemText(item);
+            if (text.isBlank()) {
+                continue;
+            }
+            Integer pageNo = defaultPageNo != null ? defaultPageNo : mineruItemPageNo(item);
+            double[] bbox = mineruBbox(item.get("bbox"));
+            result.add(new PageTextLayerDraft(
+                pageNo == null || pageNo <= 0 ? 1 : pageNo,
+                localIndex++,
+                text,
+                normalizeText(item.path("type").asText(null), "paragraph"),
+                "MINERU",
+                MINERU_NORMALIZED_PAGE_SIZE,
+                MINERU_NORMALIZED_PAGE_SIZE,
+                bbox == null ? null : bbox[0],
+                bbox == null ? null : bbox[1],
+                bbox == null ? null : Math.max(1.0, bbox[2] - bbox[0]),
+                bbox == null ? null : Math.max(1.0, bbox[3] - bbox[1]),
+                null
+            ));
+        }
+    }
+
+    private List<PageTextLayerDraft> readMineruMiddleJson(Path path) throws IOException {
+        if (path == null || !Files.exists(path)) {
+            return List.of();
+        }
+        JsonNode root = objectMapper.readTree(path.toFile());
+        JsonNode pages = root.has("pdf_info") ? root.get("pdf_info") : root.get("pages");
+        if (pages == null || !pages.isArray()) {
+            return List.of();
+        }
+        List<PageTextLayerDraft> result = new ArrayList<>();
+        for (int pageIndex = 0; pageIndex < pages.size(); pageIndex++) {
+            JsonNode page = pages.get(pageIndex);
+            int pageNo = page.has("page_idx") ? pageIndexToPageNo(page.get("page_idx")) : pageIndex + 1;
+            double pageWidth = firstNumber(page, MINERU_NORMALIZED_PAGE_SIZE, "width", "page_width", "w");
+            double pageHeight = firstNumber(page, MINERU_NORMALIZED_PAGE_SIZE, "height", "page_height", "h");
+            JsonNode blocks = firstArray(page, "para_blocks", "preproc_blocks", "blocks");
+            if (blocks != null) {
+                appendMineruMiddleBlocks(result, blocks, pageNo, pageWidth, pageHeight);
+            }
+        }
+        return result;
+    }
+
+    private void appendMineruMiddleBlocks(
+        List<PageTextLayerDraft> result,
+        JsonNode blocks,
+        int pageNo,
+        double pageWidth,
+        double pageHeight
+    ) {
+        int blockIndex = 0;
+        for (JsonNode block : blocks) {
+            String text = mineruMiddleBlockText(block);
+            if (text.isBlank()) {
+                continue;
+            }
+            double[] bbox = mineruBbox(block.get("bbox"));
+            result.add(new PageTextLayerDraft(
+                pageNo,
+                blockIndex++,
+                text,
+                normalizeText(block.path("type").asText(null), "paragraph"),
+                "MINERU",
+                pageWidth,
+                pageHeight,
+                bbox == null ? null : bbox[0],
+                bbox == null ? null : bbox[1],
+                bbox == null ? null : Math.max(1.0, bbox[2] - bbox[0]),
+                bbox == null ? null : Math.max(1.0, bbox[3] - bbox[1]),
+                null
+            ));
+        }
+    }
+
+    private List<ParsedBlock> readMineruMarkdownBlocks(Path runDir) throws IOException {
+        Path markdown = null;
+        try (Stream<Path> paths = Files.walk(runDir)) {
+            markdown = paths
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".md"))
+                .findFirst()
+                .orElse(null);
+        }
+        if (markdown == null) {
+            return List.of();
+        }
+        String text = readTextFile(markdown).trim();
+        return text.isBlank() ? List.of() : List.of(new ParsedBlock(text, 1, "MinerU Markdown"));
+    }
+
+    private String mineruItemText(JsonNode item) {
+        StringBuilder builder = new StringBuilder();
+        appendNodeText(builder, item.get("text"));
+        appendNodeText(builder, item.get("content"));
+        appendMineruHtmlText(builder, item.get("table_body"));
+        appendMineruHtmlText(builder, item.get("html"));
+        JsonNode lines = item.get("lines");
+        if (lines != null && lines.isArray()) {
+            for (JsonNode line : lines) {
+                appendNodeText(builder, line.get("text"));
+            }
+        }
+        return normalizePageText(builder.toString());
+    }
+
+    private String mineruMiddleBlockText(JsonNode block) {
+        StringBuilder builder = new StringBuilder();
+        appendNodeText(builder, block.get("text"));
+        JsonNode lines = firstArray(block, "lines", "spans");
+        if (lines != null) {
+            for (JsonNode line : lines) {
+                appendNodeText(builder, line.get("text"));
+                JsonNode spans = line.get("spans");
+                if (spans != null && spans.isArray()) {
+                    for (JsonNode span : spans) {
+                        appendNodeText(builder, span.get("content"));
+                        appendNodeText(builder, span.get("text"));
+                    }
+                }
+            }
+        }
+        return normalizePageText(builder.toString());
+    }
+
+    private void appendNodeText(StringBuilder builder, JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return;
+        }
+        if (node.isTextual()) {
+            appendText(builder, node.asText());
+            return;
+        }
+        if (node.isArray()) {
+            for (JsonNode item : node) {
+                appendNodeText(builder, item);
+            }
+        }
+    }
+
+    private void appendMineruHtmlText(StringBuilder builder, JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return;
+        }
+        if (node.isTextual()) {
+            appendText(builder, cleanWebText(node.asText()));
+            return;
+        }
+        appendNodeText(builder, node);
+    }
+
+    private void appendText(StringBuilder builder, String text) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        if (!builder.isEmpty()) {
+            builder.append('\n');
+        }
+        builder.append(text);
+    }
+
+    private String normalizePageText(String text) {
+        String normalized = text == null ? "" : text
+            .replaceAll("\\s+", " ")
+            .trim();
+        if (normalized.length() <= PAGE_TEXT_BLOCK_MAX_LENGTH) {
+            return normalized;
+        }
+        return normalized.substring(0, PAGE_TEXT_BLOCK_MAX_LENGTH).trim();
+    }
+
+    private Integer mineruItemPageNo(JsonNode item) {
+        if (item == null) {
+            return null;
+        }
+        if (item.has("page_no")) {
+            return item.get("page_no").asInt();
+        }
+        if (item.has("page")) {
+            int page = item.get("page").asInt();
+            return page <= 0 ? 1 : page;
+        }
+        if (item.has("page_idx")) {
+            return pageIndexToPageNo(item.get("page_idx"));
+        }
+        return null;
+    }
+
+    private int pageIndexToPageNo(JsonNode node) {
+        if (node == null || !node.isNumber()) {
+            return 1;
+        }
+        return Math.max(1, node.asInt() + 1);
+    }
+
+    private double[] mineruBbox(JsonNode bbox) {
+        if (bbox == null || !bbox.isArray() || bbox.size() < 4) {
+            return null;
+        }
+        double x1 = bbox.get(0).asDouble();
+        double y1 = bbox.get(1).asDouble();
+        double x2 = bbox.get(2).asDouble();
+        double y2 = bbox.get(3).asDouble();
+        if (!Double.isFinite(x1) || !Double.isFinite(y1) || !Double.isFinite(x2) || !Double.isFinite(y2)) {
+            return null;
+        }
+        return new double[] { x1, y1, x2, y2 };
+    }
+
+    private JsonNode firstArray(JsonNode node, String... names) {
+        if (node == null) {
+            return null;
+        }
+        for (String name : names) {
+            JsonNode value = node.get(name);
+            if (value != null && value.isArray()) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private double firstNumber(JsonNode node, double fallback, String... names) {
+        if (node == null) {
+            return fallback;
+        }
+        for (String name : names) {
+            JsonNode value = node.get(name);
+            if (value != null && value.isNumber()) {
+                return value.asDouble();
+            }
+        }
+        return fallback;
+    }
+
+    private String truncateProcessOutput(String output) {
+        if (output == null || output.isBlank()) {
+            return "";
+        }
+        String normalized = output.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 4000 ? normalized : normalized.substring(normalized.length() - 4000);
+    }
+
+    private void reportProgress(ParseProgressListener listener, int percent, String stage, String message) {
+        if (listener != null) {
+            listener.onProgress(percent, stage, message);
+        }
     }
 
     /**
@@ -2032,13 +2860,14 @@ public class MaterialService {
             )
                 .redirectErrorStream(true)
                 .start();
+            CompletableFuture<String> outputFuture = readProcessOutputAsync(process);
             boolean finished = process.waitFor(converterTimeout.toMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
                 process.destroyForcibly();
                 return null;
             }
             if (process.exitValue() != 0) {
-                log.warn("Office preview conversion failed for {}: {}", sourcePath, readProcessOutput(process));
+                log.warn("Office preview conversion failed for {}: {}", sourcePath, processOutput(outputFuture));
                 return null;
             }
             Path generated = outputDir.resolve(stripExtension(sourcePath.getFileName().toString()) + ".pdf");
@@ -2055,10 +2884,20 @@ public class MaterialService {
         }
     }
 
-    private String readProcessOutput(Process process) {
+    private CompletableFuture<String> readProcessOutputAsync(Process process) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            } catch (IOException exception) {
+                return "";
+            }
+        }, processOutputExecutor);
+    }
+
+    private String processOutput(CompletableFuture<String> outputFuture) {
         try {
-            return new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
-        } catch (IOException exception) {
+            return outputFuture.get(5, TimeUnit.SECONDS);
+        } catch (Exception exception) {
             return "";
         }
     }
@@ -2133,6 +2972,7 @@ public class MaterialService {
      */
     private ParsedMaterial parsePdf(Path sourceFile, Path pdfFile, ParseProgressListener progressListener) throws IOException {
         List<ParsedBlock> blocks = new ArrayList<>();
+        List<PageTextLayerDraft> textLayers = new ArrayList<>();
         try (var document = Loader.loadPDF(pdfFile.toFile())) {
             int pageCount = document.getNumberOfPages();
             boolean inlinePdfOcrEnabled = shouldInlinePdfOcr(pdfFile, pageCount);
@@ -2148,13 +2988,15 @@ public class MaterialService {
                     ? "第 " + pageNo + " 页暂无可抽取文本，已保留原页预览用于阅读和问答依据。"
                     : extractedText;
                 if (extractedText.isBlank()) {
-                    blockText = scannedPdfPageText(sourceFile, document, pageIndex, pageNo, inlinePdfOcrEnabled);
+                    ScannedPdfPageResult scannedPage = scannedPdfPageTextLayer(sourceFile, document, pageIndex, pageNo, inlinePdfOcrEnabled);
+                    blockText = scannedPage.text();
+                    textLayers.addAll(scannedPage.textLayers());
                 }
                 blocks.add(new ParsedBlock(blockText, pageNo, "Page " + pageNo));
                 reportPdfParseProgress(progressListener, pageIndex, pageCount, inlinePdfOcrEnabled && extractedText.isBlank());
             }
         }
-        return new ParsedMaterial(blocks);
+        return new ParsedMaterial(blocks, textLayers);
     }
 
     private void reportPdfParseProgress(ParseProgressListener progressListener, int pageIndex, int pageCount, boolean ocrPage) {
@@ -2228,6 +3070,7 @@ public class MaterialService {
             Process process = new ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .start();
+            CompletableFuture<String> outputFuture = readProcessOutputAsync(process);
             boolean finished = process.waitFor(pdfCompressionTimeout.toMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
                 process.destroyForcibly();
@@ -2235,7 +3078,7 @@ public class MaterialService {
                 return null;
             }
             if (process.exitValue() != 0) {
-                log.warn("PDF compression failed for {}: {}", sourcePath, readProcessOutput(process));
+                log.warn("PDF compression failed for {}: {}", sourcePath, processOutput(outputFuture));
                 return null;
             }
             if (!Files.exists(targetPath) || !Files.isRegularFile(targetPath)) {
@@ -2306,7 +3149,7 @@ public class MaterialService {
      * @param inlinePdfOcrEnabled 是否启用内联 OCR
      * @return 包含图片标记和可能的 OCR 文本的字符串
      */
-    private String scannedPdfPageText(
+    private ScannedPdfPageResult scannedPdfPageTextLayer(
         Path file,
         org.apache.pdfbox.pdmodel.PDDocument document,
         int pageIndex,
@@ -2317,14 +3160,72 @@ public class MaterialService {
         String marker = imageMarker(imageName);
         if (!inlinePdfOcrEnabled) {
             // 扫描页即使不做 OCR 也保留图片标记，后续预览或多模态问答仍能定位原页。
-            return marker + "\n\u7b2c " + pageNo + " \u9875\u6682\u65e0\u53ef\u62bd\u53d6\u6587\u672c\uff1b\u539f\u9875\u56fe\u7247\u5c06\u5728\u9884\u89c8\u6216\u591a\u6a21\u6001\u95ee\u7b54\u65f6\u6309\u9700\u751f\u6210\u3002";
+            return new ScannedPdfPageResult(
+                marker + "\n第 " + pageNo + " 页暂无可抽取文本；原页图片将在预览或多模态问答时按需生成。",
+                List.of()
+            );
         }
         Path imagePath = renderPdfPageAsset(file, document, pageIndex, imageName);
         String ocrText = imagePath == null ? "" : ocrImageText(imagePath);
         if (!ocrText.isBlank()) {
-            return marker + "\n[image ocr: " + imageName + "]\n" + ocrText;
+            return new ScannedPdfPageResult(
+                marker + "\n[image ocr: " + imageName + "]\n" + ocrText,
+                scannedPdfOcrLineTextLayers(document, pageIndex, pageNo, ocrText)
+            );
         }
-        return marker + "\n\u7b2c " + pageNo + " \u9875\u6682\u65e0\u53ef\u62bd\u53d6\u6587\u672c\uff1b\u5df2\u4fdd\u7559\u539f\u9875\u56fe\u7247\uff0c\u53ef\u7528\u4e8e\u9884\u89c8\u548c\u591a\u6a21\u6001\u95ee\u7b54\u3002";
+        return new ScannedPdfPageResult(
+            marker + "\n第 " + pageNo + " 页暂无可抽取文本；已保留原页图片，可用于预览和多模态问答。",
+            List.of()
+        );
+    }
+
+    /**
+     * 为 legacy OCR 结果生成页面透明文本层兜底。
+     *
+     * <p>Tesseract stdout 模式只能稳定返回文本，缺少每个文字的真实坐标；这里按 OCR 行数在页面正文区域内均分，
+     * 让 MinerU 不可用时扫描 PDF 仍然可以按行划词。精准坐标仍优先依赖 MinerU 输出的 bbox。
+     */
+    private List<PageTextLayerDraft> scannedPdfOcrLineTextLayers(
+        org.apache.pdfbox.pdmodel.PDDocument document,
+        int pageIndex,
+        int pageNo,
+        String ocrText
+    ) {
+        List<String> lines = Arrays.stream((ocrText == null ? "" : ocrText).split("\\R+"))
+            .map(String::trim)
+            .filter(line -> !line.isBlank())
+            .toList();
+        if (lines.isEmpty()) {
+            return List.of();
+        }
+        PDRectangle pageBox = document.getPage(pageIndex).getCropBox();
+        if (pageBox == null) {
+            pageBox = document.getPage(pageIndex).getMediaBox();
+        }
+        double pageWidth = pageBox == null ? MINERU_NORMALIZED_PAGE_SIZE : Math.max(1.0, pageBox.getWidth());
+        double pageHeight = pageBox == null ? MINERU_NORMALIZED_PAGE_SIZE : Math.max(1.0, pageBox.getHeight());
+        double left = pageWidth * 0.06;
+        double top = pageHeight * 0.06;
+        double width = pageWidth * 0.88;
+        double lineHeight = (pageHeight * 0.88) / Math.max(1, lines.size());
+        List<PageTextLayerDraft> layers = new ArrayList<>();
+        for (int index = 0; index < lines.size(); index++) {
+            layers.add(new PageTextLayerDraft(
+                pageNo,
+                index,
+                lines.get(index),
+                "ocr-line",
+                "LEGACY_OCR",
+                pageWidth,
+                pageHeight,
+                left,
+                top + index * lineHeight,
+                width,
+                Math.max(8.0, lineHeight * 0.92),
+                null
+            ));
+        }
+        return layers;
     }
 
     private boolean shouldInlinePdfOcr(Path file, int pageCount) {
@@ -2412,14 +3313,42 @@ public class MaterialService {
      * 解析旧版 Word (.doc) 文件。
      *
      * <p>.doc 是二进制 Office 格式，不能像 .docx 一样直接解 ZIP 读取 XML。
-     * 这里复用服务器上的 LibreOffice/soffice 先转成 PDF，再走已有 PDF 文本提取流程。
+     * 优先用 Apache POI 直接抽取正文，保证未安装 LibreOffice 的环境也能上传和问答；
+     * 如果 POI 无法识别该文件，再尝试 LibreOffice 转 PDF 后解析。
      */
     private ParsedMaterial parseLegacyWord(Path file, ParseProgressListener progressListener) throws IOException {
+        try (var input = Files.newInputStream(file);
+             var document = new HWPFDocument(input);
+             var extractor = new WordExtractor(document)) {
+            String text = normalizeLegacyWordText(extractor.getText());
+            if (!text.isBlank()) {
+                return ParsedMaterial.single(text);
+            }
+        } catch (Exception exception) {
+            log.warn("Apache POI failed to parse legacy Word file {}, trying LibreOffice fallback", file, exception);
+        }
         Path convertedPdf = convertOfficeToPdf(file);
         if (convertedPdf == null) {
-            throw new BusinessException(400, "旧版 .doc 文件需要服务器安装 LibreOffice/soffice 才能解析，请安装后重试，或先另存为 .docx 再上传");
+            throw new BusinessException(400, "旧版 .doc 文件解析失败，请确认文件未损坏，或先另存为 .docx 再上传");
         }
         return parsePdf(file, convertedPdf, progressListener);
+    }
+
+    /**
+     * 清理旧版 Word 抽取出的控制字符和多余空行。
+     *
+     * <p>HWPF 会保留部分 Word 段落控制符，统一替换为换行，避免切片和阅读器看到不可见乱码。
+     */
+    private String normalizeLegacyWordText(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replace('\r', '\n')
+            .replace('\u0007', '\n')
+            .replaceAll("[\\u0000-\\u0006\\u0008-\\u001F]", "")
+            .replaceAll("[ \\t\\x0B\\f]+", " ")
+            .replaceAll("\\n{3,}", "\n\n")
+            .trim();
     }
 
     private boolean containsWordDrawing(String xml) {
@@ -3014,6 +3943,7 @@ public class MaterialService {
                 return renderPdfPageAsset(sourceFile, document, pageNo - 1, fileName);
             }
         } catch (Exception exception) {
+            log.warn("PDF page render failed for {} from {}", fileName, pdfFile, exception);
             return null;
         } finally {
             if (acquired) {
@@ -3053,6 +3983,7 @@ public class MaterialService {
             ImageIO.write(image, "png", target.toFile());
             return target;
         } catch (Exception exception) {
+            log.warn("PDF page render failed for {} pageIndex={}", sourceFile, pageIndex, exception);
             return null;
         }
     }
@@ -3179,16 +4110,20 @@ public class MaterialService {
             Process process = new ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .start();
+            CompletableFuture<String> outputFuture = readProcessOutputAsync(process);
             boolean finished = process.waitFor(ocrTimeout.toMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
                 process.destroyForcibly();
+                log.warn("OCR timed out after {} for image {} command={}", ocrTimeout, imagePath, command);
                 return "";
             }
             if (process.exitValue() != 0) {
+                log.warn("OCR command failed exitCode={} image={} output={}", process.exitValue(), imagePath, processOutput(outputFuture));
                 return "";
             }
-            return new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            return processOutput(outputFuture);
         } catch (Exception exception) {
+            log.warn("OCR execution failed for image {}", imagePath, exception);
             return "";
         }
     }
@@ -3442,7 +4377,11 @@ public class MaterialService {
         if (text.isBlank()) {
             throw new BusinessException(400, "clientUploadId cannot be blank");
         }
-        return text;
+        if (text.length() <= CLIENT_UPLOAD_ID_MAX_LENGTH) {
+            return text;
+        }
+        // 旧前端曾把完整文件名拼进 clientUploadId；超长时改为稳定摘要，避免数据库截断导致 500。
+        return "legacy-" + sha256(text.getBytes(StandardCharsets.UTF_8)).substring(0, 57);
     }
 
     /**
@@ -3480,6 +4419,25 @@ public class MaterialService {
             return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException exception) {
             return "";
+        }
+    }
+
+    /**
+     * 流式比较两个文件的 SHA-256，避免为了判断重复分片把内容整体读入内存。
+     */
+    private boolean sameFileHash(Path first, Path second) throws IOException {
+        return sha256(first).equalsIgnoreCase(sha256(second));
+    }
+
+    /**
+     * 将校验通过的临时分片移动为正式分片。
+     * 优先使用原子移动，避免正式分片被半写入；少数文件系统不支持时退回同目录普通移动。
+     */
+    private void moveUploadedPart(Path tempPartPath, Path partPath) throws IOException {
+        try {
+            Files.move(tempPartPath, partPath, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException exception) {
+            Files.move(tempPartPath, partPath);
         }
     }
 
@@ -3758,6 +4716,9 @@ public class MaterialService {
         if (contentType.contains("presentationml") || contentType.contains("officedocument.presentationml")) {
             return MaterialSourceType.PPTX;
         }
+        if (contentType.contains("spreadsheetml") || contentType.contains("officedocument.spreadsheetml")) {
+            return MaterialSourceType.XLSX;
+        }
         if (contentType.contains("markdown")) {
             return MaterialSourceType.MD;
         }
@@ -3775,6 +4736,7 @@ public class MaterialService {
         return lowerName.endsWith(".pdf")
             || lowerName.endsWith(".docx")
             || lowerName.endsWith(".pptx")
+            || lowerName.endsWith(".xlsx")
             || lowerName.endsWith(".md")
             || lowerName.endsWith(".txt")
             || lowerName.endsWith(".html")
@@ -3789,6 +4751,7 @@ public class MaterialService {
             case PDF -> ".pdf";
             case DOCX, WORD -> ".docx";
             case PPTX, PPT -> ".pptx";
+            case XLSX -> ".xlsx";
             case MD -> ".md";
             case HTML, WEB -> ".html";
             case TXT -> ".txt";
@@ -3806,6 +4769,7 @@ public class MaterialService {
             case PDF -> "application/pdf";
             case DOCX, WORD -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
             case PPTX, PPT -> "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+            case XLSX -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
             case MD, TXT -> "text/plain; charset=" + textFileCharset(path);
             case HTML, WEB -> "text/html; charset=utf-8";
         };
@@ -3859,7 +4823,11 @@ public class MaterialService {
      * 解析后的资料内容（包含多个文本块）。
      * 每个文本块关联一个页码和章节标题。
      */
-    private record ParsedMaterial(List<ParsedBlock> blocks) {
+    private record ParsedMaterial(List<ParsedBlock> blocks, List<PageTextLayerDraft> textLayers) {
+        private ParsedMaterial(List<ParsedBlock> blocks) {
+            this(blocks, List.of());
+        }
+
         /** 创建单文本块的解析结果（用于 TXT/MD/HTML 等单文档格式） */
         private static ParsedMaterial single(String text) {
             String normalized = text == null ? "" : text.trim();
@@ -3868,8 +4836,13 @@ public class MaterialService {
 
         /** 判断所有文本块是否都为空 */
         private boolean isBlank() {
-            return blocks.stream().allMatch(block -> block.text() == null || block.text().isBlank());
+            return blocks.stream().allMatch(block -> block.text() == null || block.text().isBlank())
+                && (textLayers == null || textLayers.stream().allMatch(block -> block.text() == null || block.text().isBlank()));
         }
+    }
+
+    /** 扫描 PDF 单页解析结果，包含用于检索的文本和可叠加到阅读器页面的透明文本层。 */
+    private record ScannedPdfPageResult(String text, List<PageTextLayerDraft> textLayers) {
     }
 
     /**
@@ -3880,6 +4853,25 @@ public class MaterialService {
      * @param sectionTitle 章节标题（可选，如 "Page 3"、"Slide 5"）
      */
     private record ParsedBlock(String text, Integer pageNo, String sectionTitle) {
+    }
+
+    /**
+     * 页面文本层草稿，保存原文页面上可选中文本的坐标信息。
+     */
+    private record PageTextLayerDraft(
+        Integer pageNo,
+        Integer blockIndex,
+        String text,
+        String blockType,
+        String source,
+        Double pageWidth,
+        Double pageHeight,
+        Double bboxX,
+        Double bboxY,
+        Double bboxWidth,
+        Double bboxHeight,
+        Double confidence
+    ) {
     }
 
     /**

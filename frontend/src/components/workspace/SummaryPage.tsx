@@ -1,11 +1,11 @@
 /**
  * SummaryPage - 资料总结页面
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useMaterials } from '@/api/materials'
-import { useSummarizeMaterial, useMaterialSummaryHistory, useUpdateSummaryNote } from '@/api/rag'
+import { useMaterialSummaryHistory, useUpdateSummaryNote } from '@/api/rag'
 import { useAuth } from '@/context/AuthContext'
 import { useToast } from '@/components/ui/toast'
 import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
@@ -20,8 +20,9 @@ import { Textarea } from '@/components/ui/textarea'
 import { formatDate, truncate } from '@/lib/utils'
 import {
   BookOpen, Clock, ExternalLink, FileText, Layers3, Loader2, PencilLine, Save,
-  Sparkles,
+  Sparkles, History,
 } from 'lucide-react'
+import { getSummarySessionSnapshot, getSummaryTask, startSummaryTask, subscribeSummarySession } from '@/lib/summary-session'
 import type { SummaryResult, SummarySource, SummaryType } from '@/types'
 
 const SUMMARY_TYPES: Array<{ value: SummaryType; label: string; description: string }> = [
@@ -33,6 +34,8 @@ const SUMMARY_TYPES: Array<{ value: SummaryType; label: string; description: str
   { value: 'ACTION', label: '行动清单', description: '偏结论、风险、待办和决策依据' },
 ]
 
+type SummaryViewMode = 'latest' | 'history' | 'note'
+
 export function SummaryPage() {
   const navigate = useNavigate()
   const { isAuthenticated } = useAuth()
@@ -41,23 +44,46 @@ export function SummaryPage() {
   const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(null)
   const [summaryType, setSummaryType] = useState<SummaryType>('GENERAL')
   const [noteDraft, setNoteDraft] = useState('')
+  const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null)
+  const [viewMode, setViewMode] = useState<SummaryViewMode>('latest')
 
   const { data: summaryHistory = [], isLoading: summaryLoading } = useMaterialSummaryHistory(selectedMaterialId)
-  const summarizeMutation = useSummarizeMaterial()
   const updateNoteMutation = useUpdateSummaryNote()
+  /**
+   * 总结生成任务由模块级 store 托管。
+   * 用户切换到别的模块时 SummaryPage 会卸载，但请求仍会继续执行；
+   * 切回后这里重新订阅 store，即可看到生成中状态或已完成后刷新的历史结果。
+   */
+  useSyncExternalStore(
+    subscribeSummarySession,
+    getSummarySessionSnapshot,
+    getSummarySessionSnapshot,
+  )
 
   const selectedMaterial = materials.find((m) => m.id === selectedMaterialId) || null
   const latestSummary = summaryHistory[0] || null
   const selectedType = SUMMARY_TYPES.find((item) => item.value === summaryType) || SUMMARY_TYPES[0]
+  const currentSummaryTask = getSummaryTask(selectedMaterialId)
+  const generatingSummary = !!currentSummaryTask?.loading
+  const selectedHistorySummary = selectedSummaryId
+    ? summaryHistory.find((summary) => summary.summaryId === selectedSummaryId) || null
+    : null
+  const visibleSummary = viewMode === 'history' ? selectedHistorySummary || latestSummary : latestSummary
+  const notePreview = latestSummary?.userNote?.trim() || ''
 
   useEffect(() => {
     setNoteDraft(latestSummary?.userNote || latestSummary?.summary || '')
   }, [latestSummary?.summaryId])
 
+  useEffect(() => {
+    setSelectedSummaryId(null)
+    setViewMode('latest')
+  }, [selectedMaterialId])
+
   const sourcesByChunk = useMemo(() => {
-    const sources = latestSummary?.sources || []
+    const sources = visibleSummary?.sources || []
     return new Map(sources.map((source) => [source.chunkId, source]))
-  }, [latestSummary])
+  }, [visibleSummary])
 
   const handleGenerate = () => {
     if (!isAuthenticated) {
@@ -66,7 +92,9 @@ export function SummaryPage() {
       return
     }
     if (selectedMaterialId) {
-      summarizeMutation.mutate({ materialId: selectedMaterialId, summaryType })
+      setSelectedSummaryId(null)
+      setViewMode('latest')
+      startSummaryTask({ materialId: selectedMaterialId, summaryType })
     }
   }
 
@@ -74,8 +102,25 @@ export function SummaryPage() {
     if (!latestSummary) return
     updateNoteMutation.mutate(
       { summaryId: latestSummary.summaryId, userNote: noteDraft },
-      { onSuccess: () => showToast('整理版已保存', 1600) }
+      {
+        onSuccess: () => {
+          setViewMode('note')
+          setSelectedSummaryId(null)
+          showToast('整理版已保存，可在主内容区查看', 1600)
+        },
+      }
     )
+  }
+
+  const openHistorySummary = (summary: SummaryResult) => {
+    setSelectedSummaryId(summary.summaryId)
+    setViewMode('history')
+  }
+
+  const openNoteView = () => {
+    if (!notePreview) return
+    setSelectedSummaryId(null)
+    setViewMode('note')
   }
 
   const openSource = (source: SummarySource) => {
@@ -132,28 +177,50 @@ export function SummaryPage() {
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button size="sm" onClick={handleGenerate} disabled={summarizeMutation.isPending}>
-                    {summarizeMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Sparkles className="h-4 w-4 mr-1" />}
-                    生成总结
+                  <Button
+                    size="sm"
+                    className="bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-slate-200"
+                    onClick={handleGenerate}
+                    disabled={generatingSummary}
+                  >
+                    {generatingSummary ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Sparkles className="h-4 w-4 mr-1" />}
+                    {generatingSummary ? '生成中...' : '生成总结'}
                   </Button>
                 </div>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">{selectedType.description}</p>
+              {currentSummaryTask?.error && (
+                <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+                  {currentSummaryTask.error}
+                </p>
+              )}
             </div>
 
             <ScrollArea className="flex-1">
               <div className="grid gap-4 px-6 py-4 xl:grid-cols-[minmax(0,1fr)_340px]">
                 <section className="space-y-4 min-w-0">
-                  {summaryLoading ? (
+                  {summaryLoading || generatingSummary ? (
                     <SummarySkeleton />
-                  ) : latestSummary ? (
-                    <SummaryContent summary={latestSummary} sourcesByChunk={sourcesByChunk} onOpenSource={openSource} />
+                  ) : viewMode === 'note' && latestSummary ? (
+                    <SummaryNoteContent summary={latestSummary} note={notePreview || noteDraft} />
+                  ) : visibleSummary ? (
+                    <SummaryContent
+                      summary={visibleSummary}
+                      title={viewMode === 'history' ? '历史总结' : '最新总结'}
+                      marker={viewMode === 'history' ? '正在查看历史版本' : undefined}
+                      sourcesByChunk={sourcesByChunk}
+                      onOpenSource={openSource}
+                    />
                   ) : (
                     <EmptySummary />
                   )}
 
                   {summaryHistory.length > 1 && (
-                    <HistoryList summaries={summaryHistory.slice(1)} />
+                    <HistoryList
+                      summaries={summaryHistory.slice(1)}
+                      selectedSummaryId={viewMode === 'history' ? selectedSummaryId : null}
+                      onOpen={openHistorySummary}
+                    />
                   )}
                 </section>
 
@@ -172,9 +239,24 @@ export function SummaryPage() {
                         placeholder="可以在这里把 AI 总结改成自己的版本。"
                         disabled={!latestSummary}
                       />
-                      <Button className="w-full" size="sm" disabled={!latestSummary || updateNoteMutation.isPending} onClick={handleSaveNote}>
+                      <Button
+                        className="w-full bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-slate-200"
+                        size="sm"
+                        disabled={!latestSummary || updateNoteMutation.isPending}
+                        onClick={handleSaveNote}
+                      >
                         {updateNoteMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}
                         保存整理版
+                      </Button>
+                      <Button
+                        className="w-full border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-950 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                        variant="outline"
+                        size="sm"
+                        disabled={!notePreview}
+                        onClick={openNoteView}
+                      >
+                        <FileText className="mr-1 h-4 w-4" />
+                        查看整理版
                       </Button>
                     </CardContent>
                   </Card>
@@ -215,9 +297,11 @@ export function SummaryPage() {
 }
 
 function SummaryContent({
-  summary, sourcesByChunk, onOpenSource,
+  summary, title, marker, sourcesByChunk, onOpenSource,
 }: {
   summary: SummaryResult
+  title: string
+  marker?: string
   sourcesByChunk: Map<string, SummarySource>
   onOpenSource: (source: SummarySource) => void
 }) {
@@ -227,9 +311,10 @@ function SummaryContent({
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-base flex items-center gap-2">
-            <Layers3 className="h-4 w-4" /> 最新总结
+            <Layers3 className="h-4 w-4 text-slate-700 dark:text-slate-200" /> {title}
           </CardTitle>
           <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+            {marker && <Badge className="bg-slate-900 text-[10px] text-white dark:bg-slate-100 dark:text-slate-950">{marker}</Badge>}
             <Badge variant="secondary" className="text-[10px]">{summary.sourceCount} 个来源</Badge>
             {summary.modelName && <Badge variant="outline" className="text-[10px]">{summary.modelName}</Badge>}
             <Clock className="h-3 w-3" /> {formatDate(summary.createdAt)}
@@ -255,7 +340,13 @@ function SummaryContent({
                   {section.sources.slice(0, 4).map((source) => {
                     const fullSource = sourcesByChunk.get(source.chunkId) || source
                     return (
-                      <Button key={source.chunkId} variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={() => onOpenSource(fullSource)}>
+                      <Button
+                        key={source.chunkId}
+                        variant="outline"
+                        size="sm"
+                        className="h-7 border-slate-300 px-2 text-[11px] text-slate-700 hover:bg-slate-100 hover:text-slate-950 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                        onClick={() => onOpenSource(fullSource)}
+                      >
                         <ExternalLink className="h-3 w-3 mr-1" />
                         {source.pageNo ? `第 ${source.pageNo} 页` : `片段 ${(source.chunkIndex ?? 0) + 1}`}
                       </Button>
@@ -271,16 +362,37 @@ function SummaryContent({
   )
 }
 
+function SummaryNoteContent({ summary, note }: { summary: SummaryResult; note: string }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <PencilLine className="h-4 w-4 text-slate-700 dark:text-slate-200" /> 我的整理版
+          </CardTitle>
+          <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+            <Badge className="bg-slate-900 text-[10px] text-white dark:bg-slate-100 dark:text-slate-950">已保存</Badge>
+            <Clock className="h-3 w-3" /> {formatDate(summary.createdAt)}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <p className="whitespace-pre-wrap text-sm leading-7">{note || '暂无整理版内容'}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
 function SourceButton({ source, onOpen }: { source: SummarySource; onOpen: (source: SummarySource) => void }) {
   return (
     <button
       type="button"
-      className="w-full rounded-md border bg-background px-3 py-2 text-left transition-colors hover:bg-muted"
+      className="w-full rounded-md border border-slate-200 bg-background px-3 py-2 text-left transition-colors hover:bg-slate-100 dark:border-slate-800 dark:hover:bg-slate-800"
       onClick={() => onOpen(source)}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium truncate">{source.title || '来源片段'}</span>
-        <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+        <ExternalLink className="h-3.5 w-3.5 text-slate-500 shrink-0 dark:text-slate-400" />
       </div>
       <p className="mt-1 text-[11px] text-muted-foreground line-clamp-2 leading-5">
         {source.pageNo ? `第 ${source.pageNo} 页 · ` : ''}{truncate(source.excerpt, 120)}
@@ -289,26 +401,39 @@ function SourceButton({ source, onOpen }: { source: SummarySource; onOpen: (sour
   )
 }
 
-function HistoryList({ summaries }: { summaries: SummaryResult[] }) {
+function HistoryList({
+  summaries, selectedSummaryId, onOpen,
+}: {
+  summaries: SummaryResult[]
+  selectedSummaryId: string | null
+  onOpen: (summary: SummaryResult) => void
+}) {
   return (
     <>
       <Separator />
       <div>
         <h4 className="mb-3 text-sm font-medium">历史总结</h4>
         <div className="space-y-3">
-          {summaries.map((summary) => (
-            <Card key={summary.summaryId}>
+          {summaries.map((summary) => {
+            const selected = selectedSummaryId === summary.summaryId
+            return (
+            <Card
+              key={summary.summaryId}
+              className={selected ? 'border-slate-400 bg-slate-50 dark:border-slate-600 dark:bg-slate-900/60' : 'cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-slate-900/50'}
+              onClick={() => onOpen(summary)}
+            >
               <CardContent className="py-3 px-4">
                 <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                  <Clock className="h-3 w-3" /> {formatDate(summary.createdAt)}
+                  <History className="h-3 w-3 text-slate-600 dark:text-slate-300" /> {formatDate(summary.createdAt)}
                   {summary.summaryType && <Badge variant="outline" className="text-[10px] px-1 py-0">{summary.summaryType}</Badge>}
+                  {selected && <Badge className="bg-slate-900 px-1 py-0 text-[10px] text-white dark:bg-slate-100 dark:text-slate-950">正在查看</Badge>}
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground line-clamp-3 leading-relaxed">
                   {truncate(summary.summary, 220)}
                 </p>
               </CardContent>
             </Card>
-          ))}
+          )})}
         </div>
       </div>
     </>

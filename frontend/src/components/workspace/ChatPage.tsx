@@ -5,10 +5,10 @@ import { AlertCircle, BookOpen, CheckCircle2, Plus, Search, Server, Sparkles, Tr
 import { ChatThread } from './ChatThread'
 import { ChatComposer } from './ChatComposer'
 import { MaterialUploadForm } from './MaterialUploadForm'
-import { useDeleteHistory, useHistory, useRagUsage, useRenameHistory, useTogglePinHistory } from '@/api/rag'
+import { getHistory, useDeleteHistory, useHistory, useRagUsage, useRenameHistory, useTogglePinHistory } from '@/api/rag'
 import { useDeleteUserLlmConfig, useSaveUserLlmConfig, useTestUserLlmConfig, useUserLlmConfig } from '@/api/llm'
 import { useAddFavorite, useDeleteFavorite, useFavorites } from '@/api/favorites'
-import { MAX_TEMPORARY_MATERIAL_BYTES, uploadMaterialInChunks, uploadTemporaryMaterial, useMaterials } from '@/api/materials'
+import { LARGE_UPLOAD_CHUNK_SIZE, MAX_TEMPORARY_MATERIAL_BYTES, uploadMaterialInChunks, uploadTemporaryMaterial, useMaterials } from '@/api/materials'
 import { GENERAL_PROMPTS, MATERIAL_PROMPTS } from '@/constants'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -163,6 +163,8 @@ export function ChatPage() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   /** 本地 LLM 配置（乐观更新，避免等待服务器响应） */
   const [localLlmConfig, setLocalLlmConfig] = useState<UserLlmConfig | null>(null)
+  /** 正在通过 URL historyId 兜底加载的历史 ID，避免列表刷新期间重复请求同一条详情。 */
+  const [fallbackHistoryLoadingId, setFallbackHistoryLoadingId] = useState<string | null>(null)
 
   // === 资料上传弹窗状态 ===
   /** 上传弹窗是否打开 */
@@ -258,6 +260,14 @@ export function ChatPage() {
       if (target && selectedHistoryId !== historyParam) {
         // 历史会话以服务端快照为准，避免把当前未完成的聊天状态混入历史详情。
         selectHistorySession(target)
+      } else if (!target && selectedHistoryId !== historyParam && fallbackHistoryLoadingId !== historyParam) {
+        // 历史列表会按 conversationId 合并，只展示每个会话最新一条。
+        // 收藏页可能跳到同一会话中的较早 questionId，因此列表找不到时直接请求详情兜底恢复。
+        setFallbackHistoryLoadingId(historyParam)
+        getHistory(historyParam)
+          .then((detail) => selectHistorySession(detail))
+          .catch(() => showToast('历史记录不存在或已被删除', 2000))
+          .finally(() => setFallbackHistoryLoadingId((current) => current === historyParam ? null : current))
       }
       return
     }
@@ -270,7 +280,7 @@ export function ChatPage() {
         chunkId: chunkParam,
       })
     }
-  }, [chunkParam, historyItems, historyParam, materialParam, mode, newChatParam, selectedChunkId, selectedHistoryId, selectedMaterialId, setSearchParams])
+  }, [chunkParam, fallbackHistoryLoadingId, historyItems, historyParam, materialParam, mode, newChatParam, selectedChunkId, selectedHistoryId, selectedMaterialId, setSearchParams, showToast])
 
   /**
    * 更新 URL 参数以反映当前聊天上下文
@@ -400,7 +410,7 @@ export function ChatPage() {
    * 上传完成后自动选中第一份资料并切换到资料问答模式。
    *
    * 流程：
-   * 1. 并行上传所有文件（uploadMaterialInChunks，分片大小 5MB）
+   * 1. 并行上传所有文件（uploadMaterialInChunks，分片大小 1MB）
    * 2. 每个文件独立追踪分片上传进度
    * 3. 全部完成后：
    *    - 刷新资料列表缓存
@@ -430,8 +440,8 @@ export function ChatPage() {
           setUploadProgressItems((current) => updateUploadProgressItem(current, id, {
             phase: 'processing',
             percent: 100,
-            uploadedChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),
-            totalChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),
+            uploadedChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
+            totalChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
             stage: '解析完成',
             message: '资料已上传完成',
           }, 'success'))
@@ -831,6 +841,10 @@ export function ChatPage() {
   const isGeneral = mode === 'GENERAL'
   const quickPrompts = isGeneral ? GENERAL_PROMPTS : MATERIAL_PROMPTS
   const parsedMaterials = materials.filter((m) => m.parseStatus === 'SUCCESS' || m.parseStatus === 'PARSED')
+  const selectedMaterial = selectedMaterialId
+    ? materials.find((m) => m.id === selectedMaterialId) || null
+    : null
+  const selectedMaterialLabel = selectedMaterial?.title || selectedMaterial?.originalName || ''
   const isEmptyChat = messages.length === 0
   const usageLabel = ragUsage
     ? ragUsage.unlimited
@@ -856,7 +870,7 @@ export function ChatPage() {
                 ? `已加载临时资料：${temporaryMaterial.title || temporaryMaterial.originalName || '未命名资料'}`
                 : '基于通用知识回答'
               : selectedMaterialId
-                ? `已绑定：${materials.find((m) => m.id === selectedMaterialId)?.title || '未知资料'}`
+                ? '已绑定资料，可基于资料提问'
                 : '请选择资料后提问'}
           </p>
         </div>
@@ -901,7 +915,7 @@ export function ChatPage() {
           )}
           {!isGeneral && selectedMaterialId ? (
             <Badge variant="outline" className="hidden shrink-0 text-[10px] font-medium sm:inline-flex">
-              {materials.find((m) => m.id === selectedMaterialId)?.chunkCount || 0} 个切片
+              {selectedMaterial?.chunkCount || 0} 个切片
             </Badge>
           ) : (
             <Badge variant="secondary" className="hidden shrink-0 text-[10px] font-medium sm:inline-flex">
@@ -925,7 +939,9 @@ export function ChatPage() {
       {isEmptyChat ? (
         <div className="flex flex-1 flex-col items-center justify-center px-6 pb-14">
           <div className="mb-6 text-center">
-            <h2 className="text-4xl font-black tracking-[0.02em] text-black dark:text-white sm:text-5xl">智能问答</h2>
+            <h2 className="text-4xl font-black tracking-[0.02em] text-black dark:text-white sm:text-5xl">
+              {isGeneral ? '智能问答' : '资料问答'}
+            </h2>
             <p className="mt-3 text-sm text-muted-foreground">描述问题、上传资料或选择资料后开始提问</p>
           </div>
           {!isGeneral && (
@@ -980,6 +996,7 @@ export function ChatPage() {
             disabledHint="今日问答次数已用完"
             usageLabel={usageLabel}
             modelLabel={effectiveLlmConfig?.activeLabel || 'gpt5.5模型'}
+            boundMaterialLabel={!isGeneral ? selectedMaterialLabel : undefined}
             customModelEnabled={!!effectiveLlmConfig?.enabled}
             onOpenModelSettings={openModelDialog}
             images={images}
@@ -1015,6 +1032,7 @@ export function ChatPage() {
             disabledHint="今日问答次数已用完"
             usageLabel={usageLabel}
             modelLabel={effectiveLlmConfig?.activeLabel || 'gpt5.5模型'}
+            boundMaterialLabel={!isGeneral ? selectedMaterialLabel : undefined}
             customModelEnabled={!!effectiveLlmConfig?.enabled}
             onOpenModelSettings={openModelDialog}
             images={images}
@@ -1291,7 +1309,7 @@ function createUploadProgressItems(files: File[]): UploadProgressItem[] {
     phase: 'uploading',
     percent: 0,
     uploadedChunks: 0,
-    totalChunks: Math.max(1, Math.ceil(file.size / (5 * 1024 * 1024))),
+    totalChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
     message: '等待上传',
   }))
 }

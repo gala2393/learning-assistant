@@ -4,6 +4,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -39,6 +40,9 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
 
     /** HTTP 客户端，用于发送 API 请求 */
     private final HttpClient httpClient;
+
+    /** 单次回答输出上限；超长文档由业务层分段生成，不依赖单次请求硬撑完整长文。 */
+    private static final int DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 
     /**
      * 公开构造函数（使用默认 ObjectMapper）
@@ -91,7 +95,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
                 : chatCompletionsRequest(systemPrompt, userPrompt, safeImages);
 
             // 发送 HTTP 请求并获取响应
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
             // 检查 HTTP 状态码是否成功（2xx）
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
@@ -284,9 +288,9 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         return HttpRequest.newBuilder(responsesUri())
             .timeout(properties.timeout())
             .header("Authorization", "Bearer " + properties.apiKey())
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json; charset=utf-8")
             .header("Accept", "text/event-stream")
-            .POST(HttpRequest.BodyPublishers.ofString(responsesBody(systemPrompt, userPrompt, images, true)))
+            .POST(jsonBody(responsesBody(systemPrompt, userPrompt, images, true)))
             .build();
     }
 
@@ -297,9 +301,9 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         return HttpRequest.newBuilder(chatCompletionsUri())
             .timeout(properties.timeout())
             .header("Authorization", "Bearer " + properties.apiKey())
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json; charset=utf-8")
             .header("Accept", "text/event-stream")
-            .POST(HttpRequest.BodyPublishers.ofString(openAiStreamBody(systemPrompt, userPrompt, images)))
+            .POST(jsonBody(openAiStreamBody(systemPrompt, userPrompt, images)))
             .build();
     }
 
@@ -332,9 +336,9 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             .timeout(properties.timeout())
             .header("x-api-key", properties.apiKey())
             .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json; charset=utf-8")
             .header("Accept", "text/event-stream")
-            .POST(HttpRequest.BodyPublishers.ofString(anthropicStreamBody(systemPrompt, userPrompt, images)))
+            .POST(jsonBody(anthropicStreamBody(systemPrompt, userPrompt, images)))
             .build();
     }
 
@@ -344,7 +348,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     private String anthropicStreamBody(String systemPrompt, String userPrompt, List<LlmImage> images) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", properties.model());
-        body.put("max_tokens", 2048);
+        body.put("max_tokens", DEFAULT_MAX_OUTPUT_TOKENS);
         body.put("temperature", 0.2);
         body.put("stream", true);  // 启用流式输出
         body.put("system", nullToEmpty(systemPrompt));
@@ -412,8 +416,8 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         return HttpRequest.newBuilder(chatCompletionsUri())
             .timeout(properties.timeout())
             .header("Authorization", "Bearer " + properties.apiKey())
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(chatCompletionsBody(systemPrompt, userPrompt, images)))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .POST(jsonBody(chatCompletionsBody(systemPrompt, userPrompt, images)))
             .build();
     }
 
@@ -425,8 +429,8 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
             .timeout(properties.timeout())
             .header("x-api-key", properties.apiKey())
             .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(anthropicMessagesBody(systemPrompt, userPrompt, images)))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .POST(jsonBody(anthropicMessagesBody(systemPrompt, userPrompt, images)))
             .build();
     }
 
@@ -437,8 +441,8 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         return HttpRequest.newBuilder(responsesUri())
             .timeout(properties.timeout())
             .header("Authorization", "Bearer " + properties.apiKey())
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(responsesBody(systemPrompt, userPrompt, images, false)))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .POST(jsonBody(responsesBody(systemPrompt, userPrompt, images, false)))
             .build();
     }
 
@@ -509,7 +513,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     private String anthropicMessagesBody(String systemPrompt, String userPrompt, List<LlmImage> images) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", properties.model());
-        body.put("max_tokens", 2048);
+        body.put("max_tokens", DEFAULT_MAX_OUTPUT_TOKENS);
         body.put("temperature", 0.2);
         body.put("system", nullToEmpty(systemPrompt));
 
@@ -532,6 +536,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         body.put("model", properties.model());
         body.put("instructions", nullToEmpty(systemPrompt));
         body.put("temperature", 0.2);
+        body.put("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS);
 
         // 如果是流式请求，添加 stream 标志
         if (stream) {
@@ -724,6 +729,16 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
      */
     private String nullToEmpty(String value) {
         return value == null ? "" : value;
+    }
+
+    /**
+     * 使用 UTF-8 写出 JSON 请求体。
+     * <p>
+     * 这里不要依赖 JDK 或宿主系统默认编码；否则中文 prompt、长文触发词、资料片段在
+     * Windows/容器混合构建和部署时可能被替换成问号，导致模型无法理解用户问题。
+     */
+    private HttpRequest.BodyPublisher jsonBody(String body) {
+        return HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8);
     }
 
     /**

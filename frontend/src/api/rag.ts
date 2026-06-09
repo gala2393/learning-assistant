@@ -2,6 +2,7 @@ import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
 import { hasStoredSession } from '@/lib/auth-gate'
+import { SESSION_KEY } from '@/constants'
 import type {
   ChatPayload, HistoryItem, RagEvaluationSuiteDetail, RagEvaluationSuitePayload,
   RagEvaluationSuiteResult, RagEvaluationSuiteRun, RagEvaluationSuiteSavePayload,
@@ -45,7 +46,7 @@ export interface StreamCallbacks {
   onSources?: (sources: RagSource[]) => void    // 收到检索到的资料来源
   onChunk?: (delta: string) => void              // 收到 AI 回答的文本增量
   onStatus?: (status: { stage?: string; message?: string }) => void  // 状态变化（检索中/思考中）
-  onDone?: (result: { questionId: number | string; conversationId?: number | string; answer: string }) => void  // 流结束
+  onDone?: (result: { questionId: number | string; conversationId?: number | string; answer?: string; answerIncluded?: boolean }) => void  // 流结束
   onError?: (message: string) => void            // 发生错误
 }
 
@@ -79,9 +80,9 @@ export interface StreamCallbacks {
  */
 export function chatStream(payload: StreamChatPayload, callbacks: StreamCallbacks): AbortController {
   const controller = new AbortController()
-  const base = (import.meta.env.VITE_API_BASE as string) || '/api'
-  const session = localStorage.getItem('learning-assistant.frontend.session')
-  // 流式接口绕过 Axios，需要在 fetch 里手动补 Authorization。
+  const base = ((import.meta.env.VITE_API_BASE as string) || '/api').replace(/\/$/, '')
+  const session = localStorage.getItem(SESSION_KEY)
+  // 流式接口绕过 Axios，需要和普通接口一样从统一 SESSION_KEY 读取 Token。
   const token = session ? JSON.parse(session).token : ''
 
   fetch(`${base}/rag/chat/stream`, {
@@ -154,6 +155,16 @@ export async function listHistory(): Promise<HistoryItem[]> {
 }
 /** 获取单条历史详情（含多轮消息） */
 export async function getHistory(id: string): Promise<HistoryItem> { const { data } = await api.get(`/rag/history/${id}`); return data }
+/** 获取指定资料最近一段边读边问会话；没有历史时返回 null */
+export async function getLatestMaterialHistory(materialId: string): Promise<HistoryItem | null> {
+  const { data } = await api.get(`/rag/history/materials/${materialId}/latest`)
+  return data || null
+}
+/** 获取指定资料的边读边问历史会话列表 */
+export async function listMaterialHistory(materialId: string): Promise<HistoryItem[]> {
+  const { data } = await api.get(`/rag/history/materials/${materialId}`)
+  return data || []
+}
 /** 删除单条历史 */
 export async function deleteHistory(id: string): Promise<void> { await api.delete(`/rag/history/${id}`) }
 /** 重命名历史记录标题 */
@@ -277,6 +288,8 @@ export function useChat() { return useMutation({ mutationFn: chat, onSuccess: ()
 export function useRagUsage() { return useQuery({ queryKey: ['rag-usage'], queryFn: getRagUsage, enabled: hasStoredSession() }) }
 export function useHistory() { return useQuery({ queryKey: ['history'], queryFn: listHistory, enabled: hasStoredSession() }) }
 export function useHistoryDetail(id: string | null) { return useQuery({ queryKey: ['history', id], queryFn: () => getHistory(id!), enabled: !!id && hasStoredSession() }) }
+export function useLatestMaterialHistory(materialId: string | null) { return useQuery({ queryKey: ['history', 'materials', materialId, 'latest'], queryFn: () => getLatestMaterialHistory(materialId!), enabled: !!materialId && hasStoredSession() }) }
+export function useMaterialHistory(materialId: string | null) { return useQuery({ queryKey: ['history', 'materials', materialId], queryFn: () => listMaterialHistory(materialId!), enabled: !!materialId && hasStoredSession() }) }
 export function useDeleteHistory() { return useMutation({ mutationFn: deleteHistory, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] }) }) }
 export function useRenameHistory() { return useMutation({ mutationFn: ({ id, title }: { id: string; title: string }) => renameHistory(id, title), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] }) }) }
 export function useTogglePinHistory() { return useMutation({ mutationFn: togglePinHistory, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] }) }) }

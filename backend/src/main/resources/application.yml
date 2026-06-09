@@ -27,9 +27,9 @@ spring:
     validate-on-migrate: true
   servlet:
     multipart:
-      # 单文件和单次请求最大体积（支持大文件上传）
-      max-file-size: ${SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE:500MB}
-      max-request-size: ${SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE:500MB}
+      # 单文件和单次请求最大体积。持久资料走 1MB 分片上传；这里放宽用于兼容普通上传和临时资料。
+      max-file-size: ${SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE:2GB}
+      max-request-size: ${SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE:2GB}
   mvc:
     async:
       # 异步请求超时时间（如流式 SSE 响应），120 秒
@@ -70,12 +70,30 @@ app:
   redis:
     enabled: ${APP_REDIS_ENABLED:false}
   material:
-    # 资料文件大小限制（字节）：500MB
-    max-file-bytes: ${APP_MATERIAL_MAX_FILE_BYTES:524288000}
+    # 持久资料文件大小限制（字节）：2GB，大 PDF 通过分片上传后后台解析
+    max-file-bytes: ${APP_MATERIAL_MAX_FILE_BYTES:2147483648}
     # 临时文件大小限制（字节）：500MB
     max-temporary-file-bytes: ${APP_MATERIAL_MAX_TEMPORARY_FILE_BYTES:524288000}
     # 网络资源下载大小限制（字节）：10MB
     max-web-bytes: ${APP_MATERIAL_MAX_WEB_BYTES:10485760}
+  document-parser:
+    # 文档解析提供方：legacy=内置解析器，mineru=优先调用 MinerU 并在失败时回退。
+    provider: ${APP_DOCUMENT_PARSER_PROVIDER:mineru}
+  mineru:
+    # MinerU CLI 命令；默认使用 pipeline 后端，确保无 GPU 的服务器也能稳定解析。
+    command: ${APP_MINERU_COMMAND:mineru -b pipeline}
+    # MinerU 输出工作区，系统会为每次解析创建独立子目录。
+    workspace: ${APP_MINERU_WORKSPACE:${user.dir}/target/mineru-output}
+    # 单次 MinerU 解析超时；大 PDF 可按部署机器性能调大。
+    timeout: ${APP_MINERU_TIMEOUT:15m}
+    # MinerU 模型来源；Windows 非管理员环境建议设为 modelscope，避免 HuggingFace 缓存符号链接权限问题。
+    model-source: ${APP_MINERU_MODEL_SOURCE:}
+    # MinerU 失败时自动回退到内置解析，避免资料不可用。
+    fallback-enabled: ${APP_MINERU_FALLBACK_ENABLED:true}
+    # PDF 已包含原生文本时跳过 MinerU，避免大文本 PDF 等待外部解析超时；扫描件仍会交给 MinerU/OCR。
+    skip-text-pdf: ${APP_MINERU_SKIP_TEXT_PDF:true}
+    # 判断文本 PDF 时最多抽样页数，页数越高越稳但会增加上传解析启动时间。
+    text-pdf-detect-pages: ${APP_MINERU_TEXT_PDF_DETECT_PAGES:5}
   security:
     outbound:
       # 是否允许访问内网/私有网络地址（如内网嵌入服务）
