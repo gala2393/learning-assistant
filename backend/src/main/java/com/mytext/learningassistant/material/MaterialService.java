@@ -181,6 +181,9 @@ public class MaterialService {
     /** PDF 压缩的最小文件大小阈值：64MB */
     private static final long DEFAULT_PDF_COMPRESSION_MIN_BYTES = 64L * 1024L * 1024L;
 
+    /** 大 PDF 快速导入阈值：超过该大小时跳过 MinerU、Ghostscript 压缩和内联 OCR，优先保证资料可完成导入。 */
+    private static final long DEFAULT_LARGE_PDF_FAST_IMPORT_BYTES = 128L * 1024L * 1024L;
+
     /** PDF 压缩的目标 DPI */
     private static final int DEFAULT_PDF_COMPRESSION_TARGET_DPI = 144;
 
@@ -281,6 +284,7 @@ public class MaterialService {
     private final boolean mineruSkipTextPdf;
     /** 判断 PDF 是否已有原生文本时最多抽样的页数。 */
     private final int mineruTextPdfDetectPages;
+    private final long largePdfFastImportBytes;
     private final long maxMaterialBytes;
     private final long maxTemporaryMaterialBytes;
     private final long maxWebBytes;
@@ -341,6 +345,7 @@ public class MaterialService {
         @Value("${app.mineru.fallback-enabled:true}") boolean mineruFallbackEnabled,
         @Value("${app.mineru.skip-text-pdf:true}") boolean mineruSkipTextPdf,
         @Value("${app.mineru.text-pdf-detect-pages:5}") int mineruTextPdfDetectPages,
+        @Value("${app.pdf.large-fast-import-bytes:134217728}") long largePdfFastImportBytes,
         @Value("${app.material.max-file-bytes:2147483648}") long maxMaterialBytes,
         @Value("${app.material.max-temporary-file-bytes:524288000}") long maxTemporaryMaterialBytes,
         @Value("${app.material.max-web-bytes:10485760}") long maxWebBytes
@@ -388,6 +393,7 @@ public class MaterialService {
         this.mineruFallbackEnabled = mineruFallbackEnabled;
         this.mineruSkipTextPdf = mineruSkipTextPdf;
         this.mineruTextPdfDetectPages = mineruTextPdfDetectPages <= 0 ? 5 : mineruTextPdfDetectPages;
+        this.largePdfFastImportBytes = largePdfFastImportBytes <= 0 ? DEFAULT_LARGE_PDF_FAST_IMPORT_BYTES : largePdfFastImportBytes;
         this.maxMaterialBytes = maxMaterialBytes <= 0 ? DEFAULT_MAX_MATERIAL_BYTES : maxMaterialBytes;
         this.maxTemporaryMaterialBytes = maxTemporaryMaterialBytes <= 0 ? DEFAULT_MAX_TEMPORARY_MATERIAL_BYTES : maxTemporaryMaterialBytes;
         this.maxWebBytes = maxWebBytes <= 0 ? DEFAULT_MAX_WEB_BYTES : maxWebBytes;
@@ -2416,6 +2422,10 @@ public class MaterialService {
         if (!"mineru".equalsIgnoreCase(documentParserProvider)) {
             return false;
         }
+        if (sourceType == MaterialSourceType.PDF && isLargePdfFastImport(storedFile)) {
+            log.info("Skip MinerU for large PDF fast import: {}", storedFile);
+            return false;
+        }
         if (sourceType == MaterialSourceType.PDF && mineruSkipTextPdf && pdfHasExtractableText(storedFile)) {
             log.info("Skip MinerU for text-based PDF {}, PDF.js/PDFBox text layer is enough for selectable reading", storedFile);
             return false;
@@ -2426,6 +2436,17 @@ public class MaterialService {
             || sourceType == MaterialSourceType.PPTX
             || sourceType == MaterialSourceType.PPT
             || sourceType == MaterialSourceType.XLSX;
+    }
+
+    private boolean isLargePdfFastImport(Path pdfFile) {
+        if (pdfFile == null) {
+            return false;
+        }
+        try {
+            return Files.size(pdfFile) >= largePdfFastImportBytes;
+        } catch (IOException exception) {
+            return false;
+        }
     }
 
     /**
@@ -3123,6 +3144,10 @@ public class MaterialService {
         if (!pdfCompressionEnabled) {
             return false;
         }
+        if (isLargePdfFastImport(sourcePath)) {
+            log.info("Skip PDF compression for large PDF fast import: {}", sourcePath);
+            return false;
+        }
         try {
             return Files.size(sourcePath) >= pdfCompressionMinBytes;
         } catch (IOException exception) {
@@ -3311,6 +3336,10 @@ public class MaterialService {
 
     private boolean shouldInlinePdfOcr(Path file, int pageCount) {
         if (!ocrEnabled) {
+            return false;
+        }
+        if (isLargePdfFastImport(file)) {
+            log.info("Skip inline OCR for large PDF fast import: {}", file);
             return false;
         }
         if (pageCount > inlinePdfOcrMaxPages) {

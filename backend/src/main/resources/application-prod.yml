@@ -132,6 +132,8 @@ app:
       command: ${DOCUMENT_PREVIEW_CONVERTER_COMMAND:soffice}
       timeout: ${DOCUMENT_PREVIEW_CONVERTER_TIMEOUT:60s}
   pdf:
+    # 大 PDF 快速导入阈值：超过该大小时跳过 MinerU、Ghostscript 压缩和内联 OCR，优先保证资料导入完成。
+    large-fast-import-bytes: ${APP_PDF_LARGE_FAST_IMPORT_BYTES:134217728}
     compression:
       # 大文件 PDF 压缩配置（使用 Ghostscript 降低扫描 PDF 体积）
       enabled: ${PDF_COMPRESSION_ENABLED:true}

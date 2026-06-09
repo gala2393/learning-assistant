@@ -37,8 +37,6 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
-  ChevronLeft,
-  ChevronRight,
   ExternalLink,
   Image as ImageIcon,
   Loader2,
@@ -64,6 +62,9 @@ const PAGE_RENDER_WINDOW = 2
 
 /** 大文本资料每次只挂载当前片段前后 8 段，避免超长资料一次性渲染全部 DOM。 */
 const CHUNK_RENDER_WINDOW = 8
+
+/** 文本资料没有真实 PDF 页码时，每个阅读页对应的片段数，避免用户直接输入片段序号导致跳转不稳定。 */
+const TEXT_PAGE_CHUNK_SIZE = 5
 
 /** 阅读器统一使用 A4 纸张比例作为视觉页面，避免不同 PDF MediaBox 把页面撑成异常比例。 */
 const A4_PAGE_WIDTH = 794
@@ -608,10 +609,6 @@ function PagePreviewCanvas({
  * @property pages - 页面列表（用于页面预览模式和翻页）
  * @property material - 当前资料对象
  * @property progress - 阅读进度（0~1，用于进度条显示）
- * @property canPrev - 是否可以向前翻
- * @property canNext - 是否可以向后翻
- * @property onPrev - 向前翻片段回调
- * @property onNext - 向后翻片段回调
  * @property onSelectChunk - 切换到指定片段回调
  * @property onOpenFile - 打开原文件回调
  */
@@ -622,10 +619,6 @@ interface ReaderPaperProps {
   material: Material | null      // 当前资料
   targetPageNo?: number | null   // URL 或外部来源指定的目标页码
   progress: number               // 阅读进度（0~1）
-  canPrev?: boolean              // 是否可以向前翻
-  canNext?: boolean              // 是否可以向后翻
-  onPrev: () => void             // 向前翻回调
-  onNext: () => void             // 向后翻回调
   onSelectChunk?: (chunkIndex: number) => void  // 切换片段回调
   onReadingContextChange?: (context: ReaderReadingContext) => void
   onOpenFile?: () => void        // 打开原文件回调
@@ -638,10 +631,6 @@ export function ReaderPaper({
   material,
   targetPageNo,
   progress,
-  canPrev = true,
-  canNext = true,
-  onPrev,
-  onNext,
   onSelectChunk,
   onReadingContextChange,
   onOpenFile,
@@ -728,10 +717,11 @@ export function ReaderPaper({
     : windowRange(activeChunkIndex, chunks.length, CHUNK_RENDER_WINDOW)
   const visibleChunks = chunks.slice(chunkRenderRange.start, chunkRenderRange.end)
   const isChunkWindowed = chunks.length > FULL_RENDER_CHUNK_LIMIT
-  const jumpCount = usesPageCanvas ? pages.length : chunks.length
+  const textPageCount = Math.max(1, Math.ceil(chunks.length / TEXT_PAGE_CHUNK_SIZE))
+  const jumpCount = usesPageCanvas ? pages.length : textPageCount
   const currentJumpPosition = usesPageCanvas
     ? (activeChunkPageNo || currentPage?.pageNo || pages[0]?.pageNo || 1)
-    : activeChunkIndex + 1
+    : Math.floor(activeChunkIndex / TEXT_PAGE_CHUNK_SIZE) + 1
 
   // === 副作用 ===
 
@@ -981,33 +971,10 @@ export function ReaderPaper({
       setJumpValue(String(pageNo))
       return
     }
-    const nextIndex = Math.max(0, Math.min(chunks.length - 1, value - 1))
+    const targetTextPage = Math.max(1, Math.min(textPageCount, value))
+    const nextIndex = Math.max(0, Math.min(chunks.length - 1, (targetTextPage - 1) * TEXT_PAGE_CHUNK_SIZE))
     scrollToChunkIndex(nextIndex)
-    setJumpValue(String(nextIndex + 1))
-  }
-
-  const handlePrevNavigation = () => {
-    if (!usesPageCanvas) {
-      onPrev()
-      return
-    }
-    const previousPage = pages[Math.max(0, currentPageIndex - 1)]
-    if (previousPage) {
-      scrollToPage(previousPage.pageNo)
-      setJumpValue(String(previousPage.pageNo))
-    }
-  }
-
-  const handleNextNavigation = () => {
-    if (!usesPageCanvas) {
-      onNext()
-      return
-    }
-    const nextPage = pages[Math.min(pages.length - 1, currentPageIndex + 1)]
-    if (nextPage) {
-      scrollToPage(nextPage.pageNo)
-      setJumpValue(String(nextPage.pageNo))
-    }
+    setJumpValue(String(targetTextPage))
   }
 
   const renderContinuousPages = () => (
@@ -1173,24 +1140,16 @@ export function ReaderPaper({
       {/* 内容展示区：有页面预览则按页连续渲染，否则按解析片段连续渲染。 */}
       {usesPageCanvas ? renderContinuousPages() : renderContinuousChunks()}
 
-      {/* 底部导航栏：保留上一/下一片段，中间支持输入页码或片段序号跳转。 */}
-      <div className="flex items-center justify-between gap-2 border-t px-3 py-2 md:px-6 md:py-3">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handlePrevNavigation}
-          disabled={usesPageCanvas ? currentPageIndex <= 0 : !canPrev}
-        >
-          <ChevronLeft className="mr-1 h-4 w-4" /> {usesPageCanvas ? '上一页' : '上一片段'}
-        </Button>
+      {/* 底部跳转栏：只保留页码输入，避免上一/下一片段按钮和窗口化滚动互相抢状态。 */}
+      <div className="flex items-center justify-center gap-2 border-t px-3 py-2 md:px-6 md:py-3">
         <form
-          className="flex min-w-0 items-center justify-center gap-2 text-xs text-muted-foreground"
+          className="flex min-w-0 flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground"
           onSubmit={(event) => {
             event.preventDefault()
             handleJumpSubmit()
           }}
         >
-          <span>{usesPageCanvas ? '第' : '第'}</span>
+          <span>跳转到第</span>
           <input
             value={jumpValue}
             onChange={(event) => setJumpValue(event.target.value.replace(/[^\d]/g, ''))}
@@ -1200,21 +1159,13 @@ export function ReaderPaper({
             }}
             className="h-8 w-16 rounded-md border bg-background px-2 text-center text-sm text-foreground outline-none focus:border-cyan-400"
             inputMode="numeric"
-            aria-label={usesPageCanvas ? '跳转页码' : '跳转片段编号'}
+            aria-label={usesPageCanvas ? '跳转页码' : '跳转阅读页'}
           />
-          <span>{usesPageCanvas ? `页 / 共 ${jumpCount} 页` : `段 / 共 ${jumpCount} 段`}</span>
+          <span>{`页 / 共 ${jumpCount} 页`}</span>
           <Button variant="outline" size="sm" className="h-8 px-2 text-xs" type="submit">
             跳转
           </Button>
         </form>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleNextNavigation}
-          disabled={usesPageCanvas ? currentPageIndex >= pages.length - 1 : !canNext}
-        >
-          {usesPageCanvas ? '下一页' : '下一片段'} <ChevronRight className="ml-1 h-4 w-4" />
-        </Button>
       </div>
     </div>
   )

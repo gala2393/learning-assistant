@@ -60,8 +60,6 @@ import {
   FileText,
   GripVertical,
   ListTree,
-  ChevronLeft,
-  ChevronRight,
   Library,
   Layers3,
   PanelRightClose,
@@ -386,16 +384,6 @@ export function ReaderPage() {
     setReadingChunkIndex(Math.max(0, Math.min(chunks.length - 1, context.chunkIndex)))
   }
 
-  /** 向前翻片段 */
-  const handlePrev = () => {
-    handleSelectChunk(Math.max(0, readingChunkIndex - 1))
-  }
-
-  /** 向后翻片段 */
-  const handleNext = () => {
-    handleSelectChunk(Math.min(chunks.length - 1, readingChunkIndex + 1))
-  }
-
   /**
    * 打开资料原文件
    * 通过后端接口获取临时访问链接（ticket），在新窗口打开
@@ -442,25 +430,6 @@ export function ReaderPage() {
             onClick={() => setNavigatorOpen(true)}
           >
             <Layers3 className="h-4 w-4" />
-          </button>
-          <div className="my-1 h-px w-8 bg-slate-200 dark:bg-slate-800" />
-          <button
-            type="button"
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-35 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100"
-            title="上一片段"
-            disabled={readingChunkIndex <= 0}
-            onClick={handlePrev}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-35 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100"
-            title="下一片段"
-            disabled={!chunks.length || readingChunkIndex >= chunks.length - 1}
-            onClick={handleNext}
-          >
-            <ChevronRight className="h-4 w-4" />
           </button>
         </div>
         <div className="flex w-full flex-col items-center gap-1 border-t border-slate-200 px-1 py-3 dark:border-slate-800">
@@ -522,10 +491,6 @@ export function ReaderPage() {
             pages={pages}
             material={selectedMaterial}
             progress={chunks.length > 0 ? (readingChunkIndex + 1) / chunks.length : 0}
-            canPrev={readingChunkIndex > 0}
-            canNext={readingChunkIndex < chunks.length - 1}
-            onPrev={handlePrev}
-            onNext={handleNext}
             onSelectChunk={handleSelectChunk}
             onReadingContextChange={handleReadingContextChange}
             onOpenFile={selectedMaterial ? handleOpenFile : undefined}
