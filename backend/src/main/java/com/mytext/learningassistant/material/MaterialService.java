@@ -172,6 +172,12 @@ public class MaterialService {
     /** PDF 页面渲染的默认 DPI（每英寸点数） */
     private static final int DEFAULT_RENDER_DPI = 144;
 
+    /** 大 PDF 轻量阅读器页元数据的默认 A4 宽度，避免为取 MediaBox 再加载 300MB PDF。 */
+    private static final float DEFAULT_PDF_PAGE_WIDTH = 595.0f;
+
+    /** 大 PDF 轻量阅读器页元数据的默认 A4 高度。 */
+    private static final float DEFAULT_PDF_PAGE_HEIGHT = 842.0f;
+
     /** 内联 PDF OCR 的最大文件大小限制：100MB */
     private static final long DEFAULT_INLINE_PDF_OCR_MAX_BYTES = 100L * 1024L * 1024L;
 
@@ -801,6 +807,10 @@ public class MaterialService {
         if (previewPath == null || !Files.exists(previewPath) || !Files.isRegularFile(previewPath)) {
             return List.of();
         }
+        Path sourcePath = resolveStoredPath(material.getStoragePath());
+        if (isLargePdfFastImport(sourcePath) && material.getPageCount() != null && material.getPageCount() > 0) {
+            return lightweightPdfPages(material);
+        }
         try (var document = Loader.loadPDF(previewPath.toFile())) {
             int pageCount = document.getNumberOfPages();
             Map<Integer, List<Long>> pageChunks = chunksByPage(materialId, pageCount);
@@ -1065,7 +1075,9 @@ public class MaterialService {
         savePageTextBlocks(material, parsed);
 
         updateMaterialParseProgress(material.getId(), material.getOwnerId(), 92, "生成预览", "正在生成阅读预览信息");
-        applyPreviewMetadata(material, sourcePath, material.getSourceType());
+        if (!applyLargePdfFastPreviewMetadata(material, sourcePath, parsed)) {
+            applyPreviewMetadata(material, sourcePath, material.getSourceType());
+        }
         material.setParseStatus(MaterialParseStatus.SUCCESS);
         material.setParseProgressPercent(100);
         material.setParseStage("解析完成");
@@ -1224,7 +1236,9 @@ public class MaterialService {
             material.setSummaryStatus(MaterialSummaryStatus.PENDING);
             List<ChunkDraft> chunks = chunkMaterial(parsed);
             updateMaterialParseProgress(material.getId(), material.getOwnerId(), 72, "生成预览", "正在生成阅读预览信息");
-            applyPreviewMetadata(material, finalPath, sourceType);
+            if (!applyLargePdfFastPreviewMetadata(material, finalPath, parsed)) {
+                applyPreviewMetadata(material, finalPath, sourceType);
+            }
             material.setChunkCount(chunks.size());
             learningMaterialRepository.save(material);
             updateMaterialParseProgress(material.getId(), material.getOwnerId(), 82, "保存切片", "正在保存知识片段和阅读文本层");
@@ -1277,6 +1291,33 @@ public class MaterialService {
         } finally {
             scheduledProcessingSessions.remove(sessionId);
         }
+    }
+
+    /**
+     * 为大 PDF 生成轻量页列表。
+     *
+     * <p>阅读器已经统一按 A4 纸张比例展示 PDF，前端 PDF.js 会自行读取真实页面并渲染；
+     * 后端这里只需要给出页码和 chunk 映射即可。这样避免用户打开 300MB PDF 阅读器时，
+     * 服务端为了读取 MediaBox 再次把整份 PDF 交给 PDFBox，导致 SSH/HTTP 被内存或 I/O 拖住。</p>
+     */
+    private List<MaterialPageResponse> lightweightPdfPages(LearningMaterialEntity material) {
+        int pageCount = material.getPageCount() == null ? 0 : material.getPageCount();
+        if (pageCount <= 0 || material.getId() == null) {
+            return List.of();
+        }
+        Map<Integer, List<Long>> pageChunks = chunksByPage(material.getId(), pageCount);
+        List<MaterialPageResponse> pages = new ArrayList<>();
+        for (int pageNo = 1; pageNo <= pageCount; pageNo++) {
+            pages.add(new MaterialPageResponse(
+                pageNo,
+                DEFAULT_PDF_PAGE_WIDTH,
+                DEFAULT_PDF_PAGE_HEIGHT,
+                pageImageName(pageNo),
+                pageChunks.getOrDefault(pageNo, List.of()),
+                "PENDING"
+            ));
+        }
+        return pages;
     }
 
     /**
@@ -1507,7 +1548,9 @@ public class MaterialService {
         material.setParseStage("解析完成");
         material.setParseMessage("资料已经可以用于阅读和问答");
         material.setSummaryStatus(MaterialSummaryStatus.PENDING);
-        applyPreviewMetadata(material, storagePath, sourceType);
+        if (!applyLargePdfFastPreviewMetadata(material, storagePath, parsed)) {
+            applyPreviewMetadata(material, storagePath, sourceType);
+        }
         material.setChunkCount(chunks.size());
         LearningMaterialEntity saved = learningMaterialRepository.save(material);
         boolean deferVectorIndex = shouldDeferVectorIndexing(sourceType, chunks.size());
@@ -2924,6 +2967,23 @@ public class MaterialService {
         material.setPageCount(null);
     }
 
+    /**
+     * 大 PDF 快速导入时直接使用解析阶段已经拿到的页数，避免再次加载整份 PDF。
+     */
+    private boolean applyLargePdfFastPreviewMetadata(LearningMaterialEntity material, Path sourcePath, ParsedMaterial parsed) {
+        if (material == null || material.getSourceType() != MaterialSourceType.PDF || !isLargePdfFastImport(sourcePath)) {
+            return false;
+        }
+        Integer pageCount = parsed == null ? null : parsed.pageCount();
+        if (pageCount == null || pageCount <= 0) {
+            return false;
+        }
+        material.setPageCount(pageCount);
+        material.setPreviewStatus(MaterialPreviewStatus.READY);
+        material.setPreviewError(null);
+        return true;
+    }
+
     private void updatePdfPreviewMetadata(
         LearningMaterialEntity material,
         Path pdfPath,
@@ -3083,8 +3143,9 @@ public class MaterialService {
     private ParsedMaterial parsePdf(Path sourceFile, Path pdfFile, ParseProgressListener progressListener) throws IOException {
         List<ParsedBlock> blocks = new ArrayList<>();
         List<PageTextLayerDraft> textLayers = new ArrayList<>();
+        int pageCount = 0;
         try (var document = Loader.loadPDF(pdfFile.toFile())) {
-            int pageCount = document.getNumberOfPages();
+            pageCount = document.getNumberOfPages();
             boolean largeFastImport = isLargePdfFastImport(sourceFile);
             int pagesToExtract = largeFastImport
                 ? Math.min(pageCount, largePdfFastImportMaxTextPages)
@@ -3132,7 +3193,7 @@ public class MaterialService {
                 );
             }
         }
-        return new ParsedMaterial(blocks, textLayers);
+        return new ParsedMaterial(blocks, textLayers, pageCount);
     }
 
     private void reportPdfParseProgress(ParseProgressListener progressListener, int pageIndex, int pageCount, boolean ocrPage) {
@@ -4967,9 +5028,13 @@ public class MaterialService {
      * 解析后的资料内容（包含多个文本块）。
      * 每个文本块关联一个页码和章节标题。
      */
-    private record ParsedMaterial(List<ParsedBlock> blocks, List<PageTextLayerDraft> textLayers) {
+    private record ParsedMaterial(List<ParsedBlock> blocks, List<PageTextLayerDraft> textLayers, Integer pageCount) {
+        private ParsedMaterial(List<ParsedBlock> blocks, List<PageTextLayerDraft> textLayers) {
+            this(blocks, textLayers, null);
+        }
+
         private ParsedMaterial(List<ParsedBlock> blocks) {
-            this(blocks, List.of());
+            this(blocks, List.of(), null);
         }
 
         /** 创建单文本块的解析结果（用于 TXT/MD/HTML 等单文档格式） */
