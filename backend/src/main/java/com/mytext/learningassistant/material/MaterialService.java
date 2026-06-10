@@ -184,6 +184,9 @@ public class MaterialService {
     /** 大 PDF 快速导入阈值：超过该大小时跳过 MinerU、Ghostscript 压缩和内联 OCR，优先保证资料可完成导入。 */
     private static final long DEFAULT_LARGE_PDF_FAST_IMPORT_BYTES = 128L * 1024L * 1024L;
 
+    /** 大 PDF 快速导入时最多抽取的页数，避免 300MB 级 PDF 全量文本解析拖死上传任务。 */
+    private static final int DEFAULT_LARGE_PDF_FAST_IMPORT_MAX_TEXT_PAGES = 80;
+
     /** PDF 压缩的目标 DPI */
     private static final int DEFAULT_PDF_COMPRESSION_TARGET_DPI = 144;
 
@@ -285,6 +288,7 @@ public class MaterialService {
     /** 判断 PDF 是否已有原生文本时最多抽样的页数。 */
     private final int mineruTextPdfDetectPages;
     private final long largePdfFastImportBytes;
+    private final int largePdfFastImportMaxTextPages;
     private final long maxMaterialBytes;
     private final long maxTemporaryMaterialBytes;
     private final long maxWebBytes;
@@ -346,6 +350,7 @@ public class MaterialService {
         @Value("${app.mineru.skip-text-pdf:true}") boolean mineruSkipTextPdf,
         @Value("${app.mineru.text-pdf-detect-pages:5}") int mineruTextPdfDetectPages,
         @Value("${app.pdf.large-fast-import-bytes:134217728}") long largePdfFastImportBytes,
+        @Value("${app.pdf.large-fast-import-max-text-pages:80}") int largePdfFastImportMaxTextPages,
         @Value("${app.material.max-file-bytes:2147483648}") long maxMaterialBytes,
         @Value("${app.material.max-temporary-file-bytes:524288000}") long maxTemporaryMaterialBytes,
         @Value("${app.material.max-web-bytes:10485760}") long maxWebBytes
@@ -394,6 +399,9 @@ public class MaterialService {
         this.mineruSkipTextPdf = mineruSkipTextPdf;
         this.mineruTextPdfDetectPages = mineruTextPdfDetectPages <= 0 ? 5 : mineruTextPdfDetectPages;
         this.largePdfFastImportBytes = largePdfFastImportBytes <= 0 ? DEFAULT_LARGE_PDF_FAST_IMPORT_BYTES : largePdfFastImportBytes;
+        this.largePdfFastImportMaxTextPages = largePdfFastImportMaxTextPages <= 0
+            ? DEFAULT_LARGE_PDF_FAST_IMPORT_MAX_TEXT_PAGES
+            : largePdfFastImportMaxTextPages;
         this.maxMaterialBytes = maxMaterialBytes <= 0 ? DEFAULT_MAX_MATERIAL_BYTES : maxMaterialBytes;
         this.maxTemporaryMaterialBytes = maxTemporaryMaterialBytes <= 0 ? DEFAULT_MAX_TEMPORARY_MATERIAL_BYTES : maxTemporaryMaterialBytes;
         this.maxWebBytes = maxWebBytes <= 0 ? DEFAULT_MAX_WEB_BYTES : maxWebBytes;
@@ -3077,10 +3085,22 @@ public class MaterialService {
         List<PageTextLayerDraft> textLayers = new ArrayList<>();
         try (var document = Loader.loadPDF(pdfFile.toFile())) {
             int pageCount = document.getNumberOfPages();
+            boolean largeFastImport = isLargePdfFastImport(sourceFile);
+            int pagesToExtract = largeFastImport
+                ? Math.min(pageCount, largePdfFastImportMaxTextPages)
+                : pageCount;
+            if (largeFastImport) {
+                reportProgress(
+                    progressListener,
+                    32,
+                    "快速导入",
+                    "大 PDF 已启用快速导入，先抽取前 " + pagesToExtract + "/" + pageCount + " 页用于问答索引"
+                );
+            }
             boolean inlinePdfOcrEnabled = shouldInlinePdfOcr(pdfFile, pageCount);
             PDFTextStripper stripper = new PDFTextStripper();
             stripper.setSortByPosition(true);
-            for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+            for (int pageIndex = 0; pageIndex < pagesToExtract; pageIndex++) {
                 int pageNo = pageIndex + 1;
                 stripper.setStartPage(pageNo);
                 stripper.setEndPage(pageNo);
@@ -3096,6 +3116,20 @@ public class MaterialService {
                 }
                 blocks.add(new ParsedBlock(blockText, pageNo, "Page " + pageNo));
                 reportPdfParseProgress(progressListener, pageIndex, pageCount, inlinePdfOcrEnabled && extractedText.isBlank());
+            }
+            if (pagesToExtract < pageCount) {
+                blocks.add(new ParsedBlock(
+                    "本 PDF 文件较大，系统已优先完成快速导入：当前问答索引包含前 " + pagesToExtract + "/" + pageCount
+                        + " 页文本；完整原文仍可在阅读器中打开查看。",
+                    pagesToExtract,
+                    "Large PDF fast import"
+                ));
+                reportProgress(
+                    progressListener,
+                    50,
+                    "快速导入完成",
+                    "已完成大 PDF 快速文本抽取，正在保存资料"
+                );
             }
         }
         return new ParsedMaterial(blocks, textLayers);

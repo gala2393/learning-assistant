@@ -21,7 +21,7 @@ export const MAX_TEMPORARY_MATERIAL_BYTES = 500 * 1024 * 1024
 const PROCESSING_POLL_INTERVAL_MS = 1500               // 轮询间隔 1.5 秒
 const PROCESSING_TIMEOUT_MS = 60 * 60 * 1000           // 最长等待 60 分钟
 const CHUNK_UPLOAD_RETRY_COUNT = 3                     // 每片最多重试 3 次
-const CHUNK_UPLOAD_CONCURRENCY = 5                      // 同一文件最多并行上传 5 个分片，兼顾速度和服务器压力
+const CHUNK_UPLOAD_CONCURRENCY = 3                      // 同一文件最多并行上传 3 个分片，优先保证大文件在服务器端稳定落盘
 
 /**
  * 上传会话 — 大文件分片上传的会话对象。
@@ -202,7 +202,7 @@ export async function getUploadSession(sessionId: string) {
  *
  * 流程：
  * 1. 创建上传会话
- * 2. 将文件按 1MB 切片，并行 5 个分片上传（带重试）
+ * 2. 将文件按 1MB 切片，并行 3 个分片上传（带重试）
  * 3. 所有片上传完成后，等待后端解析（轮询状态）
  * 4. 返回最终的 UploadSession
  *
@@ -228,24 +228,25 @@ export async function uploadMaterialInChunks(
     fileSize: params.file.size,
     chunkSize,
   })
-  let latest = session as UploadSession
-  const initialUploaded = Math.max(0, Math.min(totalChunks, latest.uploadedChunks || 0))
+  const sessionId = session.sessionId
+  const initialUploaded = Math.max(0, Math.min(totalChunks, session.uploadedChunks || 0))
   let completedChunks = initialUploaded
   const pendingIndexes = Array.from({ length: totalChunks - initialUploaded }, (_, offset) => initialUploaded + offset)
   onProgress?.({ phase: 'uploading', percent: Math.round((completedChunks / totalChunks) * 100), uploadedChunks: completedChunks, totalChunks })
   await runWithConcurrency(pendingIndexes, CHUNK_UPLOAD_CONCURRENCY, async (index) => {
     const start = index * chunkSize
     const end = Math.min(params.file.size, start + chunkSize)
-    // 只切当前片的 Blob，避免把大文件完整读入内存；并行数固定为 5，避免压垮 nginx 或后端线程。
-    latest = await uploadChunkWithRetry(latest.sessionId, {
+    // 只切当前片的 Blob，避免把大文件完整读入内存；并发数固定为 3，避免压垮 nginx 或后端线程。
+    await uploadChunkWithRetry(sessionId, {
       chunk: params.file.slice(start, end), chunkIndex: index, totalChunks,
-    }) as UploadSession
+    })
     completedChunks += 1
     onProgress?.({ phase: 'uploading', percent: Math.round((completedChunks / totalChunks) * 100), uploadedChunks: completedChunks, totalChunks })
   })
-  if (latest.status === 'FAILED') throw new Error(latest.errorMessage || '上传处理失败')
+  const completedSession = await getUploadSession(sessionId)
+  if (completedSession.status === 'FAILED') throw new Error(completedSession.errorMessage || '上传处理失败')
   // 等待后端解析完成
-  return waitForUploadProcessing(latest.sessionId, totalChunks, onProgress)
+  return waitForUploadProcessing(sessionId, totalChunks, onProgress)
 }
 
 /**

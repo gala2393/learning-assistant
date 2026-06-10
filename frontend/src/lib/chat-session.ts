@@ -233,7 +233,7 @@ export function startChatSessionStream(params: {
     currentQuestionId: null, mode: params.mode, input: '',
     materialId: params.mode === 'MATERIAL' ? params.materialId : null,
     chunkId: params.mode === 'MATERIAL' ? params.chunkId : null,
-    images: [], temporaryMaterial: null, messages: state.messages.concat(userMsg, thinkingMsg),
+    images: [], temporaryMaterial: requestTemporaryMaterial, messages: state.messages.concat(userMsg, thinkingMsg),
     conversationHistory: historyBefore, streaming: true,
   }
   persistSnapshot(); notify()
