@@ -19,10 +19,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { formatDate, truncate } from '@/lib/utils'
 import {
-  BookOpen, Clock, ExternalLink, FileText, Layers3, Loader2, PencilLine, Save,
+  BookOpen, Clock, ExternalLink, FileText, Layers3, Loader2, Pause, PencilLine, Save,
   Sparkles, History,
 } from 'lucide-react'
-import { getSummarySessionSnapshot, getSummaryTask, startSummaryTask, subscribeSummarySession } from '@/lib/summary-session'
+import { getSummarySessionSnapshot, getSummaryTask, pauseSummaryTask, startSummaryTask, subscribeSummarySession } from '@/lib/summary-session'
 import type { SummaryResult, SummarySource, SummaryType } from '@/types'
 
 const SUMMARY_TYPES: Array<{ value: SummaryType; label: string; description: string }> = [
@@ -51,8 +51,8 @@ export function SummaryPage() {
   const updateNoteMutation = useUpdateSummaryNote()
   /**
    * 总结生成任务由模块级 store 托管。
-   * 用户切换到别的模块时 SummaryPage 会卸载，但请求仍会继续执行；
-   * 切回后这里重新订阅 store，即可看到生成中状态或已完成后刷新的历史结果。
+   * 用户切换到别的模块时 SummaryPage 会卸载，但任务状态仍保留在 store；
+   * 切回后这里重新订阅即可看到生成中、已完成或已暂停的状态。
    */
   useSyncExternalStore(
     subscribeSummarySession,
@@ -96,6 +96,10 @@ export function SummaryPage() {
       setViewMode('latest')
       startSummaryTask({ materialId: selectedMaterialId, summaryType })
     }
+  }
+
+  const handlePauseGenerate = () => {
+    pauseSummaryTask(selectedMaterialId)
   }
 
   const handleSaveNote = () => {
@@ -180,15 +184,19 @@ export function SummaryPage() {
                   <Button
                     size="sm"
                     className="bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-slate-200"
-                    onClick={handleGenerate}
-                    disabled={generatingSummary}
+                    onClick={generatingSummary ? handlePauseGenerate : handleGenerate}
                   >
-                    {generatingSummary ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Sparkles className="h-4 w-4 mr-1" />}
-                    {generatingSummary ? '生成中...' : '生成总结'}
+                    {generatingSummary ? <Pause className="h-4 w-4 mr-1" /> : <Sparkles className="h-4 w-4 mr-1" />}
+                    {generatingSummary ? '暂停生成' : '生成总结'}
                   </Button>
                 </div>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">{selectedType.description}</p>
+              {currentSummaryTask?.notice && (
+                <p className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
+                  {currentSummaryTask.notice}
+                </p>
+              )}
               {currentSummaryTask?.error && (
                 <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
                   {currentSummaryTask.error}

@@ -39,6 +39,8 @@ public final class AuthAccessPolicy {
         "/admin/dashboard",
         "/admin/users",
         "/admin/materials",
+        "/admin/evaluation",
+        "/admin/usage-records",
         "/admin/logs"
     );
 

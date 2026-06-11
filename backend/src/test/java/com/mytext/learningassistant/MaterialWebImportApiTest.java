@@ -65,17 +65,20 @@ class MaterialWebImportApiTest {
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.title").value("Web RAG Note"))
                 .andExpect(jsonPath("$.data.sourceType").value("WEB"))
-                .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
-                .andExpect(jsonPath("$.data.chunkCount").value(1))
                 .andReturn();
 
             Long materialId = extractLong(importResult.getResponse().getContentAsString(), "id");
 
+            // Web 导入现在先返回队列快照，真正的文本抽取、切片和索引在事务提交后消费处理队列。
+            // 测试用户可见的最终状态时，应通过详情和片段接口验证资料已经完成处理。
+            waitForMaterialParseSuccess(token, materialId);
             mockMvc.perform(get("/api/materials/{id}", materialId)
                     .header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.sourceUrl").value(url))
-                .andExpect(jsonPath("$.data.originalName").value("note.html"));
+                .andExpect(jsonPath("$.data.originalName").value("note.html"))
+                .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+                .andExpect(jsonPath("$.data.chunkCount").value(1));
 
             mockMvc.perform(get("/api/materials/{id}/chunks", materialId)
                     .header("Authorization", "Bearer " + token))
@@ -138,15 +141,17 @@ class MaterialWebImportApiTest {
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.title").value("Linked Text Note"))
                 .andExpect(jsonPath("$.data.sourceType").value("TXT"))
-                .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
                 .andReturn();
 
             Long materialId = extractLong(importResult.getResponse().getContentAsString(), "id");
 
+            // 链接文件同样会经过资料处理队列，上传响应只负责确认任务已创建。
+            waitForMaterialParseSuccess(token, materialId);
             mockMvc.perform(get("/api/materials/{id}", materialId)
                     .header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.originalName").value("linked-note.txt"));
+                .andExpect(jsonPath("$.data.originalName").value("linked-note.txt"))
+                .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"));
 
             mockMvc.perform(get("/api/materials/{id}/file", materialId)
                     .header("Authorization", "Bearer " + token))
@@ -233,5 +238,23 @@ class MaterialWebImportApiTest {
             throw new IllegalStateException(fieldName + " not found in response: " + body);
         }
         return Long.parseLong(matcher.group(1));
+    }
+
+    /** 资料处理队列是异步完成的，测试按用户最终可见状态短轮询到解析成功。 */
+    private void waitForMaterialParseSuccess(String token, Long materialId) throws Exception {
+        long deadline = System.currentTimeMillis() + 3_000;
+        String lastBody = "";
+        while (System.currentTimeMillis() < deadline) {
+            var detailResult = mockMvc.perform(get("/api/materials/{id}", materialId)
+                    .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn();
+            lastBody = detailResult.getResponse().getContentAsString(StandardCharsets.UTF_8);
+            if ("SUCCESS".equals(extractString(lastBody, "parseStatus"))) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("material did not reach SUCCESS: " + lastBody);
     }
 }

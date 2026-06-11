@@ -25,6 +25,10 @@ const CHAT_CONVERSATION_ARCHIVE_KEY = 'learning-assistant.chat.conversation-arch
 
 // 前端只保留最近 24 条原文上下文给后端；更早内容由后端长期摘要记忆承接。
 const RECENT_CONVERSATION_HISTORY_LIMIT = 24
+/** 旧版本临时资料没有后端全文引用时，单次发送给后端的正文上限。 */
+const TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT = 120_000
+/** 有后端全文引用时，前端请求只携带少量预览，真正检索由后端按 ID 取全文。 */
+const TEMPORARY_MATERIAL_REQUEST_PREVIEW_LIMIT = 2_000
 /**
  * 临时资料持久化文本上限。
  *
@@ -54,6 +58,7 @@ export interface ChatSessionSnapshot {
   streaming: boolean                 // 是否正在流式输出
   images: ChatImagePayload[]         // 附带的图片（图片问答功能）
   temporaryMaterial: TemporaryMaterial | null  // 智能问答临时资料上下文
+  temporaryMaterialPending: boolean   // 临时资料是否仍需随下一条消息提交到后端
 }
 
 interface PersistedChatDraft {
@@ -67,6 +72,7 @@ interface PersistedChatDraft {
   conversationHistory?: ConversationMessage[]
   images?: ChatImagePayload[]
   temporaryMaterial?: TemporaryMaterial | null
+  temporaryMaterialPending?: boolean
 }
 
 interface ConversationArchiveItem {
@@ -85,13 +91,18 @@ interface ConversationArchiveItem {
 const defaultState: ChatSessionSnapshot = {
   selectedHistoryId: null, conversationId: null, currentQuestionId: null,
   mode: 'GENERAL', input: '', materialId: null, chunkId: null,
-  messages: [], conversationHistory: [], streaming: false, images: [], temporaryMaterial: null,
+  messages: [], conversationHistory: [], streaming: false, images: [], temporaryMaterial: null, temporaryMaterialPending: false,
 }
 
 // ===== 全局状态 =====
 let activeController: AbortController | null = null  // 当前活跃的 SSE 流（用于取消）
 let activeRunId: string | null = null                 // 防止旧的回调污染新请求
+let activeAssistantId: string | null = null            // 当前正在输出的 AI 消息 ID，用于暂停时精确更新
+let activeAnswerText = ''                              // 当前流已经收到并清理后的回答文本
+let activeSentTemporaryMaterialKey: string | null = null // 暂停首轮临时资料问答时，用于恢复“待发送”标记
 let lastStreamPersistAt = 0                           // 流式长文输出期间的本地持久化节流时间戳
+/** 当前会话中尚未提交给后端保存的临时资料标识；提交成功后清空，后续追问只传 conversationId。 */
+let pendingTemporaryMaterialKey: string | null = null
 const listeners = new Set<() => void>()               // 订阅者列表（React 组件）
 let state: ChatSessionSnapshot = restoreSnapshot()    // 全局状态（从 localStorage 恢复）
 
@@ -111,7 +122,13 @@ export function subscribeChatSession(listener: () => void) {
 export function updateChatSession(
   updater: Partial<ChatSessionSnapshot> | ((current: ChatSessionSnapshot) => ChatSessionSnapshot),
 ) {
+  const previousTemporaryKey = temporaryMaterialIdentity(state.temporaryMaterial)
   state = typeof updater === 'function' ? updater(state) : { ...state, ...updater }
+  const nextTemporaryKey = temporaryMaterialIdentity(state.temporaryMaterial)
+  if (nextTemporaryKey !== previousTemporaryKey) {
+    pendingTemporaryMaterialKey = nextTemporaryKey
+    state = { ...state, temporaryMaterialPending: Boolean(nextTemporaryKey) }
+  }
   persistSnapshot()
   notify()
 }
@@ -125,6 +142,7 @@ export function resetChatSession(options?: {
   images?: ChatImagePayload[]; temporaryMaterial?: TemporaryMaterial | null; abortActive?: boolean
 }) {
   if (options?.abortActive !== false) abortActiveStream()
+  pendingTemporaryMaterialKey = temporaryMaterialIdentity(options?.temporaryMaterial ?? null)
   state = {
     ...defaultState,
     mode: options?.mode || defaultState.mode,
@@ -132,6 +150,7 @@ export function resetChatSession(options?: {
     chunkId: options?.chunkId ?? null,
     images: options?.images ?? [],
     temporaryMaterial: options?.temporaryMaterial ?? null,
+    temporaryMaterialPending: Boolean(pendingTemporaryMaterialKey),
   }
   persistSnapshot()
   notify()
@@ -182,7 +201,10 @@ export function applyHistorySession(item: HistoryItem) {
     conversationHistory: archived?.conversationHistory?.length ? archived.conversationHistory : restoredHistory,
     temporaryMaterial: archived?.temporaryMaterial ?? null,
     streaming: false,
+    temporaryMaterialPending: false,
   }
+  // 历史会话中的临时资料已经由后端保存过，恢复后继续追问不需要重新发送资料正文。
+  pendingTemporaryMaterialKey = null
   persistSnapshot(); notify()
 }
 
@@ -207,25 +229,47 @@ export function startChatSessionStream(params: {
 }) {
   if (state.streaming) return  // 防止重复提交
 
+  const historyBefore = state.conversationHistory  // 保存旧的对话历史
+  const conversationIdBefore = state.conversationId
   const requestImages = params.images || state.images || []
-  const requestTemporaryMaterial = compactTemporaryMaterial(params.temporaryMaterial ?? state.temporaryMaterial)
+  const fullTemporaryMaterial = params.temporaryMaterial ?? state.temporaryMaterial ?? null
+  const fullTemporaryMaterialKey = temporaryMaterialIdentity(fullTemporaryMaterial)
+  const shouldSendTemporaryMaterial = shouldSendTemporaryMaterialForRequest(
+    params.mode,
+    conversationIdBefore,
+    fullTemporaryMaterialKey,
+  )
+  const requestTemporaryMaterial = shouldSendTemporaryMaterial
+    ? temporaryMaterialForRequest(fullTemporaryMaterial)
+    : null
+  const requestSelectedText = shouldKeepSelectedTextForRequest(
+    params.mode,
+    fullTemporaryMaterial,
+    shouldSendTemporaryMaterial,
+    params.selectedText,
+  )
+  const displayTemporaryMaterial = shouldSendTemporaryMaterial
+    ? compactTemporaryMaterial(fullTemporaryMaterial)
+    : null
+  const sentTemporaryMaterialKey = shouldSendTemporaryMaterial ? fullTemporaryMaterialKey : null
   const userMsg: ChatMessage = {
     id: 'pending-user-' + Date.now(),
     role: 'user',
     text: params.question,
     images: requestImages,
-    temporaryMaterial: requestTemporaryMaterial,
+    temporaryMaterial: displayTemporaryMaterial,
   }
   const assistantId = 'pending-assistant-' + Date.now()
   const thinkingMsg: ChatMessage = { id: assistantId, role: 'assistant', text: '', thinking: true }
-  const historyBefore = state.conversationHistory  // 保存旧的对话历史
-  const conversationIdBefore = state.conversationId
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`  // 唯一运行 ID
   let answer = ''           // 累积的 AI 回答
   let firstChunk = true     // 第一个 chunk 到达时关闭"思考中"动画
   let sources: RagSource[] = []
 
   activeRunId = runId
+  activeAssistantId = assistantId
+  activeAnswerText = ''
+  activeSentTemporaryMaterialKey = sentTemporaryMaterialKey
   lastStreamPersistAt = 0
   // 立即更新 UI（显示用户消息 + 思考中占位）
   state = {
@@ -233,7 +277,8 @@ export function startChatSessionStream(params: {
     currentQuestionId: null, mode: params.mode, input: '',
     materialId: params.mode === 'MATERIAL' ? params.materialId : null,
     chunkId: params.mode === 'MATERIAL' ? params.chunkId : null,
-    images: [], temporaryMaterial: requestTemporaryMaterial, messages: state.messages.concat(userMsg, thinkingMsg),
+    images: [], temporaryMaterial: fullTemporaryMaterial, temporaryMaterialPending: sentTemporaryMaterialKey ? false : state.temporaryMaterialPending,
+    messages: state.messages.concat(userMsg, thinkingMsg),
     conversationHistory: historyBefore, streaming: true,
   }
   persistSnapshot(); notify()
@@ -244,7 +289,7 @@ export function startChatSessionStream(params: {
       question: params.question, mode: params.mode,
       materialId: params.mode === 'MATERIAL' ? (params.materialId || undefined) : undefined,
       chunkId: params.mode === 'MATERIAL' ? (params.chunkId || undefined) : undefined,
-      selectedText: params.selectedText || undefined,
+      selectedText: requestSelectedText || undefined,
       history: historyBefore, conversationId: conversationIdBefore,
       images: requestImages,
       temporaryMaterial: requestTemporaryMaterial || undefined,
@@ -262,6 +307,7 @@ export function startChatSessionStream(params: {
         if (activeRunId !== runId) return
         answer += delta  // 累积原始文本
         const cleanText = sanitizeAiText(answer)
+        activeAnswerText = cleanText
         state = { ...state, messages: state.messages.map((m) =>
           m.id === assistantId ? { ...m, thinking: firstChunk ? false : m.thinking, text: cleanText } : m) }
         firstChunk = false
@@ -291,12 +337,23 @@ export function startChatSessionStream(params: {
           { role: 'assistant', content: cleanAnswer },
         ].slice(-RECENT_CONVERSATION_HISTORY_LIMIT)
 
-        activeRunId = null; activeController = null
+        clearActiveStreamRuntime()
+        if (sentTemporaryMaterialKey && pendingTemporaryMaterialKey === sentTemporaryMaterialKey) {
+          pendingTemporaryMaterialKey = null
+        }
         state = {
           ...state, conversationId, currentQuestionId: questionId,
           messages: state.messages.map((m) => m.id === assistantId
-            ? { ...m, id: questionId, thinking: false, text: cleanAnswer, sources } : m),
-          conversationHistory: nextConversationHistory, streaming: false,
+            ? {
+                ...m,
+                id: questionId,
+                thinking: false,
+                text: cleanAnswer,
+                sources,
+                continuable: Boolean(result.continuable),
+                continuationHint: result.continuationHint || null,
+              } : m),
+          conversationHistory: nextConversationHistory, streaming: false, temporaryMaterialPending: false,
         }
         persistSnapshot()
         rememberHistoryConversation(questionId, conversationId)
@@ -311,7 +368,8 @@ export function startChatSessionStream(params: {
       onError: (message) => {
         if (activeRunId !== runId) return
         const cleanAnswer = sanitizeAiText(answer)
-        activeRunId = null; activeController = null
+        clearActiveStreamRuntime()
+        if (sentTemporaryMaterialKey) pendingTemporaryMaterialKey = sentTemporaryMaterialKey
         // 如果已经收到部分正文，说明模型确实在持续生成；此时保留已有内容并附加中断提示。
         // 注意这里不要设置 error 字段，否则消息组件会只渲染红色错误卡片，反而盖掉已生成正文。
         if (cleanAnswer.trim()) {
@@ -319,19 +377,21 @@ export function startChatSessionStream(params: {
           state = {
             ...state, messages: state.messages.map((m) =>
               m.id === assistantId ? { ...m, thinking: false, error: undefined, text: interruptedText } : m),
-            streaming: false,
+            streaming: false, temporaryMaterialPending: sentTemporaryMaterialKey ? true : state.temporaryMaterialPending,
           }
           persistSnapshot(); notify()
           queryClient.invalidateQueries({ queryKey: ['history'] })
+          clearActiveStreamRuntime()
           return
         }
         state = {
           ...state, messages: state.messages.map((m) =>
             m.id === assistantId ? { ...m, thinking: false, error: message, text: '' } : m),
-          streaming: false,
+          streaming: false, temporaryMaterialPending: sentTemporaryMaterialKey ? true : state.temporaryMaterialPending,
         }
         persistSnapshot(); notify()
         queryClient.invalidateQueries({ queryKey: ['history'] })
+        clearActiveStreamRuntime()
       },
     },
   )
@@ -355,14 +415,59 @@ function persistStreamSnapshot() {
 function streamStatusText(status: { stage?: string; message?: string }) {
   if (status.message?.trim()) return status.message.trim()
   if (status.stage === 'searching') return '正在检索相关资料...'
+  if (status.stage === 'generating') return '正在生成回答...'
   return '正在准备回答...'
+}
+
+/**
+ * 暂停当前流式输出。
+ *
+ * 这里的“暂停”采用中止当前 SSE 请求的实现：浏览器原生 fetch/SSE 不支持可靠地暂停后继续
+ * 同一条 HTTP 流，所以暂停会停止继续接收 token，并保留已经输出到界面的内容。
+ */
+export function pauseActiveChatStream() {
+  if (!activeController || !activeAssistantId || !state.streaming) return
+  const assistantId = activeAssistantId
+  const sentTemporaryMaterialKey = activeSentTemporaryMaterialKey
+  const cleanAnswer = activeAnswerText.trim()
+  const pausedText = cleanAnswer
+    ? `${cleanAnswer}\n\n已暂停输出，以上为已收到的内容。`
+    : '已暂停输出。'
+
+  activeRunId = null
+  activeController.abort()
+  state = {
+    ...state,
+    messages: state.messages.map((message) =>
+      message.id === assistantId
+        ? { ...message, thinking: false, error: undefined, text: pausedText }
+        : message,
+    ),
+    streaming: false,
+    // 如果首轮临时资料还没有等到 done 保存会话，暂停后恢复待发送状态，下一次提问会重新提交资料正文。
+    temporaryMaterialPending: sentTemporaryMaterialKey ? true : state.temporaryMaterialPending,
+  }
+  if (sentTemporaryMaterialKey) pendingTemporaryMaterialKey = sentTemporaryMaterialKey
+  clearActiveStreamRuntime()
+  persistSnapshot()
+  notify()
+  queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
 }
 
 /** 取消当前活跃的 SSE 流 */
 function abortActiveStream() {
   activeRunId = null
   activeController?.abort()
+  clearActiveStreamRuntime()
+}
+
+/** 清理当前流式任务的运行时引用，避免旧请求回调污染下一次输出。 */
+function clearActiveStreamRuntime() {
+  activeRunId = null
   activeController = null
+  activeAssistantId = null
+  activeAnswerText = ''
+  activeSentTemporaryMaterialKey = null
 }
 
 /**
@@ -377,6 +482,9 @@ function restoreSnapshot(): ChatSessionSnapshot {
       sessionStorage.getItem(CHAT_DRAFT_KEY) || localStorage.getItem(CHAT_DRAFT_BACKUP_KEY) || 'null',
     ) as PersistedChatDraft | null
     if (!draft?.messages?.length) return defaultState
+    const temporaryMaterial = draft.temporaryMaterial || null
+    const temporaryMaterialPending = Boolean(draft.temporaryMaterialPending && temporaryMaterial)
+    pendingTemporaryMaterialKey = temporaryMaterialPending ? temporaryMaterialIdentity(temporaryMaterial) : null
     return {
       ...defaultState,
       // 恢复对话 ID 和其他状态
@@ -393,7 +501,8 @@ function restoreSnapshot(): ChatSessionSnapshot {
       }),
       conversationHistory: draft.conversationHistory || [],
       images: draft.images || [],
-      temporaryMaterial: draft.temporaryMaterial || null,
+      temporaryMaterial,
+      temporaryMaterialPending,
     }
   } catch {
     sessionStorage.removeItem(CHAT_DRAFT_KEY)
@@ -416,6 +525,7 @@ function persistSnapshot() {
     chunkId: state.mode === 'MATERIAL' ? state.chunkId : null,
     messages: compactChatMessages(state.messages), conversationHistory: state.conversationHistory, images: state.images,
     temporaryMaterial: compactTemporaryMaterial(state.temporaryMaterial),
+    temporaryMaterialPending: state.temporaryMaterialPending,
   }
   sessionStorage.setItem(CHAT_DRAFT_KEY, JSON.stringify(draft))
   localStorage.setItem(CHAT_DRAFT_BACKUP_KEY, JSON.stringify(draft))
@@ -481,10 +591,60 @@ function compactChatMessages(messages: ChatMessage[]) {
     : message)
 }
 
+/** 生成临时资料的轻量标识，用于判断用户是否在同一会话里换了新资料。 */
+function temporaryMaterialIdentity(material: TemporaryMaterial | null | undefined): string | null {
+  if (!material) return null
+  const partKeys = material.parts?.map(temporaryMaterialIdentity).filter(Boolean).join('|') || ''
+  return [
+    material.id || '',
+    material.originalName || material.title || '',
+    material.fileSize ?? '',
+    material.text?.length ?? 0,
+    partKeys,
+  ].join(':')
+}
+
+/**
+ * 判断本次问答是否需要把临时资料正文发给后端。
+ *
+ * 新会话首轮必须发送一次，让后端把资料内容保存到该 conversation；
+ * 已有会话只有在用户重新上传/替换临时资料后才发送，避免每轮追问都重复携带大文本。
+ */
+function shouldSendTemporaryMaterialForRequest(
+  mode: ChatMode,
+  conversationId: string | null,
+  temporaryKey: string | null,
+) {
+  if (mode !== 'GENERAL' || !temporaryKey) return false
+  if (!conversationId) return true
+  return pendingTemporaryMaterialKey === temporaryKey
+}
+
+/**
+ * 决定本次请求是否保留 selectedText。
+ *
+ * 通用问答里 selectedText 只用于把临时资料正文塞给后端；当临时资料已在会话首轮保存后，
+ * 后续追问必须只带 conversationId，避免每轮重复提交大段资料文本。
+ * 资料问答/划词提问不受影响，仍然保留 selectedText。
+ */
+function shouldKeepSelectedTextForRequest(
+  mode: ChatMode,
+  temporaryMaterial: TemporaryMaterial | null | undefined,
+  sendingTemporaryMaterial: boolean,
+  selectedText: string | null | undefined,
+) {
+  if (!selectedText) return null
+  if (mode === 'GENERAL' && temporaryMaterial && !sendingTemporaryMaterial) return null
+  return selectedText
+}
+
 function compactTemporaryMaterial(material: TemporaryMaterial | null | undefined): TemporaryMaterial | null {
   if (!material) return null
+  const compactParts = material.parts?.map((part) => compactTemporaryMaterial(part)).filter(Boolean) as TemporaryMaterial[] | undefined
   const text = material.text || ''
-  if (text.length <= TEMPORARY_MATERIAL_TEXT_LIMIT) return material
+  if (text.length <= TEMPORARY_MATERIAL_TEXT_LIMIT) {
+    return compactParts?.length ? { ...material, parts: compactParts } : material
+  }
   // parts/files 等元数据保留完整，只有大段正文截断；预览弹窗仍能展示文件名、
   // 文件大小和“内容已截取”的提示。
   const compactText = text.slice(0, TEMPORARY_MATERIAL_TEXT_LIMIT)
@@ -492,5 +652,53 @@ function compactTemporaryMaterial(material: TemporaryMaterial | null | undefined
     ...material,
     text: `${compactText}\n\n[内容过长，已截取前 ${TEMPORARY_MATERIAL_TEXT_LIMIT} 字]`,
     excerpt: material.excerpt || compactText.slice(0, 500),
+    parts: compactParts,
   }
+}
+
+function temporaryMaterialForRequest(material: TemporaryMaterial | null | undefined): TemporaryMaterial | null {
+  if (!material) return null
+  if (hasTemporaryMaterialReference(material)) return temporaryMaterialReferenceForRequest(material)
+  const text = material.text || ''
+  if (text.length <= TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT) return material
+  // 请求体保留开头和结尾，兼顾概览类问题和“最后/后半部分”问题；完整大文件应走资料问答后台解析。
+  const headLength = Math.floor(TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT * 0.65)
+  const tailLength = TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT - headLength
+  const requestText = [
+    text.slice(0, headLength),
+    `\n\n[临时资料过长，已省略中间内容；单次智能问答最多携带 ${TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT} 字。大文件请上传到资料问答以获得完整索引。]\n\n`,
+    text.slice(Math.max(0, text.length - tailLength)),
+  ].join('')
+  return {
+    ...material,
+    text: requestText,
+    excerpt: material.excerpt || requestText.slice(0, 500),
+  }
+}
+
+/** 后端已保存全文的临时资料，请求里只传引用和少量预览，避免大请求体和前端本地存储压力。 */
+function temporaryMaterialReferenceForRequest(material: TemporaryMaterial): TemporaryMaterial {
+  const parts = material.parts?.map((part) => temporaryMaterialReferenceForRequest(part))
+  const preview = requestPreviewText(material)
+  return {
+    ...material,
+    text: preview,
+    excerpt: material.excerpt || preview.slice(0, 500),
+    parts,
+  }
+}
+
+/** 判断临时资料是否有后端全文引用。多文件资料只要子资料有 ID，就走引用恢复。 */
+function hasTemporaryMaterialReference(material: TemporaryMaterial): boolean {
+  if (material.contextStored && material.id) return true
+  if (material.parts?.length) return material.parts.some(hasTemporaryMaterialReference)
+  return false
+}
+
+/** 请求预览文本只用于历史回显和降级兜底，不再承担全文检索职责。 */
+function requestPreviewText(material: TemporaryMaterial) {
+  const text = material.text || material.excerpt || ''
+  if (!text) return ''
+  if (text.length <= TEMPORARY_MATERIAL_REQUEST_PREVIEW_LIMIT) return text
+  return `${text.slice(0, TEMPORARY_MATERIAL_REQUEST_PREVIEW_LIMIT)}\n\n[仅发送预览，完整临时资料正文由后端按资料 ID 恢复。]`
 }

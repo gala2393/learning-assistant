@@ -153,14 +153,15 @@ export function MaterialsPage() {
           // 上传过程中的进度回调
           setUploadProgressItems((current) => updateUploadProgressItem(current, id, progress))
         }).then((session) => {
-          // 上传成功，标记为完成
+          // 分片合并成功后，后端会立即进入文本抽取、预览和索引等后台流程；
+          // 这里展示后端返回的真实处理阶段，避免把“已入队”误报成“解析完成”。
           setUploadProgressItems((current) => updateUploadProgressItem(current, id, {
             phase: 'processing',
             percent: 100,
             uploadedChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
             totalChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
-            stage: '解析完成',
-            message: '资料已上传完成',
+            stage: session.processingStage || session.parseStage || '已进入后台处理',
+            message: session.processingMessage || session.parseMessage || '原文件已上传，正在后台抽取文本、生成预览并构建索引',
           }, 'success'))
           return session
         }).catch((error) => {

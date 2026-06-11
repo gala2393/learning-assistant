@@ -12,11 +12,15 @@ import java.util.List;
  * @param conversationId 本次问答所属的对话 ID，用于多轮对话的关联
  * @param answer         最终的完整回答文本（含装饰性后缀，如引用来源说明）
  * @param sources        引用的学习资料来源列表，每个来源包含资料名称、页码、摘录等
+ * @param continuable    当前回答是否可以通过“继续”接着生成
+ * @param continuationHint 可继续生成时展示给前端的提示语
  */
 public record RagStreamResult(
     Long questionId,
     Long conversationId,
     String answer,
-    List<RagSourceResponse> sources
+    List<RagSourceResponse> sources,
+    boolean continuable,
+    String continuationHint
 ) {
 }

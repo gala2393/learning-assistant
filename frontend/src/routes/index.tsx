@@ -1,25 +1,41 @@
+import { lazy, Suspense, type ReactNode } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import App from '@/App'
 import { AuthLayout } from '@/components/auth/AuthLayout'
-import { ForgotPasswordForm } from '@/components/auth/ForgotPasswordForm'
-import { LoginForm } from '@/components/auth/LoginForm'
-import { RegisterForm } from '@/components/auth/RegisterForm'
 import { AppShell } from '@/components/layout/AppShell'
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute'
 import { RouteFallback } from '@/components/layout/RouteFallback'
-import { ProductLandingPage } from '@/components/landing/ProductLandingPage'
-import { ChatPage } from '@/components/workspace/ChatPage'
-import { MaterialsPage } from '@/components/workspace/MaterialsPage'
-import { ReaderPage } from '@/components/workspace/ReaderPage'
-import { HistoryPage } from '@/components/workspace/HistoryPage'
-import { FavoritesPage } from '@/components/workspace/FavoritesPage'
-import { SummaryPage } from '@/components/workspace/SummaryPage'
-import { EvaluationPage } from '@/components/workspace/EvaluationPage'
-import { DashboardPage } from '@/components/admin/DashboardPage'
-import { UsersPage } from '@/components/admin/UsersPage'
-import { MaterialsAdminPage } from '@/components/admin/MaterialsAdminPage'
-import { LogsPage } from '@/components/admin/LogsPage'
-import { UsageRecordsPage } from '@/components/admin/UsageRecordsPage'
+
+const ProductLandingPage = lazy(() => import('@/components/landing/ProductLandingPage').then((module) => ({ default: module.ProductLandingPage })))
+const LoginForm = lazy(() => import('@/components/auth/LoginForm').then((module) => ({ default: module.LoginForm })))
+const RegisterForm = lazy(() => import('@/components/auth/RegisterForm').then((module) => ({ default: module.RegisterForm })))
+const ForgotPasswordForm = lazy(() => import('@/components/auth/ForgotPasswordForm').then((module) => ({ default: module.ForgotPasswordForm })))
+const ChatPage = lazy(() => import('@/components/workspace/ChatPage').then((module) => ({ default: module.ChatPage })))
+const MaterialsPage = lazy(() => import('@/components/workspace/MaterialsPage').then((module) => ({ default: module.MaterialsPage })))
+const ReaderPage = lazy(() => import('@/components/workspace/ReaderPage').then((module) => ({ default: module.ReaderPage })))
+const HistoryPage = lazy(() => import('@/components/workspace/HistoryPage').then((module) => ({ default: module.HistoryPage })))
+const FavoritesPage = lazy(() => import('@/components/workspace/FavoritesPage').then((module) => ({ default: module.FavoritesPage })))
+const SummaryPage = lazy(() => import('@/components/workspace/SummaryPage').then((module) => ({ default: module.SummaryPage })))
+const EvaluationPage = lazy(() => import('@/components/workspace/EvaluationPage').then((module) => ({ default: module.EvaluationPage })))
+const DashboardPage = lazy(() => import('@/components/admin/DashboardPage').then((module) => ({ default: module.DashboardPage })))
+const UsersPage = lazy(() => import('@/components/admin/UsersPage').then((module) => ({ default: module.UsersPage })))
+const MaterialsAdminPage = lazy(() => import('@/components/admin/MaterialsAdminPage').then((module) => ({ default: module.MaterialsAdminPage })))
+const LogsPage = lazy(() => import('@/components/admin/LogsPage').then((module) => ({ default: module.LogsPage })))
+const UsageRecordsPage = lazy(() => import('@/components/admin/UsageRecordsPage').then((module) => ({ default: module.UsageRecordsPage })))
+
+/** 路由级加载态，用于懒加载页面组件时保持布局稳定。 */
+function RouteLoading() {
+  return (
+    <div className="flex min-h-[320px] items-center justify-center">
+      <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#4b5563] border-t-transparent" />
+    </div>
+  )
+}
+
+/** 给页面路由统一包一层 Suspense，避免首屏一次性下载所有页面代码。 */
+function lazyElement(element: ReactNode) {
+  return <Suspense fallback={<RouteLoading />}>{element}</Suspense>
+}
 
 /**
  * 路由配置 — 定义整个应用的页面结构。
@@ -53,15 +69,15 @@ export const router = createBrowserRouter([
     element: <App />,  // App 是根组件（ToastProvider + Outlet）
     children: [
       // 根路径重定向到登录页
-      { index: true, element: <ProductLandingPage /> },
+      { index: true, element: lazyElement(<ProductLandingPage />) },
 
       // ===== 认证页面（不需要登录） =====
       {
         element: <AuthLayout />,  // AuthLayout 提供登录/注册的统一样式
         children: [
-          { path: 'login', element: <LoginForm /> },
-          { path: 'register', element: <RegisterForm /> },
-          { path: 'forgot-password', element: <ForgotPasswordForm /> },
+          { path: 'login', element: lazyElement(<LoginForm />) },
+          { path: 'register', element: lazyElement(<RegisterForm />) },
+          { path: 'forgot-password', element: lazyElement(<ForgotPasswordForm />) },
         ],
       },
 
@@ -75,12 +91,12 @@ export const router = createBrowserRouter([
             children: [
               // 工作区默认重定向到聊天页
               { index: true, element: <Navigate to="/workspace/chat?new=1" replace /> },
-              { path: 'chat', element: <ChatPage /> },        // 智能问答
-              { path: 'materials', element: <MaterialsPage /> }, // 资料管理
-              { path: 'reader', element: <ReaderPage /> },     // 文档阅读器
-              { path: 'history', element: <HistoryPage /> },   // 问答历史
-              { path: 'favorites', element: <FavoritesPage /> }, // 收藏夹
-              { path: 'summary', element: <SummaryPage /> },   // 资料总结
+              { path: 'chat', element: lazyElement(<ChatPage />) },        // 智能问答
+              { path: 'materials', element: lazyElement(<MaterialsPage />) }, // 资料管理
+              { path: 'reader', element: lazyElement(<ReaderPage />) },     // 文档阅读器
+              { path: 'history', element: lazyElement(<HistoryPage />) },   // 问答历史
+              { path: 'favorites', element: lazyElement(<FavoritesPage />) }, // 收藏夹
+              { path: 'summary', element: lazyElement(<SummaryPage />) },   // 资料总结
             ],
           },
         ],
@@ -95,12 +111,12 @@ export const router = createBrowserRouter([
             element: <AppShell />,
             children: [
               { index: true, element: <Navigate to="/admin/dashboard" replace /> },
-              { path: 'dashboard', element: <DashboardPage /> },      // 仪表盘
-              { path: 'users', element: <UsersPage /> },              // 用户管理
-              { path: 'materials', element: <MaterialsAdminPage /> }, // 资料管理
-              { path: 'evaluation', element: <EvaluationPage /> },    // RAG 评估
-              { path: 'usage-records', element: <UsageRecordsPage /> }, // 使用记录
-              { path: 'logs', element: <LogsPage /> },               // 系统日志
+              { path: 'dashboard', element: lazyElement(<DashboardPage />) },      // 仪表盘
+              { path: 'users', element: lazyElement(<UsersPage />) },              // 用户管理
+              { path: 'materials', element: lazyElement(<MaterialsAdminPage />) }, // 资料管理
+              { path: 'evaluation', element: lazyElement(<EvaluationPage />) },    // RAG 评估
+              { path: 'usage-records', element: lazyElement(<UsageRecordsPage />) }, // 使用记录
+              { path: 'logs', element: lazyElement(<LogsPage />) },               // 系统日志
             ],
           },
         ],

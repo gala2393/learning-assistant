@@ -120,6 +120,16 @@ function supportsPdfPreview(material: Material | null) {
   return ['PDF', 'DOC', 'DOCX', 'PPT', 'PPTX'].includes(type)
 }
 
+/** 根据真实资料类型展示阅读器模式，避免 Word/PPT 预览被误标为 PDF 阅读器。 */
+function readerModeLabel(material: Material | null, usesPageCanvas: boolean, usesPdfPreview: boolean) {
+  if (!usesPageCanvas) return '文本阅读'
+  const type = String(material?.sourceType || '').toUpperCase()
+  if (type === 'PDF') return usesPdfPreview ? 'PDF 阅读器' : 'PDF 页面预览'
+  if (type === 'DOC' || type === 'DOCX') return 'Word 预览'
+  if (type === 'PPT' || type === 'PPTX') return '演示文稿预览'
+  return '页面预览'
+}
+
 function fallbackChunkRangeForPage(page: MaterialPage, pages: MaterialPage[], chunkCount: number) {
   if (!page || pages.length === 0 || chunkCount <= 0) return null
   const pageIndex = Math.max(0, pages.findIndex((candidate) => candidate.pageNo === page.pageNo))
@@ -172,11 +182,13 @@ function pageNoForChunkIndex(chunkIndex: number, chunks: MaterialChunk[], pages:
 function MaterialImage({
   materialId,
   fileName,
+  pageNo,
   className,
   onError,
 }: {
   materialId: string
   fileName: string
+  pageNo?: number
   className?: string
   onError?: () => void
 }) {
@@ -233,9 +245,12 @@ function MaterialImage({
   // 加载中状态
   if (!src) {
     return (
-      <span className="flex items-center justify-center gap-2 text-xs text-muted-foreground py-10">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        加载页面...
+      <span className="flex items-center justify-center gap-2 px-4 py-10 text-center text-xs text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+        <span className="flex flex-col gap-0.5">
+          <span>{pageNo ? `正在加载第 ${pageNo} 页预览...` : '正在加载页面预览...'}</span>
+          <span>图片型 PDF 可先预览页面，文字识别会继续在后台补齐</span>
+        </span>
       </span>
     )
   }
@@ -295,6 +310,35 @@ function ChunkContent({ text, materialId }: { text: string; materialId: string }
   }
 
   return <>{parts}</>
+}
+
+/** 将连续文本整理为更接近文档正文的段落，避免 TXT/Word 降级预览变成密集代码块。 */
+function readableParagraphs(text: string) {
+  const normalized = text.replace(/\r\n?/g, '\n').trim()
+  if (!normalized) return ['']
+  const paragraphs = normalized
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+  return paragraphs.length ? paragraphs : [normalized]
+}
+
+/**
+ * ReadableChunkContent -- 无页面预览资料的正文排版组件
+ *
+ * 后端仍按 chunk 维护定位和问答上下文，前端在每个 chunk 内按自然段渲染。
+ * 这样 TXT、Markdown、Word 降级文本不会只有一整坨等宽感文本，同时保留图片标记替换能力。
+ */
+function ReadableChunkContent({ text, materialId }: { text: string; materialId: string }) {
+  return (
+    <div className="space-y-4 text-[15px] leading-8 text-slate-800 selection:bg-cyan-100 dark:text-slate-100 dark:selection:bg-cyan-900/70">
+      {readableParagraphs(text).map((paragraph, index) => (
+        <p key={`${index}-${paragraph.slice(0, 16)}`} className="m-0 whitespace-pre-wrap break-words">
+          <ChunkContent text={paragraph} materialId={materialId} />
+        </p>
+      ))}
+    </div>
+  )
 }
 
 function textBlockStyle(block: MaterialPageTextBlock, page: MaterialPage, renderedPageHeight: number): React.CSSProperties {
@@ -572,6 +616,7 @@ function PagePreviewCanvas({
             <MaterialImage
               materialId={materialId}
               fileName={page.imageName}
+              pageNo={page.pageNo}
               className="h-full w-full object-contain"
               onError={onError}
             />
@@ -864,7 +909,7 @@ export function ReaderPaper({
         if (nextIndex < 0) return
         const nextPageNo = pageNoForChunkIndex(nextIndex, chunks, pages)
         if (!jumpFocused) {
-          setJumpValue(String(nextIndex + 1))
+          setJumpValue(String(Math.floor(nextIndex / TEXT_PAGE_CHUNK_SIZE) + 1))
         }
         onReadingContextChange?.({
           pageNo: nextPageNo,
@@ -987,7 +1032,7 @@ export function ReaderPaper({
         )}
         {isPageWindowed && (
           <div className="mx-auto max-w-3xl px-3 pt-3 text-center text-[11px] text-muted-foreground">
-            已启用按需渲染：当前只加载第 {visiblePages[0]?.pageNo || 1} - {visiblePages[visiblePages.length - 1]?.pageNo || 1} 页，避免长 PDF 卡顿。
+            已启用按需渲染：当前只加载第 {visiblePages[0]?.pageNo || 1} - {visiblePages[visiblePages.length - 1]?.pageNo || 1} 页，避免长文档卡顿。
           </div>
         )}
         {visiblePages.map((page) => {
@@ -1038,52 +1083,78 @@ export function ReaderPaper({
   )
 
   const renderContinuousChunks = () => (
-    <ScrollArea className="flex-1 bg-[#eceff1]" viewportRef={scrollViewportRef}>
-      <div className="mx-auto min-h-full max-w-3xl space-y-3 bg-background px-4 py-4 md:px-6 md:py-6">
-        {(material?.previewError || pagePreviewFailed) && (
-          <p className="rounded-md border border-dashed bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            {pagePreviewFailed ? '页面图片暂时无法加载，已切换为解析文本连续阅读。' : material?.previewError}
-          </p>
-        )}
-        {isChunkWindowed && (
-          <p className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-center text-[11px] text-muted-foreground">
-            已启用长文本按需渲染：当前只加载第 {chunkRenderRange.start + 1} - {chunkRenderRange.end} 段，跳转或上一/下一会自动切换窗口。
-          </p>
-        )}
-        {visibleChunks.map((item, offset) => {
-          const index = chunkRenderRange.start + offset
-          return (
-          <section
-            key={item.id}
-            ref={(node) => {
-              chunkRefs.current[String(item.id)] = node
-            }}
-            data-chunk-id={String(item.id)}
-            className={cn(
-              'scroll-mt-4 rounded-md border px-4 py-4 transition-colors',
-              String(item.id) === String(chunk.id)
-                ? 'border-cyan-200 bg-cyan-50/40 dark:border-cyan-900 dark:bg-cyan-950/20'
-                : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0f1117]',
-            )}
-          >
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <Badge variant={String(item.id) === String(chunk.id) ? 'default' : 'outline'} className="text-[10px]">
-                片段 {item.chunkIndex}
-              </Badge>
-              {item.pageNo && <Badge variant="secondary" className="text-[10px]">P{item.pageNo}</Badge>}
-              {item.sectionTitle && <h4 className="text-sm font-semibold text-primary">{item.sectionTitle}</h4>}
+    <ScrollArea className="flex-1 bg-[#eef1f2] dark:bg-[#111318]" viewportRef={scrollViewportRef}>
+      <div className="mx-auto min-h-full max-w-[880px] px-3 py-5 md:px-8 md:py-8">
+        <article className="min-h-[calc(100vh-12rem)] bg-[#fffefd] px-5 py-6 shadow-sm ring-1 ring-slate-200 md:px-10 md:py-9 dark:bg-[#15171d] dark:ring-slate-800">
+          <header className="border-b border-slate-200 pb-5 dark:border-slate-800">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <span>{String(material?.sourceType || '文档').toUpperCase()}</span>
+              <span>·</span>
+              <span>{chunks.length} 个片段</span>
+              {isChunkWindowed && (
+                <>
+                  <span>·</span>
+                  <span>当前 {chunkRenderRange.start + 1}-{chunkRenderRange.end}</span>
+                </>
+              )}
             </div>
-            {item.hierarchyPath && (
-              <p className="mb-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px] font-medium text-muted-foreground">
-                {item.hierarchyPath}
+            <h2 className="mt-2 text-xl font-semibold leading-8 text-slate-950 md:text-2xl dark:text-slate-50">
+              {material?.title || material?.originalName || '未命名资料'}
+            </h2>
+            {(material?.previewError || pagePreviewFailed) && (
+              <p className="mt-3 rounded-md border border-dashed bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+                {pagePreviewFailed ? '页面图片暂时无法加载，已切换为解析文本连续阅读。' : material?.previewError}
               </p>
             )}
-            <div className="whitespace-pre-wrap text-sm leading-7 text-foreground/90">
-              {material?.id ? <ChunkContent text={item.chunkText} materialId={material.id} /> : item.chunkText}
-            </div>
-          </section>
-          )
-        })}
+          </header>
+
+          <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            {visibleChunks.map((item, offset) => {
+              const index = chunkRenderRange.start + offset
+              const active = String(item.id) === String(chunk.id)
+              return (
+                <section
+                  key={item.id}
+                  ref={(node) => {
+                    chunkRefs.current[String(item.id)] = node
+                  }}
+                  data-chunk-id={String(item.id)}
+                  className={cn(
+                    'relative scroll-mt-6 py-6 pl-5 transition-colors md:py-7 md:pl-7',
+                    'before:absolute before:bottom-6 before:left-0 before:top-6 before:w-[3px] before:rounded-full',
+                    active
+                      ? 'bg-cyan-50/40 before:bg-cyan-500 dark:bg-cyan-950/20'
+                      : 'before:bg-slate-200 hover:bg-slate-50/70 dark:before:bg-slate-700 dark:hover:bg-slate-900/30',
+                  )}
+                >
+                  <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                    <Badge variant={active ? 'default' : 'outline'} className="h-5 text-[10px]">
+                      片段 {item.chunkIndex || index + 1}
+                    </Badge>
+                    {item.pageNo && <Badge variant="secondary" className="h-5 text-[10px]">P{item.pageNo}</Badge>}
+                    {item.hierarchyPath && (
+                      <span className="min-w-0 truncate font-medium text-slate-500 dark:text-slate-400">
+                        {item.hierarchyPath}
+                      </span>
+                    )}
+                  </div>
+                  {item.sectionTitle && (
+                    <h3 className="mb-3 text-base font-semibold leading-7 text-slate-950 dark:text-slate-50">
+                      {item.sectionTitle}
+                    </h3>
+                  )}
+                  {material?.id ? (
+                    <ReadableChunkContent text={item.chunkText} materialId={material.id} />
+                  ) : (
+                    <div className="whitespace-pre-wrap break-words text-[15px] leading-8 text-slate-800 dark:text-slate-100">
+                      {item.chunkText}
+                    </div>
+                  )}
+                </section>
+              )
+            })}
+          </div>
+        </article>
       </div>
     </ScrollArea>
   )
@@ -1104,7 +1175,7 @@ export function ReaderPaper({
             <Badge variant="outline" className="text-xs">P{chunkPageNo}</Badge>
           )}
           <Badge variant="secondary" className="text-xs">
-            {usesPageCanvas ? (usesPdfPreview ? 'PDF 阅读器' : '页面预览') : '连续片段'}
+            {readerModeLabel(material, usesPageCanvas, usesPdfPreview)}
           </Badge>
           {material?.previewStatus === 'DEGRADED' && (
             <Badge variant="secondary" className="text-xs">文本预览</Badge>

@@ -104,6 +104,18 @@ export type SourceType = 'PDF' | 'DOCX' | 'WORD' | 'PPT' | 'PPTX' | 'XLSX' | 'TX
 /** 资料解析状态枚举 */
 export type ParseStatus = 'SUCCESS' | 'PARSED' | 'PROCESSING' | 'PARSING' | 'PENDING' | 'FAILED'
 
+/** 原文件上传状态 */
+export type UploadStatus = 'UPLOADING' | 'UPLOADED' | 'FAILED'
+
+/** 文本抽取状态 */
+export type TextStatus = 'PENDING' | 'RUNNING' | 'PARTIAL' | 'READY' | 'FAILED'
+
+/** 检索索引状态 */
+export type IndexStatus = 'PENDING' | 'RUNNING' | 'PARTIAL' | 'READY' | 'FAILED'
+
+/** OCR 处理状态 */
+export type OcrStatus = 'DISABLED' | 'PENDING' | 'RUNNING' | 'PARTIAL' | 'READY' | 'FAILED'
+
 /** 总结生成状态枚举 */
 export type SummaryStatus = 'SUCCESS' | 'PENDING'
 
@@ -122,6 +134,15 @@ export interface Material {
   parseProgressPercent?: number | null    // 解析进度百分比
   parseStage?: string | null              // 解析阶段名称
   parseMessage?: string | null            // 解析阶段说明消息
+  uploadStatus?: UploadStatus | string | null   // 原文件上传状态
+  textStatus?: TextStatus | string | null        // 文本抽取状态
+  indexStatus?: IndexStatus | string | null      // 检索索引状态
+  ocrStatus?: OcrStatus | string | null          // OCR 状态
+  processingProgressPercent?: number | null      // 后台处理综合进度
+  processingStage?: string | null                // 后台处理阶段
+  processingMessage?: string | null              // 后台处理说明
+  indexedChunkCount?: number | null              // 已进入索引的片段数
+  textPageCount?: number | null                  // 已抽取文本的页数
   summaryStatus: SummaryStatus            // 总结生成状态
   previewStatus?: PreviewStatus           // 页面预览状态
   previewError?: string | null            // 预览失败的错误信息
@@ -218,6 +239,7 @@ export interface TemporaryMaterial {
   text: string
   excerpt: string
   fileSize?: number
+  contextStored?: boolean
   files?: Array<{ name: string; size?: number | null; type?: string | null }>
   parts?: TemporaryMaterial[]
 }
@@ -248,7 +270,9 @@ export interface HistoryItem {
   conversationId?: string | null            // 会话 ID
   title?: string | null                     // 自定义标题
   question: string                          // 问题
-  answer: string                            // 回答
+    answer: string                            // 回答
+    continuable?: boolean                     // 回答是否可以继续生成
+    continuationHint?: string | null          // 继续生成提示
   createdAt: string                         // 创建时间
   favoriteId: string | null                 // 收藏记录 ID（null 表示未收藏）
   favorite?: boolean                        // 是否已收藏
@@ -258,8 +282,10 @@ export interface HistoryItem {
     role: 'user' | 'assistant'
     text: string
     images?: ChatImagePayload[]
-    temporaryMaterial?: TemporaryMaterial | null
-  }>
+      temporaryMaterial?: TemporaryMaterial | null
+      continuable?: boolean
+      continuationHint?: string | null
+    }>
   sources?: RagSource[]                     // 检索来源列表
 }
 
@@ -433,6 +459,21 @@ export interface AdminUser {
 export interface AdminMaterial extends Material {
   ownerId: string             // 所有者用户 ID
   ownerUsername: string       // 所有者用户名
+}
+
+/** 管理后台系统依赖自检结果 */
+export interface SystemDependency {
+  name: string                // 依赖名称，例如 pdfinfo、LibreOffice、Tesseract OCR
+  enabled: boolean            // 配置层面是否启用
+  healthy: boolean            // 当前运行环境是否可用
+  message: string             // 检查结果说明
+}
+
+/** 管理员提交向量索引重建后的结果 */
+export interface AdminVectorIndexRebuildResponse {
+  submitted: number           // 已提交后台任务数量
+  materialId?: string | number | null // 指定资料 ID；为空表示批量重建
+  message: string             // 后端返回的处理说明
 }
 
 /** 管理员审计日志 */

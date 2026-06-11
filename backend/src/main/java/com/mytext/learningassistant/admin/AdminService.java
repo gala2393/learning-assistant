@@ -257,6 +257,10 @@ public class AdminService {
             || "CREATE_UPLOAD_SESSION".equals(action);
     }
 
+    public void requireAdminUser(long currentUserId) {
+        requireAdmin(currentUserId);
+    }
+
     private UserEntity requireAdmin(long currentUserId) {
         UserEntity user = userRepository.findById(currentUserId)
             .orElseThrow(() -> new BusinessException(401, "用户不存在"));
@@ -399,6 +403,16 @@ public class AdminService {
             material.getParseProgressPercent(),
             material.getParseStage(),
             material.getParseMessage(),
+            material.getUploadStatus() == null ? null : material.getUploadStatus().name(),
+            material.getTextStatus() == null ? null : material.getTextStatus().name(),
+            material.getIndexStatus() == null ? null : material.getIndexStatus().name(),
+            material.getOcrStatus() == null ? null : material.getOcrStatus().name(),
+            material.getProcessingProgressPercent(),
+            material.getProcessingStage(),
+            material.getProcessingMessage(),
+            material.getIndexedChunkCount(),
+            material.getTextPageCount(),
+            material.getPageCount(),
             material.getSummaryStatus().name(),
             material.getChunkCount(),
             format(material.getCreatedAt()),

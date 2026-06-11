@@ -1,6 +1,7 @@
 package com.mytext.learningassistant.llm;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -60,6 +61,26 @@ class OpenAiCompatibleLlmClientTest {
     }
 
     @Test
+    void chatCompletionsRequestUses4096OutputTokenLimit() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>("");
+        server = startRecordingServer("/v1/chat/completions", requestBody, """
+            {
+              "choices": [
+                { "message": { "content": "LLM answer" } }
+              ]
+            }
+            """);
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(
+            new LlmProperties(true, baseUrl(), "test-key", "test-model", "chat-completions", Duration.ofSeconds(2))
+        );
+
+        Optional<LlmResult> result = client.chat("You are helpful.", "Question?");
+
+        assertThat(result).isPresent();
+        assertThat(requestBody.get()).contains("\"max_tokens\":4096");
+    }
+
+    @Test
     void sendsAnthropicMessagesRequestAndReadsTextContent() throws Exception {
         server = startServer("/anthropic/v1/messages", 200, """
             {
@@ -95,7 +116,8 @@ class OpenAiCompatibleLlmClientTest {
     void chatStreamForwardsOpenAiDeltasBeforeProviderCompletes() throws Exception {
         CountDownLatch firstChunkReceived = new CountDownLatch(1);
         AtomicBoolean firstChunkReachedClientBeforeSecondChunk = new AtomicBoolean(false);
-        server = startOpenAiStreamingServer(firstChunkReceived, firstChunkReachedClientBeforeSecondChunk);
+        AtomicReference<String> requestBody = new AtomicReference<>("");
+        server = startOpenAiStreamingServer(firstChunkReceived, firstChunkReachedClientBeforeSecondChunk, requestBody);
         OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(
             new LlmProperties(true, baseUrl(), "test-key", "test-model", "chat-completions", Duration.ofSeconds(5))
         );
@@ -111,6 +133,22 @@ class OpenAiCompatibleLlmClientTest {
         assertThat(firstChunkReachedClientBeforeSecondChunk).isTrue();
         assertThat(chunks).containsExactly("Hello ", "world");
         assertThat(answer).isEqualTo("Hello world");
+        assertThat(requestBody.get()).contains("\"max_tokens\":4096");
+    }
+
+    @Test
+    void chatStreamThrowsUserVisibleErrorWhenProviderFails() throws Exception {
+        server = startServer(500, """
+            { "error": "temporary failure" }
+            """);
+        OpenAiCompatibleLlmClient client = new OpenAiCompatibleLlmClient(
+            new LlmProperties(true, baseUrl(), "test-key", "test-model", "chat-completions", Duration.ofSeconds(2))
+        );
+
+        assertThatThrownBy(() -> client.chatStream("system", "user", List.of(), ignored -> {
+        }))
+            .isInstanceOf(LlmProviderException.class)
+            .hasMessageContaining("AI 模型响应失败或超时");
     }
 
     @Test
@@ -211,8 +249,19 @@ class OpenAiCompatibleLlmClientTest {
         CountDownLatch firstChunkReceived,
         AtomicBoolean firstChunkReachedClientBeforeSecondChunk
     ) throws IOException {
+        return startOpenAiStreamingServer(firstChunkReceived, firstChunkReachedClientBeforeSecondChunk, null);
+    }
+
+    private HttpServer startOpenAiStreamingServer(
+        CountDownLatch firstChunkReceived,
+        AtomicBoolean firstChunkReachedClientBeforeSecondChunk,
+        AtomicReference<String> requestBody
+    ) throws IOException {
         HttpServer httpServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         httpServer.createContext("/v1/chat/completions", exchange -> {
+            if (requestBody != null) {
+                requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            }
             exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
             exchange.sendResponseHeaders(200, 0);
             try (var body = exchange.getResponseBody()) {

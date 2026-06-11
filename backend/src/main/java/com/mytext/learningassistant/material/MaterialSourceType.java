@@ -34,6 +34,6 @@ public enum MaterialSourceType {
     /** PowerPoint 文件（.pptx）-- 使用 Zip 解压解析 XML 提取文本 */
     PPTX,
 
-    /** Excel 文件（.xlsx）-- 优先交给 MinerU 解析并生成可选中文本层 */
+    /** Excel 文件（.xlsx）-- 当前不支持直接解析，需先另存为 PDF、DOCX 或 TXT */
     XLSX
 }

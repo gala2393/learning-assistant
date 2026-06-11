@@ -30,17 +30,21 @@ import java.util.regex.Pattern;
 
 import com.mytext.learningassistant.embedding.EmbeddingClient;
 import com.mytext.learningassistant.llm.LlmCompletion;
+import com.mytext.learningassistant.llm.LlmProviderException;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
 import com.mytext.learningassistant.material.MaterialChunkRepository;
+import com.mytext.learningassistant.material.TemporaryMaterialContextEntity;
+import com.mytext.learningassistant.material.TemporaryMaterialContextRepository;
 import com.mytext.learningassistant.rag.RagEvaluationSuiteScheduler;
 import com.mytext.learningassistant.rag.RagQuestionRepository;
+import com.mytext.learningassistant.user.UserRepository;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.web.servlet.MockMvc;
@@ -52,10 +56,10 @@ class RagApiTest {
     @Autowired
     private MockMvc mockMvc;
 
-    @MockBean
+    @MockitoBean
     private EmbeddingClient embeddingClient;
 
-    @MockBean
+    @MockitoBean
     private ThirdPartyLlmClient thirdPartyLlmClient;
 
     @Autowired
@@ -63,6 +67,12 @@ class RagApiTest {
 
     @Autowired
     private RagQuestionRepository ragQuestionRepository;
+
+    @Autowired
+    private TemporaryMaterialContextRepository temporaryMaterialContextRepository;
+
+    @Autowired
+    private UserRepository userRepository;
 
     @Autowired
     private RagEvaluationSuiteScheduler ragEvaluationSuiteScheduler;
@@ -137,6 +147,26 @@ class RagApiTest {
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data[0].questionId").value(questionId.intValue()))
             .andExpect(jsonPath("$.data[0].messages", hasSize(2)));
+    }
+
+    @Test
+    void chatRejectsQuestionOverInputLimit() throws Exception {
+        String token = registerAndLogin(uniqueName("rag-input-limit-user"));
+        String longQuestion = "我".repeat(20001);
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "%s",
+                      "mode": "GENERAL"
+                    }
+                    """.formatted(longQuestion)))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value(400))
+            .andExpect(jsonPath("$.message").value("参数校验失败"))
+            .andExpect(jsonPath("$.data.question").value("问题不能超过 20000 字"));
     }
 
     @Test
@@ -1152,6 +1182,180 @@ class RagApiTest {
         org.assertj.core.api.Assertions.assertThat(body).contains("第 1 段流式内容");
         org.assertj.core.api.Assertions.assertThat(body).contains("输入“继续”生成第 2/4 部分");
         org.assertj.core.api.Assertions.assertThat(body).contains("event: done");
+    }
+
+    @Test
+    void generalChatRestoresTemporaryMaterialFromConversationWhenNextTurnOmitsAttachment() throws Exception {
+        when(thirdPartyLlmClient.answer(
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts ->
+                excerpts != null && excerpts.stream().anyMatch(excerpt -> excerpt.contains("TEMP_CONTEXT_MARKER"))
+            ),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        )).thenReturn(Optional.of(new LlmCompletion("临时资料里提到了 TEMP_CONTEXT_MARKER。", "mock-model")));
+        String token = registerAndLogin(uniqueName("rag-temporary-context-user"));
+
+        var firstResult = mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "这份临时资料里有什么标记？",
+                      "mode": "GENERAL",
+                      "temporaryMaterial": {
+                        "id": "temp-context-1",
+                        "title": "临时资料.txt",
+                        "originalName": "临时资料.txt",
+                        "sourceType": "TXT",
+                        "text": "TEMP_CONTEXT_MARKER 是这份临时资料里的关键标记，用来验证后续轮次仍能读取上下文。",
+                        "excerpt": "TEMP_CONTEXT_MARKER 是关键标记",
+                        "fileSize": 120
+                      }
+                    }
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("TEMP_CONTEXT_MARKER")))
+            .andReturn();
+        Long conversationId = extractLong(firstResult.getResponse().getContentAsString(), "conversationId");
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "刚才那份资料里的标记是什么？",
+                      "mode": "GENERAL",
+                      "conversationId": %d
+                    }
+                    """.formatted(conversationId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("TEMP_CONTEXT_MARKER")))
+            .andExpect(jsonPath("$.data.conversationId").value(conversationId.intValue()));
+
+        verify(thirdPartyLlmClient, times(2)).answer(
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts ->
+                excerpts != null && excerpts.stream().anyMatch(excerpt -> excerpt.contains("TEMP_CONTEXT_MARKER"))
+            ),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        );
+    }
+
+    @Test
+    void generalChatUsesStoredTemporaryMaterialContextWhenRequestOnlySendsReference() throws Exception {
+        when(thirdPartyLlmClient.answer(
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts ->
+                excerpts != null && excerpts.stream().anyMatch(excerpt -> excerpt.contains("STORED_CONTEXT_MARKER_AFTER_PREVIEW"))
+            ),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        )).thenReturn(Optional.of(new LlmCompletion("已读取后端临时资料全文：STORED_CONTEXT_MARKER_AFTER_PREVIEW。", "mock-model")));
+
+        String username = uniqueName("rag-stored-temporary-context-user");
+        String token = registerAndLogin(username);
+        Long userId = userRepository.findByUsername(username).orElseThrow().getId();
+        String contextId = "stored-temp-" + UUID.randomUUID();
+        String fullText = "普通预览内容。".repeat(5_000)
+            + "\nSTORED_CONTEXT_MARKER_AFTER_PREVIEW 表示后端按临时资料 ID 恢复了超过前端预览范围的全文。";
+        TemporaryMaterialContextEntity context = new TemporaryMaterialContextEntity();
+        context.setId(contextId);
+        context.setOwnerId(userId);
+        context.setTitle("长临时资料.txt");
+        context.setOriginalName("长临时资料.txt");
+        context.setSourceType("TXT");
+        context.setText(fullText);
+        context.setExcerpt("普通预览内容。");
+        context.setFileSize((long) fullText.getBytes(StandardCharsets.UTF_8).length);
+        temporaryMaterialContextRepository.save(context);
+
+        var firstResult = mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "STORED_CONTEXT_MARKER_AFTER_PREVIEW 是什么？",
+                      "mode": "GENERAL",
+                      "temporaryMaterial": {
+                        "id": "%s",
+                        "title": "长临时资料.txt",
+                        "originalName": "长临时资料.txt",
+                        "sourceType": "TXT",
+                        "text": "这里只是一小段前端预览，不包含真正的目标标记。",
+                        "excerpt": "普通预览内容",
+                        "fileSize": 120,
+                        "contextStored": true
+                      }
+                    }
+                    """.formatted(contextId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("STORED_CONTEXT_MARKER_AFTER_PREVIEW")))
+            .andReturn();
+        Long conversationId = extractLong(firstResult.getResponse().getContentAsString(), "conversationId");
+
+        mockMvc.perform(post("/api/rag/chat")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "上一轮临时资料里的 STORED_CONTEXT_MARKER_AFTER_PREVIEW 是什么？",
+                      "mode": "GENERAL",
+                      "conversationId": %d
+                    }
+                    """.formatted(conversationId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("STORED_CONTEXT_MARKER_AFTER_PREVIEW")));
+
+        verify(thirdPartyLlmClient, times(2)).answer(
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts ->
+                excerpts != null && excerpts.stream().anyMatch(excerpt -> excerpt.contains("STORED_CONTEXT_MARKER_AFTER_PREVIEW"))
+            ),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.eq(true)
+        );
+    }
+
+    @Test
+    void streamingChatReturnsErrorEventWhenLlmProviderFails() throws Exception {
+        when(thirdPartyLlmClient.answerStream(
+            anyLong(),
+            anyString(),
+            org.mockito.ArgumentMatchers.argThat(excerpts -> excerpts != null && excerpts.isEmpty()),
+            org.mockito.ArgumentMatchers.anyList(),
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.eq(true),
+            org.mockito.ArgumentMatchers.eq("STUDY")
+        )).thenThrow(new LlmProviderException("AI 模型响应失败或超时，请缩短问题、减少资料内容，或改用“继续”分段生成后重试。"));
+        String token = registerAndLogin(uniqueName("rag-stream-error-user"));
+
+        var started = mockMvc.perform(post("/api/rag/chat/stream")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "question": "请生成一段很长的回答",
+                      "mode": "GENERAL"
+                    }
+                    """))
+            .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.request().asyncStarted())
+            .andReturn();
+
+        started.getAsyncResult(30_000);
+        var result = mockMvc.perform(asyncDispatch(started))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
+        org.assertj.core.api.Assertions.assertThat(body).contains("event: error");
+        org.assertj.core.api.Assertions.assertThat(body).contains("AI 模型响应失败或超时");
+        org.assertj.core.api.Assertions.assertThat(body).doesNotContain("event: done");
     }
 
     @Test

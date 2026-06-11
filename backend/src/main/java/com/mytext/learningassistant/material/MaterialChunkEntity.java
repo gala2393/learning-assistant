@@ -4,9 +4,12 @@ import java.time.LocalDateTime;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 
 /**
@@ -41,6 +44,14 @@ public class MaterialChunkEntity {
     @Column(name = "page_no")
     private Integer pageNo;
 
+    /** 片段来源起始页，页码从 1 开始。 */
+    @Column(name = "source_page_start")
+    private Integer sourcePageStart;
+
+    /** 片段来源结束页，默认与起始页相同。 */
+    @Column(name = "source_page_end")
+    private Integer sourcePageEnd;
+
     /** 片段所在章节的标题 */
     @Column(name = "section_title", length = 255)
     private String sectionTitle;
@@ -68,9 +79,48 @@ public class MaterialChunkEntity {
     @Column(name = "embedding_json", columnDefinition = "TEXT")
     private String embeddingJson;
 
+    /** 片段字符数，用于索引进度和切片质量检查。 */
+    @Column(name = "char_count", nullable = false)
+    private Integer charCount;
+
+    /** 粗略 token 数，用中文/英文混合场景的估算值即可。 */
+    @Column(name = "token_count", nullable = false)
+    private Integer tokenCount;
+
+    /** Embedding 生成状态。 */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "embedding_status", nullable = false, length = 20)
+    private MaterialIndexStatus embeddingStatus;
+
+    /** BM25/数据库检索索引状态。 */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "index_status", nullable = false, length = 20)
+    private MaterialIndexStatus indexStatus;
+
     /** 创建时间 */
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
+
+    @PrePersist
+    void onCreate() {
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+        if (charCount == null) {
+            charCount = chunkText == null ? 0 : chunkText.length();
+        }
+        if (tokenCount == null) {
+            tokenCount = Math.max(1, (int) Math.ceil(charCount / 1.8));
+        }
+        if (embeddingStatus == null) {
+            embeddingStatus = embeddingJson == null || embeddingJson.isBlank()
+                ? MaterialIndexStatus.PENDING
+                : MaterialIndexStatus.READY;
+        }
+        if (indexStatus == null) {
+            indexStatus = MaterialIndexStatus.READY;
+        }
+    }
 
     // ======================== Getter / Setter ========================
 
@@ -114,6 +164,22 @@ public class MaterialChunkEntity {
         this.pageNo = pageNo;
     }
 
+    public Integer getSourcePageStart() {
+        return sourcePageStart;
+    }
+
+    public void setSourcePageStart(Integer sourcePageStart) {
+        this.sourcePageStart = sourcePageStart;
+    }
+
+    public Integer getSourcePageEnd() {
+        return sourcePageEnd;
+    }
+
+    public void setSourcePageEnd(Integer sourcePageEnd) {
+        this.sourcePageEnd = sourcePageEnd;
+    }
+
     public String getSectionTitle() {
         return sectionTitle;
     }
@@ -152,6 +218,38 @@ public class MaterialChunkEntity {
 
     public void setEmbeddingJson(String embeddingJson) {
         this.embeddingJson = embeddingJson;
+    }
+
+    public Integer getCharCount() {
+        return charCount;
+    }
+
+    public void setCharCount(Integer charCount) {
+        this.charCount = charCount;
+    }
+
+    public Integer getTokenCount() {
+        return tokenCount;
+    }
+
+    public void setTokenCount(Integer tokenCount) {
+        this.tokenCount = tokenCount;
+    }
+
+    public MaterialIndexStatus getEmbeddingStatus() {
+        return embeddingStatus;
+    }
+
+    public void setEmbeddingStatus(MaterialIndexStatus embeddingStatus) {
+        this.embeddingStatus = embeddingStatus;
+    }
+
+    public MaterialIndexStatus getIndexStatus() {
+        return indexStatus;
+    }
+
+    public void setIndexStatus(MaterialIndexStatus indexStatus) {
+        this.indexStatus = indexStatus;
     }
 
     public LocalDateTime getCreatedAt() {

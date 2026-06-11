@@ -12,6 +12,7 @@ spring:
     hibernate:
       # 每次测试启动时重建表结构，测试结束自动删除
       ddl-auto: create-drop
+    open-in-view: false
   flyway:
     # 测试环境禁用 Flyway 数据库迁移，由 JPA 自动建表
     enabled: false
@@ -21,6 +22,9 @@ spring:
         enabled: false
 
 app:
+  auth:
+    # 测试环境使用固定签名密钥，避免使用开发默认密钥时输出生产安全警告。
+    secret: test-auth-secret-for-learning-assistant
   admin:
     # 测试环境启用默认管理员自动创建
     bootstrap-enabled: true
@@ -31,6 +35,9 @@ app:
     # 测试环境文件大小限制（2GB）
     max-file-bytes: 2147483648
     max-web-bytes: 524288000
+  material-processing:
+    # 集成测试会在上传后立即读取片段和发起问答；开启后仅在测试环境提交事务后同步跑一轮后台队列。
+    inline-after-upload: true
   security:
     outbound:
       # 测试环境允许访问内网地址（如 localhost 嵌入服务）

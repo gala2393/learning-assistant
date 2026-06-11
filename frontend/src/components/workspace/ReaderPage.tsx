@@ -62,6 +62,7 @@ import {
   ListTree,
   Library,
   Layers3,
+  Loader2,
   PanelRightClose,
   PanelRightOpen,
   X,
@@ -70,12 +71,13 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
-import { updateReaderAskSelection } from '@/lib/reader-ask-session'
+import { getReaderAskSnapshot, updateReaderAskSelection } from '@/lib/reader-ask-session'
 import type { MaterialChunk, MaterialPage } from '@/types'
 
 /** 右侧问答栏默认占页面宽度比例；默认紧凑，减少对阅读区的挤占。 */
 const DEFAULT_ASK_RATIO = 0.3
 const ASK_RATIO_STORAGE_KEY = 'reader-ask-ratio'
+const READER_CONTEXT_STORAGE_KEY = 'learning-assistant.reader.current-context'
 const ASK_RATIO_PRESETS = [
   { label: '紧凑', value: 0.3 },
   { label: '均衡', value: 0.4 },
@@ -83,6 +85,36 @@ const ASK_RATIO_PRESETS = [
 ]
 const READER_SELECTION_MIN_LENGTH = 5
 const READER_SELECTION_MAX_LENGTH = 2000
+
+interface ReaderContextSnapshot {
+  materialId: string | null
+  chunkId: string | null
+  pageNo: number | null
+}
+
+/** 读取上次阅读上下文；仅在 URL 没带 materialId 时作为兜底恢复。 */
+function readReaderContextSnapshot(): ReaderContextSnapshot {
+  if (typeof window === 'undefined') return { materialId: null, chunkId: null, pageNo: null }
+  try {
+    const raw = window.localStorage.getItem(READER_CONTEXT_STORAGE_KEY)
+    if (!raw) return { materialId: null, chunkId: null, pageNo: null }
+    const parsed = JSON.parse(raw) as Partial<ReaderContextSnapshot>
+    return {
+      materialId: parsed.materialId ? String(parsed.materialId) : null,
+      chunkId: parsed.chunkId ? String(parsed.chunkId) : null,
+      pageNo: typeof parsed.pageNo === 'number' && parsed.pageNo > 0 ? parsed.pageNo : null,
+    }
+  } catch {
+    window.localStorage.removeItem(READER_CONTEXT_STORAGE_KEY)
+    return { materialId: null, chunkId: null, pageNo: null }
+  }
+}
+
+/** 保存当前阅读上下文，保证从别的模块切回 Reader 时能恢复左侧资料和页码。 */
+function writeReaderContextSnapshot(snapshot: ReaderContextSnapshot) {
+  if (typeof window === 'undefined' || !snapshot.materialId) return
+  window.localStorage.setItem(READER_CONTEXT_STORAGE_KEY, JSON.stringify(snapshot))
+}
 
 function closestReaderPaper(node: Node | null): Element | null {
   if (!node) return null
@@ -112,6 +144,7 @@ function normalizeReaderSelectedText(text: string) {
 export function ReaderPage() {
   // === URL 参数 ===
   const [searchParams, setSearchParams] = useSearchParams()
+  const savedReaderContextRef = useRef(readReaderContextSnapshot())
 
   // === 数据获取 ===
   /** 所有资料列表 */
@@ -119,7 +152,9 @@ export function ReaderPage() {
 
   // === 状态管理 ===
   /** 当前选中的资料 ID（从 URL 参数初始化） */
-  const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(() => searchParams.get('materialId'))
+  const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(() =>
+    searchParams.get('materialId') || savedReaderContextRef.current.materialId || getReaderAskSnapshot().materialId,
+  )
   /** 当前选中的片段索引（0-based） */
   const [selectedChunkIndex, setSelectedChunkIndex] = useState(0)
   /** 移动端当前打开的面板（'toc' 目录 | 'ask' 问答 | null 关闭） */
@@ -151,7 +186,7 @@ export function ReaderPage() {
 
   // === 数据获取（依赖选中的资料） ===
   /** 当前资料的所有片段列表 */
-  const { data: chunks = [] } = useMaterialChunks(selectedMaterialId)
+  const { data: chunks = [], isLoading: chunksLoading, isFetching: chunksFetching } = useMaterialChunks(selectedMaterialId)
   /** 当前资料的所有页面列表（用于页面预览模式） */
   const { data: pages = [] } = useMaterialPages(selectedMaterialId)
 
@@ -187,6 +222,21 @@ export function ReaderPage() {
   const askCurrentPageChunkIds = readingPageChunkIds.length ? readingPageChunkIds : currentPage?.chunkIds || []
 
   // === 副作用：URL 参数同步 ===
+
+  /**
+   * 从其他模块重新进入阅读器时，侧边栏通常只导航到 /workspace/reader，不会带 materialId。
+   * 这时用上次阅读快照恢复 URL，避免左侧文档区变成“请选择资料”，而右侧问答还保留旧会话。
+   */
+  useEffect(() => {
+    if (materialParam || !selectedMaterialId) return
+    const saved = savedReaderContextRef.current
+    const nextParams = new URLSearchParams({ materialId: selectedMaterialId })
+    if (saved.materialId === selectedMaterialId) {
+      if (saved.chunkId) nextParams.set('chunkId', saved.chunkId)
+      if (saved.pageNo && saved.pageNo > 0) nextParams.set('pageNo', String(saved.pageNo))
+    }
+    setSearchParams(nextParams, { replace: true })
+  }, [materialParam, selectedMaterialId, setSearchParams])
 
   /**
    * 监听 URL 中的 materialId 变化
@@ -227,6 +277,9 @@ export function ReaderPage() {
     const currentPageNo = pageNoForChunk(currentChunk, selectedChunkIndex, chunks, pages)
       || currentPage?.pageNo
       || null
+    // 通过 URL 直接打开指定页时，chunks/pages 可能比 selectedChunkIndex 晚一步加载。
+    // 如果此时立刻把默认第 1 片段写回 URL，会把用户请求的 pageNo 覆盖掉，导致第 2 页等深链永远跳不进去。
+    if (!chunkParam && requestedPageNo && requestedPageChunkIndex >= 0 && requestedPageChunkIndex !== selectedChunkIndex) return
     // 避免不必要的 URL 更新（如果参数已经一致则跳过）
     if (materialParam && materialParam !== selectedMaterialId) return
     if (chunkParam && chunkParam !== String(currentChunk.id) && requestedChunkIndex >= 0) return
@@ -239,7 +292,17 @@ export function ReaderPage() {
     const nextParams = new URLSearchParams({ materialId: selectedMaterialId, chunkId: String(currentChunk.id) })
     if (currentPageNo && currentPageNo > 0) nextParams.set('pageNo', String(currentPageNo))
     setSearchParams(nextParams, { replace: true })
-  }, [chunkParam, chunks, currentChunk, currentPage, materialParam, pageParam, pages, requestedChunkIndex, selectedChunkIndex, selectedMaterialId, setSearchParams])
+  }, [chunkParam, chunks, currentChunk, currentPage, materialParam, pageParam, pages, requestedChunkIndex, requestedPageChunkIndex, requestedPageNo, selectedChunkIndex, selectedMaterialId, setSearchParams])
+
+  /** 当前阅读上下文变化时写入本地快照，供下次无参数进入 Reader 时恢复。 */
+  useEffect(() => {
+    if (!selectedMaterialId) return
+    writeReaderContextSnapshot({
+      materialId: selectedMaterialId,
+      chunkId: currentChunk?.id == null ? chunkParam || null : String(currentChunk.id),
+      pageNo: askCurrentPageNo || requestedPageNo || null,
+    })
+  }, [askCurrentPageNo, chunkParam, currentChunk, requestedPageNo, selectedMaterialId])
 
   // === 副作用：右侧面板宽度调整 ===
 
@@ -496,6 +559,13 @@ export function ReaderPage() {
             onOpenFile={selectedMaterial ? handleOpenFile : undefined}
             targetPageNo={currentChunkPageNo ?? currentPage?.pageNo ?? requestedPageNo ?? null}
           />
+        ) : selectedMaterialId && (chunksLoading || chunksFetching) ? (
+          <div className="flex-1 flex items-center justify-center text-muted-foreground">
+            <div className="text-center">
+              <Loader2 className="h-9 w-9 mx-auto mb-3 animate-spin opacity-60" />
+              <p className="text-sm">正在加载资料内容...</p>
+            </div>
+          </div>
         ) : (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
             <div className="text-center">

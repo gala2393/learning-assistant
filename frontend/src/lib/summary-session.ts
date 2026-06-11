@@ -7,6 +7,7 @@ interface SummaryTask {
   summaryType: SummaryType
   loading: boolean
   error: string | null
+  notice: string | null
   result: SummaryResult | null
 }
 
@@ -15,12 +16,13 @@ export interface SummarySessionSnapshot {
 }
 
 let state: SummarySessionSnapshot = { tasks: {} }
+const activeControllers = new Map<string, AbortController>()
 const listeners = new Set<() => void>()
 
 /**
  * 知识总结生成是普通 HTTP 请求，不是 SSE。
  * 但如果只使用组件内 mutation 状态，用户切换模块后组件会卸载，切回来就看不到“生成中”状态。
- * 这里用模块级 store 托管请求生命周期，让请求继续完成，并在完成后刷新总结历史缓存。
+ * 这里用模块级 store 托管请求生命周期；用户点击“暂停生成”时通过 AbortController 中止当前请求。
  */
 export function getSummarySessionSnapshot() {
   return state
@@ -51,29 +53,66 @@ export async function startSummaryTask(payload: { materialId: string; summaryTyp
     summaryType: payload.summaryType,
     loading: true,
     error: null,
+    notice: null,
     result: null,
   })
 
+  const controller = new AbortController()
+  activeControllers.set(payload.materialId, controller)
+
   try {
-    const result = await summarizeMaterial(payload)
+    const result = await summarizeMaterial(payload, { signal: controller.signal })
     setTask(payload.materialId, {
       materialId: payload.materialId,
       summaryType: payload.summaryType,
       loading: false,
       error: null,
+      notice: null,
       result,
     })
     queryClient.invalidateQueries({ queryKey: ['summaries', payload.materialId] })
     queryClient.invalidateQueries({ queryKey: ['summaries', payload.materialId, 'history'] })
   } catch (error) {
+    if (isCanceledRequest(error) || controller.signal.aborted) {
+      setTask(payload.materialId, {
+        materialId: payload.materialId,
+        summaryType: payload.summaryType,
+        loading: false,
+        error: null,
+        notice: '已暂停生成。',
+        result: null,
+      })
+      return
+    }
     setTask(payload.materialId, {
       materialId: payload.materialId,
       summaryType: payload.summaryType,
       loading: false,
       error: error instanceof Error ? error.message : '生成总结失败',
+      notice: null,
       result: null,
     })
+  } finally {
+    if (activeControllers.get(payload.materialId) === controller) {
+      activeControllers.delete(payload.materialId)
+    }
   }
+}
+
+/** 暂停某份资料正在进行的总结生成；已生成完成的任务不会被改动。 */
+export function pauseSummaryTask(materialId: string | null | undefined) {
+  if (!materialId) return
+  const controller = activeControllers.get(materialId)
+  const existing = state.tasks[materialId]
+  if (!controller || !existing?.loading) return
+  controller.abort()
+  activeControllers.delete(materialId)
+  setTask(materialId, {
+    ...existing,
+    loading: false,
+    error: null,
+    notice: '已暂停生成。',
+  })
 }
 
 function setTask(materialId: string, task: SummaryTask) {
@@ -85,4 +124,12 @@ function setTask(materialId: string, task: SummaryTask) {
     },
   }
   listeners.forEach((listener) => listener())
+}
+
+/** Axios 取消请求时会抛出 CanceledError，这里统一识别，避免把用户主动暂停显示成错误。 */
+function isCanceledRequest(error: unknown) {
+  const maybeCanceled = error as { code?: string; name?: string; message?: string } | null
+  return maybeCanceled?.code === 'ERR_CANCELED'
+    || maybeCanceled?.name === 'CanceledError'
+    || maybeCanceled?.message === 'canceled'
 }

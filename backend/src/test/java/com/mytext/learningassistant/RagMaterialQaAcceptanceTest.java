@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mytext.learningassistant.embedding.EmbeddingClient;
+import com.mytext.learningassistant.material.MaterialProcessingJobService;
 import com.mytext.learningassistant.llm.LlmCompletion;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
 
@@ -32,12 +33,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.web.servlet.MockMvc;
 
-@SpringBootTest
+@SpringBootTest(properties = "app.material-processing.scheduler-enabled=false")
 @AutoConfigureMockMvc
 /**
  * RAG（检索增强生成）资料问答验收测试。
@@ -54,12 +55,15 @@ class RagMaterialQaAcceptanceTest {
     private MockMvc mockMvc;
 
     @Autowired
+    private MaterialProcessingJobService materialProcessingJobService;
+
+    @Autowired
     private ObjectMapper objectMapper;
 
-    @MockBean
+    @MockitoBean
     private EmbeddingClient embeddingClient;
 
-    @MockBean
+    @MockitoBean
     private ThirdPartyLlmClient thirdPartyLlmClient;
 
     /** 每个测试前将嵌入和 LLM 客户端设置为默认返回空（走本地兜底逻辑） */
@@ -328,10 +332,25 @@ class RagMaterialQaAcceptanceTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andReturn();
-        return extractLong(result.getResponse().getContentAsString(), "id");
+        Long materialId = extractLong(result.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
+        return materialId;
     }
 
     /** 注册并登录用户，返回认证 token */
+
+    /** 主动驱动资料后台队列，避免异步测试依赖定时器调度时机。 */
+    private void drainMaterialJobs() throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadline) {
+            int executed = materialProcessingJobService.runReadyJobs(20);
+            if (executed == 0) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        org.junit.jupiter.api.Assertions.fail("material processing jobs did not drain before timeout");
+    }
     private String registerAndLogin(String username) throws Exception {
         mockMvc.perform(post("/api/auth/register")
                 .contentType(MediaType.APPLICATION_JSON)

@@ -7,6 +7,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -53,13 +55,13 @@ class RagStreamControllerTest {
         var output = new ChunkDetectingOutputStream();
         AtomicBoolean chunkVisibleBeforeServiceReturned = new AtomicBoolean(false);
 
-        when(ragService.chatStream(eq(1L), any(ChatRequest.class), any()))
+        when(ragService.chatStream(eq(1L), any(ChatRequest.class), any(), any()))
             .thenAnswer(invocation -> {
                 @SuppressWarnings("unchecked")
                 Consumer<String> onChunk = invocation.getArgument(2, Consumer.class);
                 onChunk.accept("Hello ");
                 chunkVisibleBeforeServiceReturned.set(output.awaitChunk());
-                return new RagStreamResult(11L, 12L, "Hello world", List.of());
+                return new RagStreamResult(11L, 12L, "Hello world", List.of(), false, null);
             });
 
         RagStreamController controller = new RagStreamController(
@@ -107,12 +109,12 @@ class RagStreamControllerTest {
     @Test
     void chatStreamSplitsLargeProviderDeltaIntoVisibleSseChunks() throws Exception {
         RagService ragService = mock(RagService.class);
-        when(ragService.chatStream(eq(1L), any(ChatRequest.class), any()))
+        when(ragService.chatStream(eq(1L), any(ChatRequest.class), any(), any()))
             .thenAnswer(invocation -> {
                 @SuppressWarnings("unchecked")
                 Consumer<String> onChunk = invocation.getArgument(2, Consumer.class);
                 onChunk.accept("This is a long provider delta that should not be sent as one browser update.");
-                return new RagStreamResult(11L, 12L, "done", List.of());
+                return new RagStreamResult(11L, 12L, "done", List.of(), true, "可以继续生成后续内容");
             });
 
         RagStreamController controller = new RagStreamController(
@@ -132,7 +134,48 @@ class RagStreamControllerTest {
         String body = output.asString();
         assertThat(body.split("event: chunk", -1).length - 1).isGreaterThan(3);
         assertThat(body).contains("\"delta\":\"This is a \"");
+        assertThat(body).contains("\"continuable\":true");
+        assertThat(body).contains("\"continuationHint\":\"可以继续生成后续内容\"");
         assertThat(body.indexOf("event: chunk")).isLessThan(body.indexOf("event: done"));
+    }
+
+    /**
+     * 测试场景：浏览器端点击“暂停输出”后，SSE 输出流在写 chunk 时断开。
+     * <p>
+     * 预期结果：Controller 将断开信号向上传递给业务层，业务层不会继续跑到返回结果，
+     * 响应体也不会再写 sources/done，避免用户暂停后后端仍继续生成和记账。
+     */
+    @Test
+    void chatStreamStopsWhenClientDisconnectsDuringChunkWrite() throws Exception {
+        RagService ragService = mock(RagService.class);
+        AtomicBoolean serviceReachedAfterChunk = new AtomicBoolean(false);
+        when(ragService.chatStream(eq(1L), any(ChatRequest.class), any(), any()))
+            .thenAnswer(invocation -> {
+                @SuppressWarnings("unchecked")
+                Consumer<String> onChunk = invocation.getArgument(2, Consumer.class);
+                onChunk.accept("Hello after pause");
+                serviceReachedAfterChunk.set(true);
+                return new RagStreamResult(11L, 12L, "should not finish", List.of(), false, null);
+            });
+
+        RagStreamController controller = new RagStreamController(
+            ragService,
+            mock(ThirdPartyLlmClient.class),
+            mock(LearningMaterialRepository.class),
+            mock(MaterialChunkRepository.class),
+            new ObjectMapper(),
+            mock(RateLimitService.class)
+        );
+
+        ResponseEntity<StreamingResponseBody> response = controller.chatStream(1L, streamRequest(), mock(HttpServletRequest.class));
+        var output = new DisconnectingOnChunkOutputStream();
+
+        response.getBody().writeTo(output);
+
+        assertThat(serviceReachedAfterChunk).isFalse();
+        assertThat(output.asString()).contains("event: status");
+        assertThat(output.asString()).doesNotContain("event: done");
+        assertThat(output.asString()).doesNotContain("event: sources");
     }
 
     /** 构造通用流式聊天请求对象 */
@@ -176,6 +219,34 @@ class RagStreamControllerTest {
 
         private synchronized String asString() {
             return toString(StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * 在写入第一个 chunk 事件时模拟浏览器关闭连接。
+     *
+     * <p>这里不继承 ByteArrayOutputStream，因为它的 write 方法不声明 IOException；
+     * 直接继承 OutputStream 才能真实模拟 Servlet 输出流写失败。</p>
+     */
+    private static class DisconnectingOnChunkOutputStream extends OutputStream {
+        private final ByteArrayOutputStream delegate = new ByteArrayOutputStream();
+
+        @Override
+        public void write(int value) throws IOException {
+            delegate.write(value);
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int length) throws IOException {
+            String value = new String(bytes, offset, length, StandardCharsets.UTF_8);
+            if (value.contains("event: chunk")) {
+                throw new IOException("client disconnected");
+            }
+            delegate.write(bytes, offset, length);
+        }
+
+        private String asString() {
+            return delegate.toString(StandardCharsets.UTF_8);
         }
     }
 }

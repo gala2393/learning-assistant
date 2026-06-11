@@ -72,28 +72,13 @@ app:
   material:
     # 持久资料文件大小限制（字节）：2GB，大 PDF 通过分片上传后后台解析
     max-file-bytes: ${APP_MATERIAL_MAX_FILE_BYTES:2147483648}
-    # 临时文件大小限制（字节）：500MB
-    max-temporary-file-bytes: ${APP_MATERIAL_MAX_TEMPORARY_FILE_BYTES:524288000}
+    # 临时文件大小限制（字节）：100MB
+    max-temporary-file-bytes: ${APP_MATERIAL_MAX_TEMPORARY_FILE_BYTES:104857600}
+    # 智能问答临时资料全文保留时间，过期后自动清理数据库正文
+    temporary-context-retention: ${APP_MATERIAL_TEMPORARY_CONTEXT_RETENTION:48h}
+    temporary-context-cleanup-delay: ${APP_MATERIAL_TEMPORARY_CONTEXT_CLEANUP_DELAY:1h}
     # 网络资源下载大小限制（字节）：10MB
     max-web-bytes: ${APP_MATERIAL_MAX_WEB_BYTES:10485760}
-  document-parser:
-    # 文档解析提供方：legacy=内置解析器，mineru=优先调用 MinerU 并在失败时回退。
-    provider: ${APP_DOCUMENT_PARSER_PROVIDER:mineru}
-  mineru:
-    # MinerU CLI 命令；默认使用 pipeline 后端，确保无 GPU 的服务器也能稳定解析。
-    command: ${APP_MINERU_COMMAND:mineru -b pipeline}
-    # MinerU 输出工作区，系统会为每次解析创建独立子目录。
-    workspace: ${APP_MINERU_WORKSPACE:${user.dir}/target/mineru-output}
-    # 单次 MinerU 解析超时；大 PDF 可按部署机器性能调大。
-    timeout: ${APP_MINERU_TIMEOUT:15m}
-    # MinerU 模型来源；Windows 非管理员环境建议设为 modelscope，避免 HuggingFace 缓存符号链接权限问题。
-    model-source: ${APP_MINERU_MODEL_SOURCE:}
-    # MinerU 失败时自动回退到内置解析，避免资料不可用。
-    fallback-enabled: ${APP_MINERU_FALLBACK_ENABLED:true}
-    # PDF 已包含原生文本时跳过 MinerU，避免大文本 PDF 等待外部解析超时；扫描件仍会交给 MinerU/OCR。
-    skip-text-pdf: ${APP_MINERU_SKIP_TEXT_PDF:true}
-    # 判断文本 PDF 时最多抽样页数，页数越高越稳但会增加上传解析启动时间。
-    text-pdf-detect-pages: ${APP_MINERU_TEXT_PDF_DETECT_PAGES:5}
   security:
     outbound:
       # 是否允许访问内网/私有网络地址（如内网嵌入服务）
@@ -116,7 +101,7 @@ app:
       rag-chat-per-minute: ${APP_RATE_LIMIT_RAG_CHAT_PER_MINUTE:30}
   cors:
     # 允许的跨域来源（前端开发服务器地址）
-    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174,http://localhost:15174,http://127.0.0.1:15174}
+    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:5174,http://localhost:5175,http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:5175,http://localhost:15174,http://127.0.0.1:15174}
   ocr:
     # OCR 光学字符识别配置（用于扫描版 PDF 文本提取）
     enabled: ${OCR_ENABLED:true}
@@ -136,6 +121,11 @@ app:
       enabled: ${DOCUMENT_PREVIEW_CONVERTER_ENABLED:true}
       command: ${DOCUMENT_PREVIEW_CONVERTER_COMMAND:soffice}
       timeout: ${DOCUMENT_PREVIEW_CONVERTER_TIMEOUT:60s}
+  pdf:
+    # 大 PDF 快速导入阈值：超过该大小时使用分批轻量抽取，避免 PDFBox 全量加载卡住后台。
+    large-fast-import-bytes: ${APP_PDF_LARGE_FAST_IMPORT_BYTES:134217728}
+    # 大 PDF 快速导入时只抽取前 N 页文本进入问答索引，原文仍可在阅读器中查看。
+    large-fast-import-max-text-pages: ${APP_PDF_LARGE_FAST_IMPORT_MAX_TEXT_PAGES:80}
   email-code:
     # 邮箱验证码登录功能配置
     enabled: ${EMAIL_CODE_ENABLED:false}

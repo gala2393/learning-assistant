@@ -447,7 +447,48 @@ public class MaterialController {
         @RequestAttribute("currentUserId") long currentUserId,
         @PathVariable("id") long id
     ) {
-        return ApiResponse.ok(materialService.reparse(currentUserId, id));
+        return ApiResponse.ok(materialService.reparseText(currentUserId, id));
+    }
+
+    @GetMapping("/{id}/jobs")
+    public ApiResponse<List<MaterialProcessingJobResponse>> jobs(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("id") long id
+    ) {
+        return ApiResponse.ok(materialService.jobs(currentUserId, id));
+    }
+
+    @PostMapping("/{id}/jobs/{jobId}/retry")
+    public ApiResponse<MaterialProcessingJobResponse> retryJob(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("id") long id,
+        @PathVariable("jobId") long jobId
+    ) {
+        return ApiResponse.ok(materialService.retryJob(currentUserId, id, jobId));
+    }
+
+    @PostMapping("/{id}/rebuild-preview")
+    public ApiResponse<MaterialDetailResponse> rebuildPreview(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("id") long id
+    ) {
+        return ApiResponse.ok(materialService.rebuildPreview(currentUserId, id));
+    }
+
+    @PostMapping("/{id}/rebuild-index")
+    public ApiResponse<MaterialDetailResponse> rebuildIndex(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("id") long id
+    ) {
+        return ApiResponse.ok(materialService.rebuildIndex(currentUserId, id));
+    }
+
+    @PostMapping("/{id}/reparse-text")
+    public ApiResponse<MaterialDetailResponse> reparseText(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @PathVariable("id") long id
+    ) {
+        return ApiResponse.ok(materialService.reparseText(currentUserId, id));
     }
 
     /**

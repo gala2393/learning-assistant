@@ -1,7 +1,16 @@
 import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
-import type { AdminStats, AdminUser, AdminMaterial, AdminLog, AdminUsageRecord, PageResult } from '@/types'
+import type {
+  AdminLog,
+  AdminMaterial,
+  AdminStats,
+  AdminUsageRecord,
+  AdminUser,
+  AdminVectorIndexRebuildResponse,
+  PageResult,
+  SystemDependency,
+} from '@/types'
 
 /**
  * 管理后台 API — 仅管理员可用（后端 AuthInterceptor 检查 ADMIN 角色）。
@@ -21,6 +30,12 @@ import type { AdminStats, AdminUser, AdminMaterial, AdminLog, AdminUsageRecord, 
 /** 获取管理后台统计数据（用户数、资料数、问答数、收藏数、日志数） */
 export async function getAdminStats(): Promise<AdminStats> {
   const { data } = await api.get('/admin/stats')
+  return data
+}
+
+/** 获取运行环境依赖自检结果，用于提示 PDF/OCR/Office 转换能力是否完整。 */
+export async function getAdminDependencies(): Promise<SystemDependency[]> {
+  const { data } = await api.get('/admin/system/dependencies')
   return data
 }
 
@@ -58,6 +73,14 @@ export async function updateAdminMaterialStatus(id: string, payload: { parseStat
   return data
 }
 
+/** 提交 Qdrant 向量索引重建任务；不传 materialId 时重建所有已解析资料。 */
+export async function rebuildAdminVectorIndex(materialId?: string): Promise<AdminVectorIndexRebuildResponse> {
+  const { data } = await api.post('/admin/materials/vector-index/rebuild', null, {
+    params: materialId ? { materialId } : undefined,
+  })
+  return data
+}
+
 // ===== 系统日志 =====
 
 /** 获取系统日志（管理员操作记录：角色变更、用户禁用等） */
@@ -79,6 +102,15 @@ export async function listAdminUsageRecords(params: { page?: number; size?: numb
 /** 仪表盘统计 query */
 export function useAdminStats() {
   return useQuery({ queryKey: ['admin', 'stats'], queryFn: getAdminStats })
+}
+
+/** 运行环境依赖自检 query */
+export function useAdminDependencies() {
+  return useQuery({
+    queryKey: ['admin', 'system', 'dependencies'],
+    queryFn: getAdminDependencies,
+    refetchInterval: 30_000,
+  })
 }
 
 /** 用户列表 query */
@@ -108,7 +140,28 @@ export function useUpdateAdminUserStatus() {
 /** 资料列表 query（管理员视图） */
 export function useAdminMaterials(params: { page?: number; size?: number; keyword?: string } = {}) {
   // 管理端资料列表同样按分页/搜索条件隔离缓存，避免切页时串数据。
-  return useQuery({ queryKey: ['admin', 'materials', params], queryFn: () => listAdminMaterials(params) })
+  return useQuery({
+    queryKey: ['admin', 'materials', params],
+    queryFn: () => listAdminMaterials(params),
+    // 管理员需要看到大 PDF 的 OCR/索引后台进度；只要当前页存在未完成流水线，就持续轻量轮询。
+    refetchInterval: (query) => {
+      const data = query.state.data as PageResult<AdminMaterial> | undefined
+      return data?.items?.some(isAdminMaterialStillProcessing) ? 1500 : false
+    },
+    refetchIntervalInBackground: true,
+  })
+}
+
+/** 判断管理员资料行是否仍有后台流水线未完成。 */
+function isAdminMaterialStillProcessing(material: AdminMaterial) {
+  const parseActive = ['PENDING', 'PARSING', 'PROCESSING'].includes(material.parseStatus)
+  const textActive = ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.textStatus || ''))
+  const indexActive = ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.indexStatus || ''))
+  const ocrActive = ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.ocrStatus || ''))
+  const progressActive = typeof material.processingProgressPercent === 'number'
+    && material.processingProgressPercent < 100
+    && !['FAILED', 'READY'].includes(String(material.textStatus || ''))
+  return parseActive || textActive || indexActive || ocrActive || progressActive
 }
 
 /** 修改资料状态 mutation */
@@ -117,6 +170,18 @@ export function useUpdateAdminMaterialStatus() {
     mutationFn: ({ id, payload }: { id: string; payload: { parseStatus?: string; summaryStatus?: string } }) => updateAdminMaterialStatus(id, payload),
     // 人工标记会改变状态筛选和统计口径，刷新资料列表缓存。
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'materials'] }),
+  })
+}
+
+/** 提交历史资料向量索引补建任务，主要用于首次启用 Qdrant 后回填已有资料。 */
+export function useRebuildAdminVectorIndex() {
+  return useMutation({
+    mutationFn: (materialId?: string) => rebuildAdminVectorIndex(materialId),
+    // 后台任务提交成功后刷新依赖和资料列表，让管理员看到 Qdrant 状态与资料处理状态的最新值。
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'system', 'dependencies'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'materials'] })
+    },
   })
 }
 

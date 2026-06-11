@@ -1,5 +1,9 @@
 package com.mytext.learningassistant.rag;
 
+import java.util.List;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
 /**
  * 智能问答临时资料附件。
  * <p>
@@ -9,8 +13,8 @@ package com.mytext.learningassistant.rag;
  * 它和 {@code learning_material} 表里的持久资料不同：
  * <ul>
  *   <li>不会进入资料管理列表，不生成长期资料记录；</li>
- *   <li>不会参与资料问答的全局 RAG 检索；</li>
- *   <li>只把必要的文本和元数据跟随 {@code rag_question} 历史保存，用于历史回显和再次预览。</li>
+ *   <li>不会参与资料问答的全局长期向量库检索，但会在当前问答请求内按问题即时切片检索；</li>
+ *   <li>历史记录只保存压缩后的预览文本和元数据，用于历史回显和再次预览。</li>
  * </ul>
  *
  * @param id           前端生成或后端返回的临时资料 ID，用于历史回显时区分附件
@@ -20,7 +24,9 @@ package com.mytext.learningassistant.rag;
  * @param text         已抽取的正文文本，会作为 LLM 的临时上下文
  * @param excerpt      摘要片段，用于卡片快速展示
  * @param fileSize     原文件大小，单位字节
+ * @param parts        多文件临时资料的子资料列表
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public record ChatTemporaryMaterial(
     String id,
     String title,
@@ -28,6 +34,7 @@ public record ChatTemporaryMaterial(
     String sourceType,
     String text,
     String excerpt,
-    Long fileSize
+    Long fileSize,
+    List<ChatTemporaryMaterial> parts
 ) {
 }

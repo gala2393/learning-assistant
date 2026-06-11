@@ -10,6 +10,7 @@ import jakarta.validation.Valid;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mytext.learningassistant.common.ApiResponse;
 import com.mytext.learningassistant.llm.LlmCompletion;
+import com.mytext.learningassistant.llm.LlmStreamCancelledException;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
 import com.mytext.learningassistant.material.LearningMaterialEntity;
 import com.mytext.learningassistant.material.LearningMaterialRepository;
@@ -131,8 +132,17 @@ public class RagStreamController {
                         try {
                             // 将文本片段拆分为更小的 chunk 事件发送
                             sendChunkEvents(outputStream, delta);
-                        } catch (IOException ignored) {
-                            // 输出流关闭时忽略异常
+                        } catch (IOException exception) {
+                            // 浏览器端点击暂停会关闭 SSE 连接；必须把取消信号抛回业务层，
+                            // 否则模型调用仍会继续跑完并落库，用户看起来像“暂停无效”。
+                            throw new LlmStreamCancelledException("stream cancelled by client", exception);
+                        }
+                    },
+                    status -> {
+                        try {
+                            sendEvent(outputStream, "status", status);
+                        } catch (IOException exception) {
+                            throw new LlmStreamCancelledException("stream cancelled by client", exception);
                         }
                     }
                 );
@@ -140,6 +150,8 @@ public class RagStreamController {
                 // 流式完成：推送引用来源和完成信号
                 sendEvent(outputStream, "sources", Map.of("sources", result.sources()));
                 sendEvent(outputStream, "done", donePayload(result));
+            } catch (LlmStreamCancelledException ignored) {
+                // 客户端主动断开时不再尝试写 error/done；前端会保留已收到内容并显示“已暂停输出”。
             } catch (Exception e) {
                 // 发生异常时推送错误事件
                 try {
@@ -191,6 +203,8 @@ public class RagStreamController {
         boolean includeAnswer = answer.length() <= 4_000;
         payload.put("answerIncluded", includeAnswer);
         payload.put("answer", includeAnswer ? answer : "");
+        payload.put("continuable", result.continuable());
+        payload.put("continuationHint", result.continuationHint());
         return payload;
     }
 

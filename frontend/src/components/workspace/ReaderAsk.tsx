@@ -8,7 +8,7 @@
  * 【主要功能】
  * 1. 针对当前资料片段提问：AI 基于 RAG 检索回答
  * 2. 选中文本追问：在文档中选中 5-500 字符的文字后，可围绕选中内容提问
- * 3. 流式回答（SSE）：实时逐字展示 AI 回复，支持中断取消
+ * 3. 流式回答（SSE）：实时逐字展示 AI 回复，支持暂停输出
  * 4. 推荐问题：首次加载时 AI 根据当前片段生成推荐问题
  * 5. 检索来源查看：回答完成后可查看引用的资料片段，点击跳转
  * 6. 使用额度：显示今日剩余问答次数
@@ -32,7 +32,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { getHistory, suggestQuestions, useLatestMaterialHistory, useMaterialHistory, useRagUsage } from '@/api/rag'
 import { ChatThread } from './ChatThread'
-import { Send, Bot, ArrowRight, MousePointer, Sparkles, Trash2, History, Plus, MessagesSquare, Loader2, RefreshCw } from 'lucide-react'
+import { Send, Bot, ArrowRight, MousePointer, Sparkles, Trash2, History, Plus, MessagesSquare, Loader2, RefreshCw, Pause } from 'lucide-react'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
 import { cn, truncate } from '@/lib/utils'
 import { useAuth } from '@/context/AuthContext'
@@ -43,6 +43,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   ensureReaderAskMaterial,
   getReaderAskSnapshot,
+  pauseReaderAskStream,
   restoreReaderAskHistory,
   startNewReaderAskConversation,
   startReaderAskStream,
@@ -51,6 +52,9 @@ import {
   updateReaderAskSelection,
 } from '@/lib/reader-ask-session'
 import type { HistoryItem, Material, MaterialChunk, RagSource } from '@/types'
+
+/** 边读边问与主聊天共用后端 ChatRequest 限制，前端同步限制为 50000 字。 */
+const READER_ASK_INPUT_MAX_CHARS = 50000
 
 /**
  * ReaderAsk 组件属性
@@ -159,6 +163,8 @@ export function ReaderAsk({
   // === 派生值 ===
   /** 是否可以提问（有输入、未在加载、有资料、未超出使用额度） */
   const canAsk = question.trim().length > 0 && !loading && !!material && !usageExhausted
+  /** 生成中时主按钮切换为暂停输出，保留当前已经收到的回答。 */
+  const canPauseOutput = loading
 
   /** 上下文标签（"已选中文本 · 当前页 P3"） */
   const contextLabel = useMemo(
@@ -418,8 +424,9 @@ export function ReaderAsk({
         <Textarea
           ref={questionRef}
           value={question}
-          onChange={(e) => updateReaderAskQuestion(e.target.value)}
+          onChange={(e) => updateReaderAskQuestion(e.target.value.slice(0, READER_ASK_INPUT_MAX_CHARS))}
           onKeyDown={handleKeyDown}
+          maxLength={READER_ASK_INPUT_MAX_CHARS}
           placeholder={material
             ? usageExhausted
               ? '今日问答次数已用完'
@@ -432,11 +439,15 @@ export function ReaderAsk({
         <div className="flex items-center gap-2">
           <Button
             size="sm"
-            className={`h-9 flex-1 rounded-xl ${actionButtonBase} ${canAsk ? actionButtonReady : actionButtonIdle}`}
-            onClick={handleSubmit}
-            disabled={!canAsk}
+            className={`h-9 flex-1 rounded-xl ${actionButtonBase} ${canAsk || canPauseOutput ? actionButtonReady : actionButtonIdle}`}
+            onClick={canPauseOutput ? pauseReaderAskStream : handleSubmit}
+            disabled={canPauseOutput ? false : !canAsk}
           >
-            {loading ? '思考中...' : (
+            {canPauseOutput ? (
+              <>
+                <Pause className="mr-1 h-3.5 w-3.5" /> 暂停输出
+              </>
+            ) : (
               <>
                 <Send className="mr-1 h-3.5 w-3.5" /> 提问
               </>
@@ -451,6 +462,9 @@ export function ReaderAsk({
           >
             <Trash2 className="mr-1 h-3.5 w-3.5" /> 新对话
           </Button>
+        </div>
+        <div className="text-right text-[10px] text-slate-400 dark:text-slate-500">
+          {question.length}/{READER_ASK_INPUT_MAX_CHARS}
         </div>
         {/* "在聊天中继续"按钮：跳转到独立聊天页面，携带当前资料和片段上下文 */}
         <Button

@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { AlertCircle, BookOpen, CheckCircle2, Plus, Search, Server, Sparkles, Trash2, Upload } from 'lucide-react'
@@ -25,6 +25,7 @@ import { LOGIN_REQUIRED_MESSAGE, redirectToLogin } from '@/lib/auth-gate'
 import { useAuth } from '@/context/AuthContext'
 import {
   getChatSessionSnapshot,
+  pauseActiveChatStream,
   resetChatSession,
   selectHistorySession,
   startChatSessionStream,
@@ -101,6 +102,7 @@ import type { UploadProgress, UploadProgressItem } from '@/api/materials'
 export function ChatPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
+  const consumedNewChatRef = useRef(false)
   const { isAuthenticated } = useAuth()
 
   // === 数据获取（React Query hooks） ===
@@ -206,6 +208,7 @@ export function ChatPage() {
   // === 从 External Store 解构聊天状态 ===
   const {
     selectedHistoryId,   // 当前加载的历史会话 ID
+    conversationId,      // 当前会话 ID，继续生成时用于承接上一段回答
     currentQuestionId,   // 当前问题 ID
     mode,                // 问答模式：'GENERAL' | 'MATERIAL'
     input,               // 输入框文本
@@ -214,6 +217,7 @@ export function ChatPage() {
     materialId: selectedMaterialId,   // 当前绑定的资料 ID
     chunkId: selectedChunkId,         // 当前选中的片段 ID
     temporaryMaterial,   // 临时资料对象
+    temporaryMaterialPending, // 临时资料是否还在等待随下一条消息提交
     streaming,           // 是否正在流式输出
   } = chat
 
@@ -250,10 +254,13 @@ export function ChatPage() {
    */
   useEffect(() => {
     if (newChatParam === '1') {
-      resetChatSession()
+      if (consumedNewChatRef.current) return
+      consumedNewChatRef.current = true
       setSearchParams(new URLSearchParams(), { replace: true })
+      resetChatSession()
       return
     }
+    consumedNewChatRef.current = false
 
     if (historyParam) {
       const target = historyItems.find((item) => String(item.id) === historyParam)
@@ -318,7 +325,7 @@ export function ChatPage() {
       materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
       chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
       images,
-      temporaryMaterial: mode === 'GENERAL' ? temporaryMaterial : null,
+      temporaryMaterial: null,
     })
     updateLocationForContext(mode, selectedMaterialId, selectedChunkId)
   }
@@ -442,8 +449,8 @@ export function ChatPage() {
             percent: 100,
             uploadedChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
             totalChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
-            stage: '解析完成',
-            message: '资料已上传完成',
+            stage: session.processingStage || session.parseStage || '资料已可用',
+            message: session.processingMessage || session.parseMessage || '资料已可用于阅读和问答，后台增强任务可能仍在继续',
           }, 'success'))
           return session
         }).catch((error) => {
@@ -525,14 +532,31 @@ export function ChatPage() {
       showToast(message)
       return
     }
+    const totalTemporaryBytes = files.reduce((sum, file) => sum + file.size, 0)
+    if (totalTemporaryBytes > MAX_TEMPORARY_MATERIAL_BYTES) {
+      // 多文件临时资料会并发同步解析，总量也限制在同一阈值内，避免多个大文件同时占用上传、内存和解析资源。
+      const message = `本次临时资料总大小超过 ${formatBytes(MAX_TEMPORARY_MATERIAL_BYTES)}；大文件请切换到资料问答上传，系统会在后台解析并显示进度。`
+      setTemporaryUploadError(message)
+      setTemporaryUploadProgress(null)
+      setTemporaryUploadFile(null)
+      setTemporaryUploadFiles([])
+      showToast(message)
+      return
+    }
     setUploading(true)
     setTemporaryUploadFile({
       name: files.length > 1 ? `${files.length} 份临时资料` : files[0].name,
       size: files.reduce((sum, file) => sum + file.size, 0),
       sourceType: files.length > 1 ? 'MULTI' : inferSourceType(files[0].name),
     })
+    // 输入框上方只展示“本轮仍待发送”的临时资料；已经随上一轮发送过的资料只保留在会话上下文里，
+    // 不能在用户上传新文件时再次混进附件栏，否则会像旧文件又被重新上传了一样。
+    const pendingTemporaryMaterial = removeAlreadySentTemporaryMaterials(
+      temporaryMaterialPending ? temporaryMaterial : null,
+      messages,
+    )
     setTemporaryUploadFiles([
-      ...temporaryMaterialFileItems(temporaryMaterial),
+      ...temporaryMaterialFileItems(pendingTemporaryMaterial),
       ...files.map((file) => ({ name: file.name, size: file.size, type: inferSourceType(file.name) })),
     ])
     setTemporaryUploadProgress({ phase: 'uploading', percent: 1, message: files.length > 1 ? `准备上传 ${files.length} 份资料` : '准备上传' })
@@ -571,22 +595,25 @@ export function ChatPage() {
           }
         })
       ))
-      const uploaded = results
-        .filter((result): result is PromiseFulfilledResult<TemporaryMaterial> => result.status === 'fulfilled')
-        .map((result, index) => ({
+      const uploaded = results.flatMap((result, index) => {
+        // 后端正常返回但正文为空时，不能把它当作可问答资料写入会话，否则下一轮会出现“上传成功但读取不到内容”。
+        if (result.status !== 'fulfilled' || !isUsableTemporaryMaterial(result.value)) return []
+        return [{
           ...result.value,
           files: [{
             name: result.value.originalName || result.value.title || files[index]?.name || '临时资料',
             size: result.value.fileSize ?? files[index]?.size,
             type: result.value.sourceType || inferSourceType(files[index]?.name || ''),
           }],
-        }))
+        }]
+      })
       const failedCount = results.length - uploaded.length
       if (uploaded.length === 0) {
         // 全部失败时抛错进入统一错误分支；部分失败则保留成功解析的资料。
         throw new Error(failedCount > 0 ? `${failedCount}/${files.length} 份临时资料解析失败` : '临时资料解析失败，请重试')
       }
-      const temporary = mergeTemporaryMaterials(temporaryMaterial ? [temporaryMaterial, ...uploaded] : uploaded)
+      // 新上传资料只和“尚未发送”的临时资料合并；已发送过的临时资料由后端 conversationId 继续作为上下文恢复。
+      const temporary = mergeTemporaryMaterials(pendingTemporaryMaterial ? [pendingTemporaryMaterial, ...uploaded] : uploaded)
       setTemporaryUploadProgress({ phase: 'processing', percent: 100, message: '解析完成' })
       updateChatSession({
         mode: 'GENERAL',
@@ -616,7 +643,7 @@ export function ChatPage() {
    *
    * 流程：
    * 1. 校验：有输入文本、不在流式中、资料模式下已选择资料
-   * 2. 构建选中文本上下文（通用模式下如果有临时资料，构建临时资料上下文）
+   * 2. 判断临时资料是否仍处于待发送状态；只有首轮或替换资料后的下一轮会提交资料正文
    * 3. 调用 startChatSessionStream() 发起 SSE 流式请求
    *    （该函数在 chat-session.ts 中管理完整的流式接收过程）
    * 4. 更新 URL 参数
@@ -636,11 +663,28 @@ export function ChatPage() {
       mode,
       materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
       chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
-      // 通用模式下把临时资料摘要作为 selectedText 传入，复用后端已有上下文字段。
-      selectedText: mode === 'GENERAL' && temporaryMaterial
-        ? buildTemporaryMaterialContext(temporaryMaterial)
-        : null,
-      temporaryMaterial: mode === 'GENERAL' ? temporaryMaterial : null,
+      // 临时资料只通过 temporaryMaterial 字段提交一次；后续追问由后端按 conversationId 恢复上下文，避免每轮重复携带大段文本。
+      selectedText: null,
+      temporaryMaterial: mode === 'GENERAL' && temporaryMaterialPending ? temporaryMaterial : null,
+    })
+    updateLocationForContext(mode, selectedMaterialId, selectedChunkId)
+  }
+
+  /** 点击 AI 回答下方的“继续生成”，直接续接当前会话，不要求用户再手动输入“继续”。 */
+  const handleContinueGeneration = () => {
+    if (!requireLogin()) return
+    if (streaming) return
+    if (!conversationId) {
+      showToast('当前会话还没有可继续的上下文')
+      return
+    }
+    startChatSessionStream({
+      question: '继续',
+      mode,
+      materialId: mode === 'MATERIAL' ? selectedMaterialId : null,
+      chunkId: mode === 'MATERIAL' ? selectedChunkId : null,
+      selectedText: null,
+      temporaryMaterial: null,
     })
     updateLocationForContext(mode, selectedMaterialId, selectedChunkId)
   }
@@ -839,6 +883,11 @@ export function ChatPage() {
   }
 
   const isGeneral = mode === 'GENERAL'
+  // 输入框上方只展示“待发送”的临时资料；已发送的资料继续作为会话上下文保留，不再伪装成待上传附件。
+  const composerTemporaryMaterial = isGeneral && temporaryMaterialPending
+    ? removeAlreadySentTemporaryMaterials(temporaryMaterial, messages)
+    : null
+  const temporaryMaterialLabel = temporaryMaterial?.title || temporaryMaterial?.originalName || '未命名资料'
   const quickPrompts = isGeneral ? GENERAL_PROMPTS : MATERIAL_PROMPTS
   const parsedMaterials = materials.filter((m) => m.parseStatus === 'SUCCESS' || m.parseStatus === 'PARSED')
   const selectedMaterial = selectedMaterialId
@@ -866,9 +915,9 @@ export function ChatPage() {
         <div className="min-w-0">
           <p className="truncate text-xs text-muted-foreground">
             {isGeneral
-              ? temporaryMaterial
-                ? `已加载临时资料：${temporaryMaterial.title || temporaryMaterial.originalName || '未命名资料'}`
-                : '基于通用知识回答'
+              ? temporaryMaterial && temporaryMaterialPending
+                ? `待发送临时资料：${temporaryMaterialLabel}`
+                : '基于通用知识和当前对话回答'
               : selectedMaterialId
                 ? '已绑定资料，可基于资料提问'
                 : '请选择资料后提问'}
@@ -984,11 +1033,12 @@ export function ChatPage() {
               )}
             </div>
           )}
-          <ChatComposer
-            value={input}
-            onChange={(value) => updateChatSession({ input: value })}
-            onSubmit={handleSubmit}
-            loading={streaming}
+            <ChatComposer
+              value={input}
+              onChange={(value) => updateChatSession({ input: value })}
+              onSubmit={handleSubmit}
+              onPauseOutput={pauseActiveChatStream}
+              loading={streaming}
             mode={mode}
             onModeChange={handleModeChange}
             quickPrompts={quickPrompts}
@@ -1007,7 +1057,7 @@ export function ChatPage() {
             onUploadTemporaryMaterial={isGeneral ? handleUploadTemporaryMaterial : undefined}
             onUploadTemporaryMaterials={isGeneral ? handleUploadTemporaryMaterials : undefined}
             temporaryMaterialUploading={isGeneral && uploading}
-            temporaryMaterial={isGeneral ? temporaryMaterial : null}
+            temporaryMaterial={composerTemporaryMaterial}
             temporaryUploadFile={isGeneral ? temporaryUploadFile : null}
             temporaryUploadFiles={isGeneral ? temporaryUploadFiles : []}
             temporaryUploadProgress={isGeneral ? temporaryUploadProgress : null}
@@ -1019,12 +1069,13 @@ export function ChatPage() {
         </div>
       ) : (
         <>
-          <ChatThread messages={messages} onOpenSource={handleOpenSource} />
-          <ChatComposer
-            value={input}
-            onChange={(value) => updateChatSession({ input: value })}
-            onSubmit={handleSubmit}
-            loading={streaming}
+          <ChatThread messages={messages} onOpenSource={handleOpenSource} onContinueGeneration={handleContinueGeneration} />
+            <ChatComposer
+              value={input}
+              onChange={(value) => updateChatSession({ input: value })}
+              onSubmit={handleSubmit}
+              onPauseOutput={pauseActiveChatStream}
+              loading={streaming}
             mode={mode}
             onModeChange={handleModeChange}
             quickPrompts={quickPrompts}
@@ -1043,7 +1094,7 @@ export function ChatPage() {
             onUploadTemporaryMaterial={isGeneral ? handleUploadTemporaryMaterial : undefined}
             onUploadTemporaryMaterials={isGeneral ? handleUploadTemporaryMaterials : undefined}
             temporaryMaterialUploading={isGeneral && uploading}
-            temporaryMaterial={isGeneral ? temporaryMaterial : null}
+            temporaryMaterial={composerTemporaryMaterial}
             temporaryUploadFile={isGeneral ? temporaryUploadFile : null}
             temporaryUploadFiles={isGeneral ? temporaryUploadFiles : []}
             temporaryUploadProgress={isGeneral ? temporaryUploadProgress : null}
@@ -1341,6 +1392,16 @@ function updateUploadProgressItem(
 }
 
 /**
+ * 判断临时资料是否真的提取出了可问答文本。
+ * 多文件资料会被合并到 parts 中，只要其中一份有有效正文，就允许进入会话上下文。
+ */
+function isUsableTemporaryMaterial(material?: TemporaryMaterial | null): boolean {
+  if (!material) return false
+  const parts = material.parts?.length ? material.parts : [material]
+  return parts.some((part) => cleanTemporaryMaterialText(part.text || '').trim().length > 0)
+}
+
+/**
  * 将 TemporaryMaterial 转换为文件列表项
  * 处理多文件临时资料和单文件临时资料两种情况
  */
@@ -1394,6 +1455,46 @@ function mergeTemporaryMaterials(materials: TemporaryMaterial[]): TemporaryMater
 }
 
 /**
+ * 从待发送临时资料中移除已经随历史用户消息发送过的文件。
+ *
+ * 旧版本会把“已发送过的资料”和“新上传资料”再次合并到输入框附件栏；
+ * 这里按文件元数据过滤，保证已成为会话上下文的资料不再伪装成待发送附件。
+ */
+function removeAlreadySentTemporaryMaterials(
+  material: TemporaryMaterial | null | undefined,
+  messages: Array<{ temporaryMaterial?: TemporaryMaterial | null }>,
+): TemporaryMaterial | null {
+  if (!material) return null
+  const sentKeys = new Set<string>()
+  messages.forEach((message) => {
+    collectTemporaryMaterialKeys(message.temporaryMaterial, sentKeys)
+  })
+  if (sentKeys.size === 0) return material
+  const parts = material.parts?.length ? material.parts : [material]
+  const pendingParts = parts.filter((part) => !sentKeys.has(temporaryMaterialPartKey(part)))
+  if (pendingParts.length === parts.length) return material
+  if (pendingParts.length === 0) return null
+  return mergeTemporaryMaterials(pendingParts)
+}
+
+/** 递归收集临时资料每个子文件的轻量标识。 */
+function collectTemporaryMaterialKeys(material: TemporaryMaterial | null | undefined, keys: Set<string>) {
+  if (!material) return
+  const parts = material.parts?.length ? material.parts : [material]
+  parts.forEach((part) => keys.add(temporaryMaterialPartKey(part)))
+}
+
+/** 用稳定文件元数据判断临时资料是否已经发送过，避免依赖每次上传都会变化的展示状态。 */
+function temporaryMaterialPartKey(material: TemporaryMaterial) {
+  return [
+    material.id || '',
+    material.originalName || material.title || '',
+    material.fileSize ?? '',
+    material.sourceType || '',
+  ].join('|')
+}
+
+/**
  * removeTemporaryMaterialAtIndex -- 移除临时资料中指定索引的文件
  * 如果移除后没有剩余文件，返回 null（清除临时资料）
  * 否则重新合并剩余的临时资料
@@ -1407,25 +1508,3 @@ function removeTemporaryMaterialAtIndex(material: TemporaryMaterial | null | und
   return mergeTemporaryMaterials(nextParts)
 }
 
-/**
- * buildTemporaryMaterialContext -- 构建临时资料的上下文字符串
- * 用于发送给 AI 作为问答的参考上下文。
- * 限制：原始文本截取前 20000 字符，清理后截取前 16000 字符。
- * 过长时显示"[内容过长，已截取前 16000 字]"提示。
- */
-function buildTemporaryMaterialContext(material: TemporaryMaterial) {
-  const title = material.title || material.originalName || '临时资料'
-  const sourceType = material.sourceType || 'UNKNOWN'
-  const rawText = material.text || ''
-  const slicedText = rawText.length > 20000 ? rawText.slice(0, 20000) : rawText
-  const text = cleanTemporaryMaterialText(slicedText)
-  return [
-    `[临时资料] ${title}`,
-    `文件：${material.originalName || title}`,
-    `类型：${sourceType}`,
-    '',
-    rawText.length > slicedText.length || text.length > 16000
-      ? `${text.slice(0, 16000)}\n\n[内容过长，已截取前 16000 字]`
-      : text,
-  ].join('\n')
-}

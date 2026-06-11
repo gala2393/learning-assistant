@@ -11,7 +11,7 @@ import jakarta.validation.constraints.Size;
  * <p>这是 RAG 问答流程的入口数据结构，包含了问题内容、上下文信息、
  * 对话历史、图片附件等，供 {@link RagService#chat} 和 {@link RagService#chatStream} 使用。</p>
  *
- * @param question           用户提出的问题（必填，不超过 2000 字）
+ * @param question           用户提出的问题（必填，不超过 50000 字）
  * @param materialId         指定的学习资料 ID（可选，指定后仅在该资料范围内检索）
  * @param mode               问答模式："MATERIAL" 表示资料问答，"GENERAL" 表示通用问答
  * @param chunkId            当前正在阅读的 chunk ID（可选，用于上下文定位）
@@ -26,7 +26,7 @@ import jakarta.validation.constraints.Size;
  */
 public record ChatRequest(
     @NotBlank(message = "问题不能为空")
-    @Size(max = 2000, message = "问题不能超过 2000 字")
+    @Size(max = 50000, message = "问题不能超过 50000 字")
     String question,
     Long materialId,
     String mode,

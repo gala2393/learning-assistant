@@ -24,7 +24,7 @@ import { z } from 'zod'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { FileUp, Sparkles, Upload } from 'lucide-react'
+import { CheckCircle2, CircleDot, Clock3, FileUp, Sparkles, Upload, XCircle } from 'lucide-react'
 import type { UploadProgress, UploadProgressItem } from '@/api/materials'
 import { MAX_UPLOAD_BYTES } from '@/api/materials'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
@@ -108,9 +108,9 @@ export function MaterialUploadForm({ onSubmit, loading, progress, progressItems 
         status: progress.phase === 'processing' && progress.percent >= 100 ? 'success' as const : progress.phase,
       }]
       : []
-  /** 是否显示进度条（正在上传中，或有文件上传失败） */
+  /** 是否显示进度条：上传中、失败或已完成后都保留，让用户能回看每个文件的处理结果。 */
   const showProgressItems = visibleProgressItems.length > 0
-    && (loading || visibleProgressItems.some((item) => item.status === 'error'))
+    && (loading || visibleProgressItems.some((item) => item.status !== 'pending'))
 
   // === 事件处理 ===
 
@@ -213,6 +213,7 @@ export function MaterialUploadForm({ onSubmit, loading, progress, progressItems 
                       style={{ width: `${progressPercentFor(item)}%` }}
                     />
                   </div>
+                  <UploadStageRail item={item} />
                   {/* 详细信息（分片上传进度或解析状态） */}
                   <p className={`line-clamp-2 text-xs ${item.status === 'error' ? 'text-red-600 dark:text-red-300' : 'text-slate-500 dark:text-slate-400'}`}>
                     {progressDetailFor(item)}
@@ -226,9 +227,9 @@ export function MaterialUploadForm({ onSubmit, loading, progress, progressItems 
           <Button
             type="submit"
             className={`h-11 w-full rounded-xl ${actionButtonBase} ${canUpload ? actionButtonReady : actionButtonIdle}`}
-            disabled={loading || fileTooLarge}
+            disabled={!canUpload}
           >
-            {loading ? '导入中...' : '开始导入'}
+            {loading ? '导入中...' : selectedFiles.length === 0 ? '请先选择文件' : '开始导入'}
           </Button>
         </form>
       </CardContent>
@@ -266,4 +267,62 @@ function progressDetailFor(item: UploadProgressItem) {
     return `${item.uploadedChunks}/${item.totalChunks} 个分片已上传${item.message ? `：${item.message}` : ''}`
   }
   return `${item.stage || '后台解析中'}${item.message ? `：${item.message}` : ''}`
+}
+
+/** 上传阶段轨道：把每个文件的上传、清洗、切片、索引状态直接展示给用户。 */
+function UploadStageRail({ item }: { item: UploadProgressItem }) {
+  const stages = uploadStagesFor(item)
+  return (
+    <div className="grid grid-cols-4 gap-1">
+      {stages.map((stage) => (
+        <span
+          key={stage.label}
+          className={`inline-flex min-w-0 items-center justify-center gap-1 rounded-md border px-1.5 py-1 text-[10px] font-medium ${stageClass(stage.state)}`}
+          title={stage.detail}
+        >
+          {stageIcon(stage.state)}
+          <span className="truncate">{stage.label}</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+type UploadStageState = 'done' | 'active' | 'pending' | 'error'
+
+/** 根据后端阶段文案和进度百分比推断四个阶段的 UI 状态。 */
+function uploadStagesFor(item: UploadProgressItem) {
+  const percent = progressPercentFor(item)
+  const stageText = `${item.stage || ''} ${item.message || ''}`
+  const uploadDone = item.phase === 'processing' || item.status === 'success' || item.uploadedChunks >= item.totalChunks
+  return [
+    { label: '上传', state: stageState(item, uploadDone, item.phase === 'uploading'), detail: `${item.uploadedChunks}/${item.totalChunks} 个分片` },
+    { label: '清洗', state: stageState(item, item.status === 'success' || percent >= 72, item.phase === 'processing' && /提取|解析|清洗|OCR/.test(stageText)), detail: '提取并清洗文本' },
+    { label: '切片', state: stageState(item, item.status === 'success' || percent >= 85, item.phase === 'processing' && /切分|切片|保存/.test(stageText)), detail: '按页、标题和语义生成片段' },
+    { label: '索引', state: stageState(item, item.status === 'success', item.phase === 'processing' && /索引|向量|BM25|同步/.test(stageText)), detail: '构建检索索引' },
+  ]
+}
+
+/** 统一阶段状态判定，失败优先，其次完成、进行中、等待。 */
+function stageState(item: UploadProgressItem, done: boolean, active: boolean): UploadStageState {
+  if (item.status === 'error') return 'error'
+  if (done) return 'done'
+  if (active) return 'active'
+  return 'pending'
+}
+
+/** 阶段图标与状态绑定，保持列表扫描时能快速分辨当前进度。 */
+function stageIcon(state: UploadStageState) {
+  if (state === 'done') return <CheckCircle2 className="h-3 w-3 shrink-0" />
+  if (state === 'active') return <CircleDot className="h-3 w-3 shrink-0" />
+  if (state === 'error') return <XCircle className="h-3 w-3 shrink-0" />
+  return <Clock3 className="h-3 w-3 shrink-0" />
+}
+
+/** 阶段徽章颜色：绿色完成、蓝色进行中、红色失败、灰色等待。 */
+function stageClass(state: UploadStageState) {
+  if (state === 'done') return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300'
+  if (state === 'active') return 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300'
+  if (state === 'error') return 'border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300'
+  return 'border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-400'
 }

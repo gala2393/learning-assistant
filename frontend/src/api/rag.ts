@@ -46,7 +46,14 @@ export interface StreamCallbacks {
   onSources?: (sources: RagSource[]) => void    // 收到检索到的资料来源
   onChunk?: (delta: string) => void              // 收到 AI 回答的文本增量
   onStatus?: (status: { stage?: string; message?: string }) => void  // 状态变化（检索中/思考中）
-  onDone?: (result: { questionId: number | string; conversationId?: number | string; answer?: string; answerIncluded?: boolean }) => void  // 流结束
+  onDone?: (result: {
+    questionId: number | string
+    conversationId?: number | string
+    answer?: string
+    answerIncluded?: boolean
+    continuable?: boolean
+    continuationHint?: string | null
+  }) => void  // 流结束
   onError?: (message: string) => void            // 发生错误
 }
 
@@ -92,7 +99,10 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
     signal: controller.signal,
   })
     .then(async (response) => {
-      if (!response.ok) { callbacks.onError?.(`请求失败 (${response.status})`); return }
+      if (!response.ok) {
+        callbacks.onError?.(await readStreamErrorMessage(response))
+        return
+      }
       const reader = response.body?.getReader()
       if (!reader) { callbacks.onError?.('无法读取响应流'); return }
 
@@ -146,6 +156,20 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
   return controller
 }
 
+async function readStreamErrorMessage(response: Response) {
+  try {
+    const data = await response.clone().json()
+    return data?.message || data?.error || `请求失败 (${response.status})`
+  } catch {
+    try {
+      const text = await response.text()
+      return text.trim() || `请求失败 (${response.status})`
+    } catch {
+      return `请求失败 (${response.status})`
+    }
+  }
+}
+
 // ===== 问答历史管理 =====
 
 /** 获取问答历史列表（按对话分组，置顶优先） */
@@ -176,9 +200,12 @@ export async function clearHistory(): Promise<void> { await api.delete('/rag/his
 
 // ===== 资料摘要 =====
 
-/** 为资料生成 AI 摘要 */
-export async function summarizeMaterial(payload: { materialId: string; summaryType?: SummaryType }): Promise<SummaryResult> {
-  const { data } = await api.post('/rag/summarize', payload)
+/** 为资料生成 AI 摘要；可传入 AbortSignal，让页面上的“暂停生成”真正取消当前请求。 */
+export async function summarizeMaterial(
+  payload: { materialId: string; summaryType?: SummaryType },
+  options?: { signal?: AbortSignal },
+): Promise<SummaryResult> {
+  const { data } = await api.post('/rag/summarize', payload, { signal: options?.signal })
   return normalizeSummary(data)
 }
 /** 获取资料的最新摘要 */
@@ -297,7 +324,7 @@ export function useClearHistory() { return useMutation({ mutationFn: clearHistor
   // 清空历史后收藏列表中可能还有指向历史的问题，需要一并刷新。
   queryClient.invalidateQueries({ queryKey: ['history'] }); queryClient.invalidateQueries({ queryKey: ['favorites'] })
 } }) }
-export function useSummarizeMaterial() { return useMutation({ mutationFn: summarizeMaterial, onSuccess: (_d, payload) => { queryClient.invalidateQueries({ queryKey: ['summaries', payload.materialId] }) } }) }
+export function useSummarizeMaterial() { return useMutation({ mutationFn: (payload: { materialId: string; summaryType?: SummaryType }) => summarizeMaterial(payload), onSuccess: (_d, payload) => { queryClient.invalidateQueries({ queryKey: ['summaries', payload.materialId] }) } }) }
 export function useMaterialSummary(materialId: string | null) { return useQuery({ queryKey: ['summaries', materialId], queryFn: () => getMaterialSummary(materialId!), enabled: !!materialId && hasStoredSession() }) }
 export function useMaterialSummaryHistory(materialId: string | null) { return useQuery({ queryKey: ['summaries', materialId, 'history'], queryFn: () => listMaterialSummaries(materialId!), enabled: !!materialId && hasStoredSession() }) }
 export function useUpdateSummaryNote() { return useMutation({ mutationFn: ({ summaryId, userNote }: { summaryId: string; userNote: string }) => updateSummaryNote(summaryId, userNote), onSuccess: (summary) => {

@@ -18,9 +18,11 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ghostscript \
+        curl \
         libglib2.0-0 \
         libgl1 \
         libreoffice \
+        poppler-utils \
         python3 \
         python3-venv \
         tesseract-ocr \
@@ -32,9 +34,6 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /workspace/app.jar /app/app.jar
 
-# MinerU 运行环境通过服务器持久化目录挂载到 /opt/mineru-venv，避免每次应用发版都重新下载大型 Python 依赖。
-ENV PATH="/opt/mineru-venv/bin:${PATH}"
-ENV MINERU_MODEL_SOURCE=modelscope
 ENV SPRING_PROFILES_ACTIVE=prod
 ENV APP_STORAGE_DIR=/data/learning-assistant-files
 

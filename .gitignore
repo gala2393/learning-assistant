@@ -17,9 +17,11 @@ upload-package-latest/
 frontend-dist-upload/
 deploy-package-*/
 deploy-frontend.tar.gz
+deploy/server.env
 .codex-run/
 output/
 test-results/
+.playwright-cli/
 login-payload.json
 test-txt-upload.sh
 delete-test-material.py

@@ -17,6 +17,16 @@ public record AdminMaterialResponse(
     Integer parseProgressPercent, // 解析进度百分比 (0-100)
     String parseStage,          // 当前解析阶段描述
     String parseMessage,        // 解析阶段附加信息
+    String uploadStatus,        // 原文件上传状态（UPLOADING/UPLOADED/FAILED）
+    String textStatus,          // 文本抽取状态（PENDING/RUNNING/PARTIAL/READY/FAILED）
+    String indexStatus,         // 检索索引状态（PENDING/RUNNING/PARTIAL/READY/FAILED）
+    String ocrStatus,           // OCR 处理状态（DISABLED/PENDING/RUNNING/PARTIAL/READY/FAILED）
+    Integer processingProgressPercent, // 后台流水线综合进度百分比 (0-100)
+    String processingStage,     // 后台流水线当前阶段
+    String processingMessage,   // 后台流水线当前说明
+    Integer indexedChunkCount,  // 已进入索引的片段数量
+    Integer textPageCount,      // 已完成文本抽取/OCR 的页数
+    Integer pageCount,          // 资料总页数
     String summaryStatus,       // 摘要生成状态
     Integer chunkCount,         // 文本分块数量
     String createdAt,           // 上传时间

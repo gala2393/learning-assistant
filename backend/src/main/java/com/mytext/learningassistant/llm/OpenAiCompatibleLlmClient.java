@@ -44,6 +44,10 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     /** 单次回答输出上限；超长文档由业务层分段生成，不依赖单次请求硬撑完整长文。 */
     private static final int DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 
+    /** 流式模型失败时展示给用户的统一提示，避免前端只看到 500 或“回答已中断”。 */
+    private static final String STREAM_FAILURE_MESSAGE =
+        "AI 模型响应失败或超时，请缩短问题、减少资料内容，或改用“继续”分段生成后重试。";
+
     /**
      * 公开构造函数（使用默认 ObjectMapper）
      *
@@ -202,7 +206,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
                     properties.apiFormat(),
                     safeImages.size()
                 );
-                return "";
+                throw new LlmProviderException(STREAM_FAILURE_MESSAGE);
             }
 
             // 根据 API 格式解析流式响应
@@ -269,6 +273,11 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
                 }
             }
             return fullContent.toString();
+        } catch (LlmStreamCancelledException e) {
+            // 浏览器端暂停/断开 SSE 时直接向上抛出取消信号，避免被当成模型失败后继续生成兜底回答。
+            throw e;
+        } catch (LlmProviderException e) {
+            throw e;
         } catch (Exception e) {
             log.warn(
                 "LLM stream request exception model={} apiFormat={} images={} message={}",
@@ -277,7 +286,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
                 safeImages.size(),
                 e.getMessage()
             );
-            return "";
+            throw new LlmProviderException(STREAM_FAILURE_MESSAGE, e);
         }
     }
 
@@ -313,6 +322,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     private String openAiStreamBody(String systemPrompt, String userPrompt, List<LlmImage> images) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", properties.model());
+        body.put("max_tokens", DEFAULT_MAX_OUTPUT_TOKENS);
         body.put("temperature", 0.2);
         body.put("stream", true);  // 启用流式输出
 
@@ -493,6 +503,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     private String chatCompletionsBody(String systemPrompt, String userPrompt, List<LlmImage> images) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", properties.model());
+        body.put("max_tokens", DEFAULT_MAX_OUTPUT_TOKENS);
         body.put("temperature", 0.2);
 
         // 根据是否有图片选择不同的内容格式

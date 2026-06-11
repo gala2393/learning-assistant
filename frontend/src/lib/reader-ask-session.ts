@@ -32,6 +32,7 @@ const defaultState: ReaderAskSnapshot = {
 let state: ReaderAskSnapshot = { ...defaultState }
 let activeController: AbortController | null = null
 let activeRunId: string | null = null
+let activeAssistantId: string | null = null
 let answerBuffer = ''
 const listeners = new Set<() => void>()
 
@@ -131,6 +132,7 @@ export function startReaderAskStream(params: {
   const conversationIdBefore = state.conversationId
 
   activeRunId = runId
+  activeAssistantId = assistantId
   answerBuffer = ''
   state = {
     ...state,
@@ -191,9 +193,6 @@ export function startReaderAskStream(params: {
       },
       onDone: (result) => {
         if (activeRunId !== runId) return
-        activeRunId = null
-        activeController = null
-
         const sources = state.sourcesByMessageId[assistantId] || []
         state = {
           ...state,
@@ -211,13 +210,12 @@ export function startReaderAskStream(params: {
               : message,
           ),
         }
+        clearActiveStreamRuntime()
         notify()
         invalidateReaderAskQueries(params.materialId)
       },
       onError: (message) => {
         if (activeRunId !== runId) return
-        activeRunId = null
-        activeController = null
         state = {
           ...state,
           loading: false,
@@ -228,6 +226,7 @@ export function startReaderAskStream(params: {
               : item,
           ),
         }
+        clearActiveStreamRuntime()
         notify()
         invalidateReaderAskQueries(params.materialId)
       },
@@ -250,10 +249,47 @@ function updateAssistantMessage(assistantId: string, patch: Partial<ChatMessage>
   notify()
 }
 
+/**
+ * 暂停边读边问的流式输出。
+ *
+ * fetch/SSE 不能可靠地“冻结后继续”同一条响应流，所以这里采用中止请求并保留已输出内容的方式。
+ */
+export function pauseReaderAskStream() {
+  if (!activeController || !activeAssistantId || !state.loading) return
+  const assistantId = activeAssistantId
+  const cleanAnswer = answerBuffer.trim()
+  const pausedText = cleanAnswer
+    ? `${cleanAnswer}\n\n已暂停输出，以上为已收到的内容。`
+    : '已暂停输出。'
+
+  activeRunId = null
+  activeController.abort()
+  state = {
+    ...state,
+    loading: false,
+    errorByMessageId: { ...state.errorByMessageId, [assistantId]: '' },
+    messages: state.messages.map((message) =>
+      message.id === assistantId
+        ? { ...message, thinking: false, error: undefined, text: pausedText }
+        : message,
+    ),
+  }
+  clearActiveStreamRuntime()
+  notify()
+  queryClient.invalidateQueries({ queryKey: ['rag-usage'] })
+}
+
 function abortActiveStream() {
   activeRunId = null
   activeController?.abort()
+  clearActiveStreamRuntime()
+}
+
+/** 清理当前流式任务引用，避免旧请求回调继续写入新会话。 */
+function clearActiveStreamRuntime() {
+  activeRunId = null
   activeController = null
+  activeAssistantId = null
 }
 
 function notify() {

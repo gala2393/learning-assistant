@@ -173,6 +173,7 @@ export function FavoritesPage() {
         <DialogContent className="max-w-lg max-h-[80vh] overflow-auto">
           <DialogHeader>
             <DialogTitle className="text-base">收藏详情</DialogTitle>
+            <DialogDescription>查看这条收藏的完整问答和可恢复的会话记录。</DialogDescription>
           </DialogHeader>
           {viewTarget && (
             <div className="space-y-3">
@@ -189,8 +190,8 @@ export function FavoritesPage() {
                 <div className="space-y-2">
                   <Badge variant="outline" className="text-[10px] mb-1">会话记录</Badge>
                   <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
-                    {viewTarget.messages.map((message) => (
-                      <div key={message.id} className="text-sm">
+                    {viewTarget.messages.map((message, index) => (
+                      <div key={`${message.id}-${message.role}-${index}`} className="text-sm">
                         <span className="mr-2 font-medium">{message.role === 'user' ? '你' : 'AI'}</span>
                         <span className="whitespace-pre-wrap leading-relaxed">{message.text}</span>
                       </div>

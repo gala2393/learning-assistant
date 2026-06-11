@@ -4,7 +4,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { cn, formatBytes, sanitizeAiText } from '@/lib/utils'
 import { SourceCard } from './SourceCard'
-import { Activity, AlertCircle, ArrowDown, Check, Copy, FileText, Layers3 } from 'lucide-react'
+import { Activity, AlertCircle, ArrowDown, ArrowRight, Check, Copy, FileText, Layers3 } from 'lucide-react'
 import { useAuth } from '@/context/AuthContext'
 import { UserAvatar } from '@/components/layout/UserAvatar'
 import type { RagSource, TemporaryMaterial } from '@/types'
@@ -45,6 +45,8 @@ import { TemporaryMaterialPreviewDialog } from './TemporaryMaterialPreviewDialog
  * @property sources - AI 回答引用的资料来源（RAG 检索结果）
  * @property images - 附带的图片列表（用户上传的图片，Base64 格式）
  * @property temporaryMaterial - 附带的临时资料（通用模式下上传的资料）
+ * @property continuable - 当前 AI 回答是否可以继续生成
+ * @property continuationHint - 继续生成提示语
  */
 export interface ChatMessage {
   id: string
@@ -55,12 +57,15 @@ export interface ChatMessage {
   sources?: RagSource[]
   images?: Array<{ dataUrl: string; mediaType: string }>
   temporaryMaterial?: TemporaryMaterial | null
+  continuable?: boolean
+  continuationHint?: string | null
 }
 
 /** ChatThread 组件属性 */
 interface ChatThreadProps {
   messages: ChatMessage[]                 // 消息列表
   onOpenSource?: (source: RagSource) => void  // 点击来源卡片的回调（跳转到阅读器对应片段）
+  onContinueGeneration?: () => void        // 点击继续生成按钮的回调
 }
 
 // ========== 思考中动画 ==========
@@ -345,6 +350,11 @@ function RetrievalTrace({ sources, onOpenSource }: { sources: RagSource[]; onOpe
   )
 }
 
+/** 判断回答文本里是否包含后端追加的续写提示。 */
+function hasContinuationNotice(text: string) {
+  return /输入[“"']继续[”"']/.test(text) || text.includes('点击“继续生成”')
+}
+
 // ========== 临时资料卡片 ==========
 
 /**
@@ -401,7 +411,7 @@ function TemporaryMaterialCard({
  * 【自动滚动】
  * 使用 bottomRef 标记末尾，messages 变化时通过 useEffect 触发平滑滚动
  */
-export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
+export function ChatThread({ messages, onOpenSource, onContinueGeneration }: ChatThreadProps) {
   const { session } = useAuth()
   /** ScrollArea 的真实滚动视口；Radix 的 Root 不是实际滚动元素，所以要拿 Viewport。 */
   const viewportRef = useRef<HTMLDivElement>(null)
@@ -468,7 +478,14 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
         <ScrollArea viewportRef={viewportRef} className="h-full min-h-0 w-full overflow-hidden px-2 md:px-4">
         <div className="mx-auto max-w-5xl space-y-5 py-4 md:space-y-7 md:py-6">
           {/* 遍历所有消息 */}
-          {messages.map((msg) => (
+          {messages.map((msg, index) => {
+            const canContinueGeneration = msg.role === 'assistant'
+              && index === messages.length - 1
+              && !msg.thinking
+              && !msg.error
+              && Boolean(onContinueGeneration)
+              && Boolean(msg.continuable || hasContinuationNotice(msg.text))
+            return (
             <motion.div key={msg.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}
               className={cn('flex gap-2 md:gap-3', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
               <div className={cn('min-w-0', msg.role === 'user' ? 'max-w-[88%] md:max-w-[75%]' : 'w-full max-w-[940px]')}>
@@ -526,6 +543,18 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
                       : <>
                           {/* AI 回答富文本渲染 */}
                           <article className="px-1 py-1 md:px-2"><AssistantContent text={msg.text} /></article>
+                          {canContinueGeneration && (
+                            <button
+                              type="button"
+                              onClick={onContinueGeneration}
+                              className="ml-1 inline-flex h-9 items-center gap-1.5 rounded-full border border-cyan-200 bg-cyan-50 px-3 text-xs font-medium text-cyan-800 transition hover:border-cyan-300 hover:bg-cyan-100 focus:outline-none focus:ring-2 focus:ring-cyan-400 dark:border-cyan-900/70 dark:bg-cyan-950/35 dark:text-cyan-100 dark:hover:border-cyan-700 dark:hover:bg-cyan-900/45"
+                              title={msg.continuationHint || '继续生成后续内容'}
+                              aria-label="继续生成后续内容"
+                            >
+                              <ArrowRight className="h-3.5 w-3.5" />
+                              继续生成
+                            </button>
+                          )}
                           {/* 检索来源引用（RAG 结果） */}
                           {msg.sources && msg.sources.length > 0 && <RetrievalTrace sources={msg.sources} onOpenSource={onOpenSource} />}
                         </>
@@ -536,7 +565,7 @@ export function ChatThread({ messages, onOpenSource }: ChatThreadProps) {
               {/* 用户头像（仅用户消息右侧显示） */}
               {msg.role === 'user' && <UserAvatar session={session} className="mt-1 h-9 w-9 shrink-0 text-sm" />}
             </motion.div>
-          ))}
+          )})}
           {/* 滚动锚点 */}
           <div ref={bottomRef} />
         </div>

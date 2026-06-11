@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -27,18 +28,26 @@ import java.util.Optional;
 
 import com.mytext.learningassistant.embedding.EmbeddingClient;
 import com.mytext.learningassistant.material.MaterialChunkRepository;
+import com.mytext.learningassistant.material.MaterialProcessingJobEntity;
+import com.mytext.learningassistant.material.MaterialProcessingJobRepository;
+import com.mytext.learningassistant.material.MaterialProcessingJobService;
+import com.mytext.learningassistant.material.MaterialProcessingJobStatus;
+import com.mytext.learningassistant.material.MaterialProcessingJobType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
-@SpringBootTest
+@SpringBootTest(properties = {
+    "app.material-processing.scheduler-enabled=false",
+    "app.ocr.enabled=true",
+    "app.ocr.command-template=cmd /c echo OCR_SCANNED_PAGE_TEXT"
+})
 @AutoConfigureMockMvc
 /**
  * 学习资料（Material）API 集成测试。
@@ -48,7 +57,7 @@ import org.springframework.test.web.servlet.MockMvc;
  * DOCX 样式清理与表格/图片提取、PPTX 幻灯片标记、资料元数据更新与删除、
  * 分片上传流程（含校验和验证与文件大小限制）、嵌入向量存储、旧版 Office 格式拒绝等。
  * <p>
- * 使用 MockBean 模拟 EmbeddingClient，避免调用真实嵌入服务。
+ * 使用 MockitoBean 模拟 EmbeddingClient，避免调用真实嵌入服务。
  */
 class MaterialApiTest {
 
@@ -58,7 +67,13 @@ class MaterialApiTest {
     @Autowired
     private MaterialChunkRepository materialChunkRepository;
 
-    @MockBean
+    @Autowired
+    private MaterialProcessingJobService materialProcessingJobService;
+
+    @Autowired
+    private MaterialProcessingJobRepository materialProcessingJobRepository;
+
+    @MockitoBean
     private EmbeddingClient embeddingClient;
 
     /** 每个测试前设置 EmbeddingClient 默认返回空（不生成嵌入向量） */
@@ -91,12 +106,13 @@ class MaterialApiTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.title").value("课程资料1"))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
-            .andExpect(jsonPath("$.data.chunkCount").value(1))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         String uploadBody = uploadResult.getResponse().getContentAsString();
         Long materialId = extractLong(uploadBody, "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials")
                 .header("Authorization", "Bearer " + token))
@@ -130,10 +146,12 @@ class MaterialApiTest {
                 .param("title", "Embedding TXT")
                 .param("sourceType", "TXT"))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -170,15 +188,53 @@ class MaterialApiTest {
                 .param("sourceType", "TXT"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data[0].chunkText").value(text));
+    }
+
+    /**
+     * 测试场景：TXT/Markdown 风格资料包含 BOM、零宽字符、Windows 换行和多级标题。
+     * 预期结果：系统先清洗不可见字符，再按标题拆出独立切片并保留章节标题。
+     */
+    @Test
+    void textMaterialIsCleanedAndChunkedByHeadings() throws Exception {
+        String token = registerAndLogin(uniqueName("heading-material-user"));
+        String text = "\uFEFF# 第一章 总论\r\n\r\n这是    第一章内容。\u200B\r\n\r\n## 第二节 方法\r\n\r\n这是第二节内容。";
+        MockMultipartFile file = new MockMultipartFile(
+            "file",
+            "heading-note.md",
+            MediaType.TEXT_PLAIN_VALUE,
+            text.getBytes(StandardCharsets.UTF_8)
+        );
+
+        var uploadResult = mockMvc.perform(multipart("/api/materials")
+                .file(file)
+                .header("Authorization", "Bearer " + token)
+                .param("title", "标题切片")
+                .param("sourceType", "MD"))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
+
+        mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data", org.hamcrest.Matchers.hasSize(2)))
+            .andExpect(jsonPath("$.data[0].sectionTitle").value("第一章 总论"))
+            .andExpect(jsonPath("$.data[0].chunkText").value("第一章 总论\n这是 第一章内容。"))
+            .andExpect(jsonPath("$.data[1].sectionTitle").value("第二节 方法"))
+            .andExpect(jsonPath("$.data[1].chunkText").value("第二节 方法\n这是第二节内容。"));
     }
 
     /**
@@ -205,10 +261,12 @@ class MaterialApiTest {
                 .param("sourceType", "TXT"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -257,10 +315,12 @@ class MaterialApiTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.sourceType").value("PDF"))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -330,18 +390,18 @@ class MaterialApiTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.sourceType").value("PDF"))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
-            .andExpect(jsonPath("$.data.previewStatus").value("READY"))
-            .andExpect(jsonPath("$.data.pageCount").value(1))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data[0].pageNo").value(1))
-            .andExpect(jsonPath("$.data[0].chunkText").value(org.hamcrest.Matchers.containsString("暂无可抽取文本")));
+            .andExpect(jsonPath("$.data[0].chunkText").value(org.hamcrest.Matchers.containsString("OCR_SCANNED_PAGE_TEXT")));
 
         mockMvc.perform(get("/api/materials/" + materialId + "/pages")
                 .header("Authorization", "Bearer " + token))
@@ -361,10 +421,9 @@ class MaterialApiTest {
     /**
      * 测试场景：上传扫描版 PDF（无文本层），触发 OCR 识别。
      * 预期结果：切片包含 OCR 识别文本和图片引用标记，页面渲染状态为 READY。
-     * <p>需要设置环境变量 TEST_OCR_ENABLED=true 才会执行此测试。</p>
+     * <p>测试通过固定 OCR 命令模板模拟识别结果，避免依赖本机 Tesseract 环境。</p>
      */
     @Test
-    @EnabledIfEnvironmentVariable(named = "TEST_OCR_ENABLED", matches = "true")
     void uploadsScannedPdfAndIndexesOcrTextByPage() throws Exception {
         String token = registerAndLogin(uniqueName("ocr-pdf-material-user"));
 
@@ -382,11 +441,12 @@ class MaterialApiTest {
                 .param("sourceType", "PDF"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
-            .andExpect(jsonPath("$.data.pageCount").value(1))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -425,10 +485,12 @@ class MaterialApiTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.sourceType").value("PDF"))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         var chunksResult = mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -461,9 +523,10 @@ class MaterialApiTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.id").value(materialId.intValue()))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
-            .andExpect(jsonPath("$.data.summaryStatus").value("PENDING"))
-            .andExpect(jsonPath("$.data.chunkCount").value(1));
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
+            .andExpect(jsonPath("$.data.summaryStatus").value("PENDING"));
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -494,10 +557,10 @@ class MaterialApiTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.sourceType").value("DOCX"))
-            .andExpect(jsonPath("$.data.previewStatus").value("DEGRADED"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         var chunksResult = mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -539,10 +602,12 @@ class MaterialApiTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.sourceType").value("DOCX"))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         var chunksResult = mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -578,10 +643,12 @@ class MaterialApiTest {
                 .param("sourceType", "DOCX"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
         var chunksResult = mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
@@ -623,10 +690,12 @@ class MaterialApiTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
             .andExpect(jsonPath("$.data.sourceType").value("PPTX"))
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         var chunksResult = mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
@@ -706,11 +775,76 @@ class MaterialApiTest {
             }
         }
         org.junit.jupiter.api.Assertions.assertNotNull(materialId, "chunked upload did not complete");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.data[0].chunkText").value("chunked upload without checksum"));
+    }
+
+    /**
+     * 测试场景：并发上传时只完成了中间分片，前端重新查询会话。
+     * 预期结果：响应返回真实 uploadedChunkIndexes=[1]，不能只靠 uploadedChunks=1 误判第 0 片已上传。
+     */
+    @Test
+    void chunkedUploadReturnsSparseUploadedChunkIndexes() throws Exception {
+        String token = registerAndLogin(uniqueName("chunk-upload-sparse-user"));
+        String clientUploadId = "chunk-sparse-probe-" + UUID.randomUUID().toString().replace("-", "");
+
+        var sessionResult = mockMvc.perform(post("/api/materials/upload-sessions")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "clientUploadId": "%s",
+                      "title": "Sparse Chunk Probe",
+                      "originalName": "sparse-chunk.txt",
+                      "sourceType": "TXT",
+                      "sourceUrl": "",
+                      "fileSize": 9,
+                      "chunkSize": 3
+                    }
+                    """.formatted(clientUploadId)))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        String sessionId = extractString(sessionResult.getResponse().getContentAsString(), "sessionId");
+        MockMultipartFile secondChunk = new MockMultipartFile(
+            "chunk",
+            "sparse-chunk.part",
+            MediaType.TEXT_PLAIN_VALUE,
+            "bbb".getBytes(StandardCharsets.UTF_8)
+        );
+
+        mockMvc.perform(multipart("/api/materials/upload-sessions/" + sessionId + "/chunks")
+                .file(secondChunk)
+                .header("Authorization", "Bearer " + token)
+                .param("chunkIndex", "1")
+                .param("totalChunks", "3"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.status").value("UPLOADING"))
+            .andExpect(jsonPath("$.data.uploadedChunks").value(1))
+            .andExpect(jsonPath("$.data.uploadedChunkIndexes", org.hamcrest.Matchers.contains(1)));
+
+        mockMvc.perform(post("/api/materials/upload-sessions")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "clientUploadId": "%s",
+                      "title": "Sparse Chunk Probe",
+                      "originalName": "sparse-chunk.txt",
+                      "sourceType": "TXT",
+                      "sourceUrl": "",
+                      "fileSize": 9,
+                      "chunkSize": 3
+                    }
+                    """.formatted(clientUploadId)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.sessionId").value(sessionId))
+            .andExpect(jsonPath("$.data.uploadedChunks").value(1))
+            .andExpect(jsonPath("$.data.uploadedChunkIndexes", org.hamcrest.Matchers.contains(1)));
     }
 
     /**
@@ -1009,7 +1143,214 @@ class MaterialApiTest {
             .andExpect(status().isNotFound());
     }
 
+    /**
+     * 测试场景：分片上传完成的资料被删除后，用户再次上传同一文件。
+     * 预期结果：旧 SUCCESS 会话不会被复用，服务端创建新会话并要求前端重新 POST 分片。
+     */
+    /**
+     * 测试场景：资料删除时仍有未执行的后台解析任务。
+     * 预期结果：删除会同步取消该资料的未完成任务，后续队列扫描不会再执行这些旧任务。
+     */
+    @Test
+    void deletingMaterialCancelsPendingProcessingJobs() throws Exception {
+        String token = registerAndLogin(uniqueName("material-delete-job-user"));
+        MockMultipartFile file = new MockMultipartFile(
+            "file",
+            "delete-with-job.txt",
+            MediaType.TEXT_PLAIN_VALUE,
+            "A material that will be deleted before queued jobs run.".getBytes(StandardCharsets.UTF_8)
+        );
+
+        var uploadResult = mockMvc.perform(multipart("/api/materials")
+                .file(file)
+                .header("Authorization", "Bearer " + token)
+                .param("title", "Delete with pending job")
+                .param("sourceType", "TXT"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andReturn();
+
+        Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        // 测试环境会同步消费上传后的队列，删除场景需要显式补一个仍处于 PENDING 的任务。
+        if (materialProcessingJobRepository.findByMaterialIdOrderByCreatedAtDesc(materialId).stream()
+            .noneMatch(job -> job.getStatus() == MaterialProcessingJobStatus.PENDING)) {
+            materialProcessingJobService.enqueue(
+                materialId,
+                MaterialProcessingJobType.EXTRACT_TEXT_FAST,
+                10,
+                "提取文本",
+                "等待测试队列取消"
+            );
+        }
+
+        org.junit.jupiter.api.Assertions.assertTrue(
+            materialProcessingJobRepository.findByMaterialIdOrderByCreatedAtDesc(materialId).stream()
+                .anyMatch(job -> job.getStatus() == MaterialProcessingJobStatus.PENDING),
+            "删除前应存在等待执行的后台任务"
+        );
+
+        mockMvc.perform(delete("/api/materials/" + materialId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0));
+
+        List<MaterialProcessingJobEntity> jobsAfterDelete = materialProcessingJobRepository.findByMaterialIdOrderByCreatedAtDesc(materialId);
+        org.junit.jupiter.api.Assertions.assertTrue(
+            jobsAfterDelete.stream().anyMatch(job -> job.getStatus() == MaterialProcessingJobStatus.CANCELLED),
+            "删除资料后，至少应有一个未完成后台任务被标记为取消"
+        );
+        org.junit.jupiter.api.Assertions.assertTrue(
+            jobsAfterDelete.stream().noneMatch(job ->
+                job.getStatus() == MaterialProcessingJobStatus.PENDING
+                    || job.getStatus() == MaterialProcessingJobStatus.RUNNING
+                    || job.getStatus() == MaterialProcessingJobStatus.RETRY_WAIT),
+            "删除资料后，不应残留可继续执行的后台任务"
+        );
+        org.junit.jupiter.api.Assertions.assertEquals(0, materialProcessingJobService.runReadyJobs(20));
+    }
+
+    @Test
+    void staleVectorRunningJobIsReleasedAndRetriedQuickly() throws Exception {
+        String token = registerAndLogin(uniqueName("stale-vector-job-user"));
+        MockMultipartFile file = new MockMultipartFile(
+            "file",
+            "stale-vector.txt",
+            MediaType.TEXT_PLAIN_VALUE,
+            "Vector rebuild should not keep a material stuck after the old worker disappears.".getBytes(StandardCharsets.UTF_8)
+        );
+
+        var uploadResult = mockMvc.perform(multipart("/api/materials")
+                .file(file)
+                .header("Authorization", "Bearer " + token)
+                .param("title", "stale-vector")
+                .param("sourceType", "TXT"))
+            .andExpect(status().isOk())
+            .andReturn();
+        Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
+
+        MaterialProcessingJobEntity staleJob = materialProcessingJobService.enqueue(
+            materialId,
+            MaterialProcessingJobType.SYNC_VECTOR_STORE,
+            10,
+            "同步向量库",
+            "模拟旧 worker 退出后遗留的运行中任务"
+        );
+        LocalDateTime staleLockedAt = LocalDateTime.now().minusSeconds(45);
+        staleJob.setStatus(MaterialProcessingJobStatus.RUNNING);
+        staleJob.setLockedBy("dead-worker");
+        staleJob.setLockedAt(staleLockedAt);
+        staleJob.setStartedAt(staleLockedAt);
+        materialProcessingJobRepository.save(staleJob);
+
+        int executed = materialProcessingJobService.runReadyJobs(20);
+        MaterialProcessingJobEntity refreshedJob = materialProcessingJobRepository.findById(staleJob.getId()).orElseThrow();
+
+        org.junit.jupiter.api.Assertions.assertTrue(executed >= 1, "超时向量任务释放后应立即进入重试执行");
+        org.junit.jupiter.api.Assertions.assertEquals(MaterialProcessingJobStatus.SUCCESS, refreshedJob.getStatus());
+        org.junit.jupiter.api.Assertions.assertNull(refreshedJob.getLockedBy());
+        org.junit.jupiter.api.Assertions.assertNull(refreshedJob.getLockedAt());
+    }
+
+    @Test
+    void deletedChunkedMaterialCanBeUploadedAgainWithSameClientUploadId() throws Exception {
+        String token = registerAndLogin(uniqueName("chunk-delete-reupload-user"));
+        String clientUploadId = "chunk-delete-reupload-" + UUID.randomUUID().toString().replace("-", "");
+        byte[] bytes = "same file uploaded after delete".getBytes(StandardCharsets.UTF_8);
+
+        String firstSessionId = createTextUploadSession(token, clientUploadId, bytes.length);
+        Long firstMaterialId = uploadSingleChunkAndWaitSuccess(token, firstSessionId, bytes);
+        drainMaterialJobs();
+
+        mockMvc.perform(delete("/api/materials/" + firstMaterialId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk());
+
+        var secondSessionResult = mockMvc.perform(post("/api/materials/upload-sessions")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "clientUploadId": "%s",
+                      "title": "Delete Reupload Probe",
+                      "originalName": "delete-reupload.txt",
+                      "sourceType": "TXT",
+                      "sourceUrl": "",
+                      "fileSize": %d,
+                      "chunkSize": 5242880
+                    }
+                    """.formatted(clientUploadId, bytes.length)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.status").value("UPLOADING"))
+            .andExpect(jsonPath("$.data.uploadedChunks").value(0))
+            .andReturn();
+
+        String secondSessionId = extractString(secondSessionResult.getResponse().getContentAsString(), "sessionId");
+        org.junit.jupiter.api.Assertions.assertNotEquals(firstSessionId, secondSessionId);
+
+        Long secondMaterialId = uploadSingleChunkAndWaitSuccess(token, secondSessionId, bytes);
+        drainMaterialJobs();
+
+        mockMvc.perform(get("/api/materials/" + secondMaterialId + "/chunks")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data[0].chunkText").value("same file uploaded after delete"));
+    }
+
     // ========== 辅助方法 ==========
+
+    /** 创建一份 TXT 分片上传会话，供分片上传回归测试复用。 */
+    private String createTextUploadSession(String token, String clientUploadId, int fileSize) throws Exception {
+        var sessionResult = mockMvc.perform(post("/api/materials/upload-sessions")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {
+                      "clientUploadId": "%s",
+                      "title": "Delete Reupload Probe",
+                      "originalName": "delete-reupload.txt",
+                      "sourceType": "TXT",
+                      "sourceUrl": "",
+                      "fileSize": %d,
+                      "chunkSize": 5242880
+                    }
+                    """.formatted(clientUploadId, fileSize)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.status").value("UPLOADING"))
+            .andReturn();
+        return extractString(sessionResult.getResponse().getContentAsString(), "sessionId");
+    }
+
+    /** 上传单分片并轮询到 SUCCESS，返回后端创建的资料 ID。 */
+    private Long uploadSingleChunkAndWaitSuccess(String token, String sessionId, byte[] bytes) throws Exception {
+        MockMultipartFile chunk = new MockMultipartFile(
+            "chunk",
+            "delete-reupload.txt",
+            MediaType.TEXT_PLAIN_VALUE,
+            bytes
+        );
+
+        mockMvc.perform(multipart("/api/materials/upload-sessions/" + sessionId + "/chunks")
+                .file(chunk)
+                .header("Authorization", "Bearer " + token)
+                .param("chunkIndex", "0")
+                .param("totalChunks", "1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.status").value("PROCESSING"));
+
+        for (int attempt = 0; attempt < 20; attempt += 1) {
+            Thread.sleep(100);
+            var statusResult = mockMvc.perform(get("/api/materials/upload-sessions/" + sessionId)
+                    .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn();
+            String body = statusResult.getResponse().getContentAsString();
+            if (body.contains("\"status\":\"SUCCESS\"")) {
+                return extractLong(body, "materialId");
+            }
+        }
+        throw new AssertionError("chunked upload did not complete: " + sessionId);
+    }
 
     /** 注册并登录用户，返回认证 token */
     private String registerAndLogin(String username) throws Exception {
@@ -1059,10 +1400,25 @@ class MaterialApiTest {
             .andExpect(jsonPath("$.code").value(0))
             .andReturn();
 
-        return extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
+        return materialId;
     }
 
     /** 生成唯一名称，避免测试间数据冲突 */
+    /** 主动驱动资料后台队列，避免测试依赖定时器调度时机。 */
+    private void drainMaterialJobs() throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadline) {
+            int executed = materialProcessingJobService.runReadyJobs(20);
+            if (executed == 0) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        org.junit.jupiter.api.Assertions.fail("material processing jobs did not drain before timeout");
+    }
+
     private String uniqueName(String prefix) {
         return prefix + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
     }

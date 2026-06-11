@@ -13,6 +13,8 @@ import java.util.List;
  * @param answer         AI 生成的回答
  * @param sources        回答引用的资料来源列表（展示给用户，方便溯源）
  * @param createdAt      创建时间（格式化后的字符串）
+ * @param continuable    当前回答是否可以通过“继续”接着生成
+ * @param continuationHint 可继续生成时展示给前端的提示语
  */
 public record RagChatResponse(
     Long questionId,
@@ -20,6 +22,8 @@ public record RagChatResponse(
     String question,
     String answer,
     List<RagSourceResponse> sources,
-    String createdAt
+    String createdAt,
+    boolean continuable,
+    String continuationHint
 ) {
 }

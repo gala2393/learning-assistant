@@ -158,9 +158,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
   }, [])
 
-  /** 修改密码（只需调用 API，无需更新 session） */
+  /** 修改密码：后端会递增 tokenVersion，使旧 Token 立即失效，因此前端必须同步清理当前会话。 */
   const updatePassword = useCallback(async (payload: PasswordPayload) => {
     await updatePasswordApi(payload)
+    saveSession(null)
+    setSession(null)
   }, [])
 
   /** 登出 — 清除 session 并跳转到登录页 */

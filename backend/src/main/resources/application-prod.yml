@@ -46,7 +46,9 @@ app:
   material:
     # 持久资料文件大小限制（字节）：2GB，大 PDF 通过分片上传后后台解析
     max-file-bytes: ${APP_MATERIAL_MAX_FILE_BYTES:2147483648}
-    max-temporary-file-bytes: ${APP_MATERIAL_MAX_TEMPORARY_FILE_BYTES:524288000}
+    max-temporary-file-bytes: ${APP_MATERIAL_MAX_TEMPORARY_FILE_BYTES:104857600}
+    temporary-context-retention: ${APP_MATERIAL_TEMPORARY_CONTEXT_RETENTION:48h}
+    temporary-context-cleanup-delay: ${APP_MATERIAL_TEMPORARY_CONTEXT_CLEANUP_DELAY:1h}
     max-web-bytes: ${APP_MATERIAL_MAX_WEB_BYTES:10485760}
   security:
     outbound:
@@ -132,8 +134,10 @@ app:
       command: ${DOCUMENT_PREVIEW_CONVERTER_COMMAND:soffice}
       timeout: ${DOCUMENT_PREVIEW_CONVERTER_TIMEOUT:60s}
   pdf:
-    # 大 PDF 快速导入阈值：超过该大小时跳过 MinerU、Ghostscript 压缩和内联 OCR，优先保证资料导入完成。
+    # 大 PDF 快速导入阈值：超过该大小时跳过 Ghostscript 压缩和内联 OCR，优先保证资料导入完成。
     large-fast-import-bytes: ${APP_PDF_LARGE_FAST_IMPORT_BYTES:134217728}
+    # 大 PDF 快速导入时只抽取前 N 页文本进入问答索引，原文仍可在阅读器中查看。
+    large-fast-import-max-text-pages: ${APP_PDF_LARGE_FAST_IMPORT_MAX_TEXT_PAGES:80}
     compression:
       # 大文件 PDF 压缩配置（使用 Ghostscript 降低扫描 PDF 体积）
       enabled: ${PDF_COMPRESSION_ENABLED:true}

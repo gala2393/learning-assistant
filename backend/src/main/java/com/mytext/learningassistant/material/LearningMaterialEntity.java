@@ -85,6 +85,46 @@ public class LearningMaterialEntity {
     @Column(name = "parse_message", length = 255)
     private String parseMessage;
 
+    /** 原文件上传状态；上传完成后才进入文本和索引流水线。 */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "upload_status", nullable = false, length = 20)
+    private MaterialUploadStatus uploadStatus;
+
+    /** 文本抽取状态；PARTIAL 表示已经可读可问答但全文仍在补齐。 */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "text_status", nullable = false, length = 20)
+    private MaterialTextStatus textStatus;
+
+    /** 检索索引状态；BM25 可用后即可进入 PARTIAL。 */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "index_status", nullable = false, length = 20)
+    private MaterialIndexStatus indexStatus;
+
+    /** OCR 状态；未启用或不需要 OCR 时为 DISABLED。 */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "ocr_status", nullable = false, length = 20)
+    private MaterialOcrStatus ocrStatus;
+
+    /** 新流水线的综合处理进度，保留旧 parseProgressPercent 的兼容映射。 */
+    @Column(name = "processing_progress_percent", nullable = false)
+    private Integer processingProgressPercent;
+
+    /** 新流水线当前阶段说明。 */
+    @Column(name = "processing_stage", length = 80)
+    private String processingStage;
+
+    /** 新流水线当前阶段详细消息。 */
+    @Column(name = "processing_message", length = 255)
+    private String processingMessage;
+
+    /** 已完成索引的 chunk 数，用于显示后台补齐进度。 */
+    @Column(name = "indexed_chunk_count", nullable = false)
+    private Integer indexedChunkCount;
+
+    /** 已抽取文本的页数，用于大 PDF 分批处理展示。 */
+    @Column(name = "text_page_count", nullable = false)
+    private Integer textPageCount;
+
     /** AI 摘要的生成状态 */
     @Enumerated(EnumType.STRING)
     @Column(name = "summary_status", nullable = false, length = 20)
@@ -143,6 +183,33 @@ public class LearningMaterialEntity {
         }
         if (chunkCount == null) {
             chunkCount = 0;
+        }
+        if (uploadStatus == null) {
+            uploadStatus = MaterialUploadStatus.UPLOADED;
+        }
+        if (textStatus == null) {
+            textStatus = textStatusFromParseStatus(parseStatus);
+        }
+        if (indexStatus == null) {
+            indexStatus = indexStatusFromParseStatus(parseStatus);
+        }
+        if (ocrStatus == null) {
+            ocrStatus = MaterialOcrStatus.DISABLED;
+        }
+        if (processingProgressPercent == null) {
+            processingProgressPercent = parseProgressPercent;
+        }
+        if (processingStage == null) {
+            processingStage = parseStage;
+        }
+        if (processingMessage == null) {
+            processingMessage = parseMessage;
+        }
+        if (indexedChunkCount == null) {
+            indexedChunkCount = chunkCount;
+        }
+        if (textPageCount == null) {
+            textPageCount = pageCount == null ? 0 : pageCount;
         }
     }
 
@@ -292,6 +359,82 @@ public class LearningMaterialEntity {
         this.chunkCount = chunkCount;
     }
 
+    public MaterialUploadStatus getUploadStatus() {
+        return uploadStatus;
+    }
+
+    public void setUploadStatus(MaterialUploadStatus uploadStatus) {
+        this.uploadStatus = uploadStatus;
+    }
+
+    public MaterialTextStatus getTextStatus() {
+        return textStatus;
+    }
+
+    public void setTextStatus(MaterialTextStatus textStatus) {
+        this.textStatus = textStatus;
+        this.parseStatus = parseStatusFromTextStatus(textStatus);
+    }
+
+    public MaterialIndexStatus getIndexStatus() {
+        return indexStatus;
+    }
+
+    public void setIndexStatus(MaterialIndexStatus indexStatus) {
+        this.indexStatus = indexStatus;
+    }
+
+    public MaterialOcrStatus getOcrStatus() {
+        return ocrStatus;
+    }
+
+    public void setOcrStatus(MaterialOcrStatus ocrStatus) {
+        this.ocrStatus = ocrStatus;
+    }
+
+    public Integer getProcessingProgressPercent() {
+        return processingProgressPercent;
+    }
+
+    public void setProcessingProgressPercent(Integer processingProgressPercent) {
+        this.processingProgressPercent = processingProgressPercent;
+        this.parseProgressPercent = processingProgressPercent;
+    }
+
+    public String getProcessingStage() {
+        return processingStage;
+    }
+
+    public void setProcessingStage(String processingStage) {
+        this.processingStage = processingStage;
+        this.parseStage = processingStage;
+    }
+
+    public String getProcessingMessage() {
+        return processingMessage;
+    }
+
+    public void setProcessingMessage(String processingMessage) {
+        this.processingMessage = processingMessage;
+        this.parseMessage = processingMessage;
+    }
+
+    public Integer getIndexedChunkCount() {
+        return indexedChunkCount;
+    }
+
+    public void setIndexedChunkCount(Integer indexedChunkCount) {
+        this.indexedChunkCount = indexedChunkCount;
+    }
+
+    public Integer getTextPageCount() {
+        return textPageCount;
+    }
+
+    public void setTextPageCount(Integer textPageCount) {
+        this.textPageCount = textPageCount;
+    }
+
     public LocalDateTime getCreatedAt() {
         return createdAt;
     }
@@ -306,5 +449,44 @@ public class LearningMaterialEntity {
 
     public void setUpdatedAt(LocalDateTime updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    private static MaterialTextStatus textStatusFromParseStatus(MaterialParseStatus parseStatus) {
+        if (parseStatus == MaterialParseStatus.SUCCESS) {
+            return MaterialTextStatus.READY;
+        }
+        if (parseStatus == MaterialParseStatus.FAILED) {
+            return MaterialTextStatus.FAILED;
+        }
+        if (parseStatus == MaterialParseStatus.PARSING) {
+            return MaterialTextStatus.RUNNING;
+        }
+        return MaterialTextStatus.PENDING;
+    }
+
+    private static MaterialIndexStatus indexStatusFromParseStatus(MaterialParseStatus parseStatus) {
+        if (parseStatus == MaterialParseStatus.SUCCESS) {
+            return MaterialIndexStatus.READY;
+        }
+        if (parseStatus == MaterialParseStatus.FAILED) {
+            return MaterialIndexStatus.FAILED;
+        }
+        if (parseStatus == MaterialParseStatus.PARSING) {
+            return MaterialIndexStatus.RUNNING;
+        }
+        return MaterialIndexStatus.PENDING;
+    }
+
+    private static MaterialParseStatus parseStatusFromTextStatus(MaterialTextStatus textStatus) {
+        if (textStatus == MaterialTextStatus.READY || textStatus == MaterialTextStatus.PARTIAL) {
+            return MaterialParseStatus.SUCCESS;
+        }
+        if (textStatus == MaterialTextStatus.FAILED) {
+            return MaterialParseStatus.FAILED;
+        }
+        if (textStatus == MaterialTextStatus.RUNNING) {
+            return MaterialParseStatus.PARSING;
+        }
+        return MaterialParseStatus.PENDING;
     }
 }

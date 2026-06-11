@@ -17,7 +17,7 @@ import type { Material, MaterialChunk, MaterialPage, MaterialPageTextBlock, Page
 // ===== 常量 =====
 export const LARGE_UPLOAD_CHUNK_SIZE = 1 * 1024 * 1024 // 每片 1MB，降低 nginx/网关单请求体限制导致的大文件分片失败概率
 export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024 // 持久资料最大 2GB，适配大 PDF 后台解析
-export const MAX_TEMPORARY_MATERIAL_BYTES = 500 * 1024 * 1024
+export const MAX_TEMPORARY_MATERIAL_BYTES = 100 * 1024 * 1024
 const PROCESSING_POLL_INTERVAL_MS = 1500               // 轮询间隔 1.5 秒
 const PROCESSING_TIMEOUT_MS = 60 * 60 * 1000           // 最长等待 60 分钟
 const CHUNK_UPLOAD_RETRY_COUNT = 3                     // 每片最多重试 3 次
@@ -39,11 +39,21 @@ export interface UploadSession {
   chunkSize: number           // 每片大小（当前默认 1MB）
   totalChunks: number         // 总片数
   uploadedChunks: number      // 已上传片数
+  uploadedChunkIndexes?: number[] | null // 已上传分片索引，用于精确断点续传
   status: 'UPLOADING' | 'PROCESSING' | 'SUCCESS' | 'FAILED'
   errorMessage: string | null
   parseProgressPercent?: number | null  // 解析进度百分比
   parseStage?: string | null            // 当前解析阶段
   parseMessage?: string | null          // 解析阶段附加信息
+  uploadStatus?: string | null
+  textStatus?: string | null
+  indexStatus?: string | null
+  ocrStatus?: string | null
+  processingProgressPercent?: number | null
+  processingStage?: string | null
+  processingMessage?: string | null
+  indexedChunkCount?: number | null
+  textPageCount?: number | null
   createdAt: string
   updatedAt: string
 }
@@ -54,6 +64,7 @@ export interface UploadProgress {
   percent: number                     // 百分比
   uploadedChunks: number
   totalChunks: number
+  uploadedChunkIndexes?: number[] | null
   stage?: string | null               // 解析阶段描述
   message?: string | null             // 附加信息
 }
@@ -132,7 +143,7 @@ export async function uploadTemporaryMaterial(
 ): Promise<TemporaryMaterial> {
   if (params.file.size > MAX_TEMPORARY_MATERIAL_BYTES) {
     // 临时问答走同步解析，超大文件会卡住请求；引导用户使用后台解析流程。
-    throw new Error('智能问答临时资料最大支持 500MB；大文件请切换到资料问答上传，系统会在后台解析并显示进度。')
+    throw new Error('智能问答临时资料最大支持 100MB；大文件请切换到资料问答上传，系统会在后台解析并显示进度。')
   }
   const formData = new FormData()
   formData.append('file', params.file)
@@ -148,7 +159,19 @@ export async function uploadTemporaryMaterial(
     },
   })
   onProgress?.({ phase: 'processing', percent: 100, message: '解析完成' })
-  return { ...data, fileSize: params.file.size }
+  const parsed = { ...data, fileSize: params.file.size } as TemporaryMaterial
+  // 临时资料必须能提取出可问答正文；否则用户会看到“上传成功”，但下一轮问答实际读不到内容。
+  if (!hasTemporaryMaterialText(parsed)) {
+    throw new Error('临时资料没有提取到可问答文本，请改用资料管理上传并查看解析状态。')
+  }
+  return parsed
+}
+
+/** 检查临时资料或多文件 parts 中是否存在有效正文。 */
+function hasTemporaryMaterialText(material?: TemporaryMaterial | null): boolean {
+  if (!material) return false
+  const parts = material.parts?.length ? material.parts : [material]
+  return parts.some((part) => (part.text || '').trim().length > 0)
 }
 
 /** 网页导入 — 输入 URL，后端抓取网页内容并创建资料 */
@@ -229,10 +252,19 @@ export async function uploadMaterialInChunks(
     chunkSize,
   })
   const sessionId = session.sessionId
-  const initialUploaded = Math.max(0, Math.min(totalChunks, session.uploadedChunks || 0))
-  let completedChunks = initialUploaded
-  const pendingIndexes = Array.from({ length: totalChunks - initialUploaded }, (_, offset) => initialUploaded + offset)
-  onProgress?.({ phase: 'uploading', percent: Math.round((completedChunks / totalChunks) * 100), uploadedChunks: completedChunks, totalChunks })
+  const uploadedIndexes = uploadedChunkIndexSet(session, totalChunks)
+  let completedChunks = session.status === 'SUCCESS' ? totalChunks : uploadedIndexes.size
+  const pendingIndexes = Array.from({ length: totalChunks }, (_, index) => index)
+    .filter((index) => session.status !== 'SUCCESS' && !uploadedIndexes.has(index))
+  onProgress?.({
+    phase: session.status === 'SUCCESS' ? 'processing' : 'uploading',
+    percent: Math.round((completedChunks / totalChunks) * 100),
+    uploadedChunks: completedChunks,
+    totalChunks,
+    uploadedChunkIndexes: Array.from(uploadedIndexes),
+    stage: session.status === 'SUCCESS' ? session.processingStage || session.parseStage || '处理完成' : undefined,
+    message: session.status === 'SUCCESS' ? session.processingMessage || session.parseMessage || '资料已经可以使用' : undefined,
+  })
   await runWithConcurrency(pendingIndexes, CHUNK_UPLOAD_CONCURRENCY, async (index) => {
     const start = index * chunkSize
     const end = Math.min(params.file.size, start + chunkSize)
@@ -241,7 +273,14 @@ export async function uploadMaterialInChunks(
       chunk: params.file.slice(start, end), chunkIndex: index, totalChunks,
     })
     completedChunks += 1
-    onProgress?.({ phase: 'uploading', percent: Math.round((completedChunks / totalChunks) * 100), uploadedChunks: completedChunks, totalChunks })
+    uploadedIndexes.add(index)
+    onProgress?.({
+      phase: 'uploading',
+      percent: Math.round((completedChunks / totalChunks) * 100),
+      uploadedChunks: completedChunks,
+      totalChunks,
+      uploadedChunkIndexes: Array.from(uploadedIndexes),
+    })
   })
   const completedSession = await getUploadSession(sessionId)
   if (completedSession.status === 'FAILED') throw new Error(completedSession.errorMessage || '上传处理失败')
@@ -268,21 +307,70 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
   await Promise.all(workers)
 }
 
-/** 轮询等待后端解析完成 — 每 1.5 秒检查一次，最长等 15 分钟 */
+/** 轮询等待后端资料达到可用状态 — 每 1.5 秒检查一次，最长等 60 分钟。 */
 async function waitForUploadProcessing(sessionId: string, totalChunks: number, onProgress?: (progress: UploadProgress) => void) {
   const startedAt = Date.now()
   while (Date.now() - startedAt < PROCESSING_TIMEOUT_MS) {
     const session = await getUploadSession(sessionId)
-    if (session.status === 'SUCCESS') {
-      onProgress?.({ phase: 'processing', percent: 100, uploadedChunks: totalChunks, totalChunks, stage: session.parseStage || '解析完成', message: session.parseMessage || '资料已经可以使用' })
+    if (session.status === 'FAILED') throw new Error(session.errorMessage || '资料解析失败')
+    if (materialProcessingFailed(session)) {
+      throw new Error(session.processingMessage || session.parseMessage || '资料解析失败，请查看任务面板或重新解析')
+    }
+    if (session.status === 'SUCCESS' && materialUsableForReader(session)) {
+      onProgress?.({
+        phase: 'processing',
+        percent: 100,
+        uploadedChunks: totalChunks,
+        totalChunks,
+        stage: session.processingStage || session.parseStage || '资料已可用',
+        message: session.processingMessage || session.parseMessage || '资料已可用于阅读和问答，后台增强任务可能仍在继续',
+      })
       return session
     }
-    if (session.status === 'FAILED') throw new Error(session.errorMessage || '资料解析失败')
     // 后端解析进度可能缺失，统一归一化后再通知 UI，避免进度条越界。
-    onProgress?.({ phase: 'processing', percent: normalizeProcessingPercent(session.parseProgressPercent), uploadedChunks: totalChunks, totalChunks, stage: session.parseStage || '后台解析中', message: session.parseMessage })
+    onProgress?.({
+      phase: 'processing',
+      percent: normalizeProcessingPercent(session.processingProgressPercent ?? session.parseProgressPercent),
+      uploadedChunks: totalChunks,
+      totalChunks,
+      stage: session.processingStage || session.parseStage || '后台处理中',
+      message: session.processingMessage || session.parseMessage,
+    })
     await sleep(PROCESSING_POLL_INTERVAL_MS)
   }
   throw new Error('资料仍在后台解析，请稍后刷新资料列表查看结果')
+}
+
+/** 后端上传会话 SUCCESS 只表示原文件已入库；真正可用要看资料流水线状态。 */
+function materialUsableForReader(session: UploadSession) {
+  const textStatus = normalizeStatus(session.textStatus)
+  const indexStatus = normalizeStatus(session.indexStatus)
+  if (!textStatus && !indexStatus) return session.status === 'SUCCESS'
+  return ['READY', 'PARTIAL'].includes(textStatus) || ['READY', 'PARTIAL'].includes(indexStatus)
+}
+
+/** 文本或索引主链路失败时向用户明确报错；OCR 失败不阻塞页面预览和已有片段使用。 */
+function materialProcessingFailed(session: UploadSession) {
+  return normalizeStatus(session.textStatus) === 'FAILED' || normalizeStatus(session.indexStatus) === 'FAILED'
+}
+
+function normalizeStatus(value?: string | null) {
+  return String(value || '').trim().toUpperCase()
+}
+
+/** 根据后端返回的真实分片索引恢复续传状态；旧后端未返回索引时退回连续数量。 */
+function uploadedChunkIndexSet(session: UploadSession, totalChunks: number) {
+  if (session.status === 'SUCCESS') {
+    return new Set(Array.from({ length: totalChunks }, (_, index) => index))
+  }
+  if (Array.isArray(session.uploadedChunkIndexes) && session.uploadedChunkIndexes.length > 0) {
+    return new Set(
+      session.uploadedChunkIndexes
+        .filter((index) => Number.isInteger(index) && index >= 0 && index < totalChunks),
+    )
+  }
+  const uploadedCount = Math.max(0, Math.min(totalChunks, session.uploadedChunks || 0))
+  return new Set(Array.from({ length: uploadedCount }, (_, index) => index))
 }
 
 /** 生成客户端上传 ID（固定短格式，避免长中文文件名超过后端数据库字段长度） */
@@ -306,7 +394,15 @@ function normalizeProcessingPercent(percent?: number | null) { if (typeof percen
 function normalizeMaterial(material: Material): Material { return { ...material, id: String(material.id), parseProgressPercent: typeof material.parseProgressPercent === 'number' ? material.parseProgressPercent : null } }
 function normalizeChunk(chunk: MaterialChunk): MaterialChunk { return { ...chunk, id: String(chunk.id), materialId: String(chunk.materialId) } }
 function normalizePageTextBlock(block: MaterialPageTextBlock): MaterialPageTextBlock { return { ...block, id: String(block.id), chunkId: block.chunkId == null ? null : String(block.chunkId) } }
-function normalizeUploadSession(session: UploadSession): UploadSession { return { ...session, materialId: session.materialId == null ? null : String(session.materialId) } }
+function normalizeUploadSession(session: UploadSession): UploadSession {
+  return {
+    ...session,
+    materialId: session.materialId == null ? null : String(session.materialId),
+    uploadedChunkIndexes: Array.isArray(session.uploadedChunkIndexes)
+      ? session.uploadedChunkIndexes.filter((index) => Number.isInteger(index))
+      : [],
+  }
+}
 
 /** 更新资料信息（标题、来源 URL） */
 export async function updateMaterial(id: string, payload: { title?: string; sourceUrl?: string }): Promise<Material> {
@@ -334,7 +430,33 @@ export function useMaterials() {
     // 只有存在解析中资料时才轮询，解析完成后停止刷新，减少无意义请求。
     refetchInterval: (query) => { const data = query.state.data as Material[] | undefined; return data?.some(isMaterialParsing) ? 1500 : false } })
 }
-function isMaterialParsing(m: Material) { return ['PENDING', 'PARSING', 'PROCESSING'].includes(m.parseStatus) && (m.parseProgressPercent ?? 0) < 100 }
+function isMaterialParsing(m: Material) {
+  const parseStatus = String(m.parseStatus || '').toUpperCase()
+  const textStatus = String(m.textStatus || '').toUpperCase()
+  const indexStatus = String(m.indexStatus || '').toUpperCase()
+  const ocrStatus = String(m.ocrStatus || '').toUpperCase()
+  const processingPercent = m.processingProgressPercent ?? m.parseProgressPercent ?? 100
+  const parseActive = ['PENDING', 'PARSING', 'PROCESSING'].includes(parseStatus) && processingPercent < 100
+  const textActive = ['PENDING', 'RUNNING'].includes(textStatus)
+    || (textStatus === 'PARTIAL' && processingPercent < 100)
+  // 索引 PARTIAL 表示 BM25/部分向量已可用但后台仍可能继续补齐；进度未满时需要继续轮询，避免卡片长期停在 85%。
+  const indexActive = ['PENDING', 'RUNNING'].includes(indexStatus)
+    || (indexStatus === 'PARTIAL' && processingPercent < 100)
+  const pageBackfillActive = m.textStatus === 'PARTIAL'
+    && typeof m.pageCount === 'number'
+    && typeof m.textPageCount === 'number'
+    && m.textPageCount < m.pageCount
+  // 图片型 PDF 会在文本/索引可用后继续跑 OCR；用户侧也必须轮询 OCR 状态，否则列表会停在旧片段数。
+  const ocrActive = ['PENDING', 'RUNNING'].includes(ocrStatus)
+    || (ocrStatus === 'PARTIAL' && (processingPercent < 100 || pageBackfillActive))
+  const processingActive = processingPercent < 100
+    && (
+      !['FAILED', 'READY'].includes(textStatus)
+      || !['FAILED', 'READY'].includes(indexStatus)
+      || !['FAILED', 'READY', 'DISABLED'].includes(ocrStatus)
+    )
+  return parseActive || textActive || indexActive || ocrActive || pageBackfillActive || processingActive
+}
 
 export function useMaterial(id: string | null) { return useQuery({ queryKey: ['materials', id], queryFn: () => getMaterial(id!), enabled: !!id && hasStoredSession() }) }
 export function useMaterialChunks(id: string | null) { return useQuery({ queryKey: ['materials', id, 'chunks'], queryFn: () => getMaterialChunks(id!), enabled: !!id && hasStoredSession() }) }

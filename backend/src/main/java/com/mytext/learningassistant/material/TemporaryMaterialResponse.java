@@ -11,6 +11,8 @@ public record TemporaryMaterialResponse(
     String originalName,
     String sourceType,
     String text,
-    String excerpt
+    String excerpt,
+    Long fileSize,
+    Boolean contextStored
 ) {
 }

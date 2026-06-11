@@ -11,6 +11,8 @@ import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.mytext.learningassistant.material.MaterialProcessingJobService;
+
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -19,12 +21,15 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.web.servlet.MockMvc;
 
-@SpringBootTest
+@SpringBootTest(properties = "app.material-processing.scheduler-enabled=false")
 @AutoConfigureMockMvc
 class MaterialDetailApiTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @Autowired
+    private MaterialProcessingJobService materialProcessingJobService;
 
     @Test
     void returnsMaterialDetailAndChunks() throws Exception {
@@ -47,6 +52,7 @@ class MaterialDetailApiTest {
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId)
                 .header("Authorization", "Bearer " + token))
@@ -56,6 +62,8 @@ class MaterialDetailApiTest {
             .andExpect(jsonPath("$.data.title").value("资料详情"))
             .andExpect(jsonPath("$.data.originalName").value("chapter-detail.txt"))
             .andExpect(jsonPath("$.data.sourceType").value("TXT"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("READY"))
             .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
             .andExpect(jsonPath("$.data.summaryStatus").value("PENDING"))
             .andExpect(jsonPath("$.data.chunkCount").value(1));
@@ -70,6 +78,19 @@ class MaterialDetailApiTest {
             .andExpect(jsonPath("$.data[0].chunkText").value("First chunk for the learning material detail API."));
     }
 
+
+    /** 主动驱动资料后台队列，避免异步测试依赖定时器调度时机。 */
+    private void drainMaterialJobs() throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadline) {
+            int executed = materialProcessingJobService.runReadyJobs(20);
+            if (executed == 0) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        org.junit.jupiter.api.Assertions.fail("material processing jobs did not drain before timeout");
+    }
     private String registerAndLogin(String username) throws Exception {
         mockMvc.perform(post("/api/auth/register")
                 .contentType(MediaType.APPLICATION_JSON)

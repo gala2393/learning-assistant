@@ -14,44 +14,38 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.mytext.learningassistant.embedding.EmbeddingClient;
+import com.mytext.learningassistant.material.MaterialProcessingJobService;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
- * 文本型 PDF 解析路由测试。
+ * 文本型 PDF 内置解析测试。
  *
  * <p>文本型 PDF 已经自带可选中的原生文本层，前端 PDF.js 可以直接渲染划词。
- * 因此即使全局启用 MinerU，也应该跳过外部 MinerU 进程，避免大 PDF 先等待超时再回退。
+ * 后端仍需要抽取文本层用于资料问答、来源定位和阅读器兜底划词。
  */
-@SpringBootTest
+@SpringBootTest(properties = "app.material-processing.scheduler-enabled=false")
 @AutoConfigureMockMvc
 class MaterialTextPdfParserTest {
 
     @Autowired
     private MockMvc mockMvc;
 
-    @MockBean
+    @Autowired
+    private MaterialProcessingJobService materialProcessingJobService;
+
+    @MockitoBean
     private EmbeddingClient embeddingClient;
 
-    @DynamicPropertySource
-    static void parserProperties(DynamicPropertyRegistry registry) {
-        registry.add("app.document-parser.provider", () -> "mineru");
-        registry.add("app.mineru.command", () -> "cmd /c exit 99");
-        registry.add("app.mineru.fallback-enabled", () -> "false");
-        registry.add("app.mineru.skip-text-pdf", () -> "true");
-    }
-
     @Test
-    void textPdfSkipsMineruAndKeepsSelectablePageTextLayer() throws Exception {
+    void textPdfKeepsSelectablePageTextLayer() throws Exception {
         org.mockito.Mockito.when(embeddingClient.embedDocument(org.mockito.ArgumentMatchers.anyString()))
             .thenReturn(Optional.of(List.of(0.1, 0.2, 0.3)));
         String token = registerAndLogin("text_pdf_user_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10));
@@ -60,7 +54,7 @@ class MaterialTextPdfParserTest {
             "file",
             "text-pdf.pdf",
             "application/pdf",
-            minimalPdfWithText("Text PDF should skip MinerU and stay selectable.")
+            minimalPdfWithText("Text PDF should stay selectable.")
         );
 
         var uploadResult = mockMvc.perform(multipart("/api/materials")
@@ -69,18 +63,67 @@ class MaterialTextPdfParserTest {
                 .param("title", "Text PDF")
                 .param("sourceType", "PDF"))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.data.parseStatus").value("SUCCESS"))
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andExpect(jsonPath("$.data.textStatus").value("PENDING"))
             .andReturn();
 
         Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
 
         mockMvc.perform(get("/api/materials/" + materialId + "/pages/1/text-layer")
                 .header("Authorization", "Bearer " + token))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.data[0].text").value(Matchers.containsString("Text PDF should skip MinerU")))
+            .andExpect(jsonPath("$.data[0].text").value(Matchers.containsString("Text PDF should stay selectable")))
             .andExpect(jsonPath("$.data[0].source").value("LEGACY"));
     }
 
+    @Test
+    void imageOnlyPdfCreatesOneChunkPerPage() throws Exception {
+        org.mockito.Mockito.when(embeddingClient.embedDocument(org.mockito.ArgumentMatchers.anyString()))
+            .thenReturn(Optional.of(List.of(0.1, 0.2, 0.3)));
+        String token = registerAndLogin("image_pdf_user_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10));
+
+        MockMultipartFile file = new MockMultipartFile(
+            "file",
+            "image-only.pdf",
+            "application/pdf",
+            minimalBlankPdf(2)
+        );
+
+        var uploadResult = mockMvc.perform(multipart("/api/materials")
+                .file(file)
+                .header("Authorization", "Bearer " + token)
+                .param("title", "Image Only PDF")
+                .param("sourceType", "PDF"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andReturn();
+
+        Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
+
+        mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data", Matchers.hasSize(2)))
+            .andExpect(jsonPath("$.data[0].pageNo").value(1))
+            .andExpect(jsonPath("$.data[0].chunkText").value(Matchers.containsString("[[material-image:page-1.png]]")))
+            .andExpect(jsonPath("$.data[1].pageNo").value(2))
+            .andExpect(jsonPath("$.data[1].chunkText").value(Matchers.containsString("[[material-image:page-2.png]]")));
+    }
+
+    /** 主动驱动资料后台队列，避免异步测试依赖定时器调度时机。 */
+    private void drainMaterialJobs() throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 15_000;
+        while (System.currentTimeMillis() < deadline) {
+            int executed = materialProcessingJobService.runReadyJobs(20);
+            if (executed == 0) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        org.junit.jupiter.api.Assertions.fail("material processing jobs did not drain before timeout");
+    }
     private String registerAndLogin(String username) throws Exception {
         mockMvc.perform(post("/api/auth/register")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -144,6 +187,43 @@ class MaterialTextPdfParserTest {
             pdf.append("%010d 00000 n \n".formatted(offset));
         }
         pdf.append("trailer\n<< /Root 1 0 R /Size 6 >>\n");
+        pdf.append("startxref\n").append(xrefOffset).append("\n%%EOF\n");
+        return pdf.toString().getBytes(StandardCharsets.US_ASCII);
+    }
+
+    private byte[] minimalBlankPdf(int pageCount) {
+        if (pageCount <= 0) {
+            throw new IllegalArgumentException("pageCount must be positive");
+        }
+        String object1 = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+        StringBuilder kids = new StringBuilder();
+        String[] pageObjects = new String[pageCount];
+        for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+            int objectNumber = pageIndex + 3;
+            kids.append(objectNumber).append(" 0 R ");
+            pageObjects[pageIndex] = objectNumber + " 0 obj\n"
+                + "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\n"
+                + "endobj\n";
+        }
+        String object2 = "2 0 obj\n<< /Type /Pages /Kids [" + kids.toString().trim() + "] /Count " + pageCount + " >>\nendobj\n";
+        String[] objects = new String[pageCount + 2];
+        objects[0] = object1;
+        objects[1] = object2;
+        System.arraycopy(pageObjects, 0, objects, 2, pageCount);
+
+        StringBuilder pdf = new StringBuilder("%PDF-1.4\n");
+        java.util.ArrayList<Integer> offsets = new java.util.ArrayList<>();
+        for (String object : objects) {
+            offsets.add(pdf.toString().getBytes(StandardCharsets.US_ASCII).length);
+            pdf.append(object);
+        }
+        int xrefOffset = pdf.toString().getBytes(StandardCharsets.US_ASCII).length;
+        pdf.append("xref\n0 ").append(objects.length + 1).append("\n");
+        pdf.append("0000000000 65535 f \n");
+        for (Integer offset : offsets) {
+            pdf.append("%010d 00000 n \n".formatted(offset));
+        }
+        pdf.append("trailer\n<< /Root 1 0 R /Size ").append(objects.length + 1).append(" >>\n");
         pdf.append("startxref\n").append(xrefOffset).append("\n%%EOF\n");
         return pdf.toString().getBytes(StandardCharsets.US_ASCII);
     }

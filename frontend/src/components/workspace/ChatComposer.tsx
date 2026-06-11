@@ -2,7 +2,7 @@ import { useRef, useEffect, useState } from 'react'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
-import { BookOpen, Bot, FileText, Lock, Paperclip, Send, X } from 'lucide-react'
+import { BookOpen, Bot, FileText, Lock, Paperclip, Pause, Send, X } from 'lucide-react'
 import { cn, formatBytes } from '@/lib/utils'
 import type { ChatImagePayload, TemporaryMaterial } from '@/types'
 import { ImagePreviewDialog, type PreviewImage } from './ImagePreviewDialog'
@@ -27,7 +27,7 @@ import { ChatAttachmentCards } from './ChatAttachmentCards'
  * - 图片上传（点击按钮或粘贴截图，最多 8 张，自动压缩）
  * - 文件附件上传（PDF/Word/PPT/TXT/MD/HTML）
  * - 模型切换按钮（显示当前使用的模型名）
- * - 发送按钮（有内容时高亮，loading 时显示旋转动画）
+ * - 发送/暂停按钮（未生成时发送，生成中暂停当前输出）
  * - Enter 发送，Shift+Enter 换行
  * - 使用量提示（显示剩余问答次数）
  */
@@ -38,6 +38,10 @@ const MAX_IMAGES = 8
 const MAX_IMAGE_EDGE = 1280
 /** 常量：JPEG 压缩质量 0.82（平衡画质与文件大小） */
 const JPEG_QUALITY = 0.82
+/** 常量：后端 ChatRequest 限制单次问题最多 50000 字，前端提前截断并展示计数。 */
+const MAX_CHAT_INPUT_CHARS = 50000
+/** 临时资料请求正文上限与 chat-session.ts 保持一致，超过后只会带入开头和结尾。 */
+const TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT = 120_000
 
 /**
  * 临时附件项类型
@@ -53,7 +57,8 @@ type TemporaryAttachmentItem = SelectedFileListItem & {
  * @property value - 输入框中的文本
  * @property onChange - 文本变化回调，由父组件同步到全局状态
  * @property onSubmit - 发送消息回调（点击发送按钮或按 Enter）
- * @property loading - 是否正在等待 AI 回答（true 时发送按钮显示旋转动画）
+ * @property onPauseOutput - 暂停当前流式输出的回调（生成中点击按钮触发）
+ * @property loading - 是否正在等待 AI 回答（true 时主按钮切换为暂停输出）
  * @property mode - 当前问答模式：GENERAL（通用/智能问答）或 MATERIAL（资料问答）
  * @property onModeChange - 切换问答模式的回调
  * @property quickPrompts - 快捷提示词列表（显示在输入框下方的芯片）
@@ -85,6 +90,7 @@ interface ChatComposerProps {
   value: string
   onChange: (val: string) => void
   onSubmit: () => void
+  onPauseOutput?: () => void
   loading?: boolean
   mode: 'GENERAL' | 'MATERIAL'
   onModeChange: (mode: 'GENERAL' | 'MATERIAL') => void
@@ -115,7 +121,7 @@ interface ChatComposerProps {
 }
 
 export function ChatComposer({
-  value, onChange, onSubmit, loading, mode, quickPrompts, disabled, disabledHint,
+  value, onChange, onSubmit, onPauseOutput, loading, mode, quickPrompts, disabled, disabledHint,
   centered, usageLabel, modelLabel, boundMaterialLabel, customModelEnabled, onOpenModelSettings,
   images = [], onImagesChange, onOpenUploadMaterial, onUploadMaterialFile, onUploadMaterialFiles, onUploadTemporaryMaterial, onUploadTemporaryMaterials,
   temporaryMaterialUploading, temporaryMaterial, temporaryUploadFile, temporaryUploadProgress, temporaryUploadFiles = [], temporaryUploadError, onClearTemporaryMaterial, onRemoveTemporaryMaterialFile,
@@ -136,17 +142,30 @@ export function ChatComposer({
 
   // === 派生值 ===
   /** 是否可以发送（有文本或有图片，且不在 loading 和 disabled 状态，且临时资料不在解析中） */
-  const canSend = (value.trim().length > 0 || images.length > 0) && !loading && !disabled && !temporaryMaterialUploading
+  const canSend = (value.trim().length > 0 || images.length > 0)
+    && value.length <= MAX_CHAT_INPUT_CHARS
+    && !loading
+    && !disabled
+    && !temporaryMaterialUploading
+  /** 生成中时同一个主按钮切换为暂停输出，避免用户找不到停止入口。 */
+  const canPauseOutput = Boolean(loading && onPauseOutput)
+  const inputCounterTone = value.length > MAX_CHAT_INPUT_CHARS * 0.9
+    ? 'text-amber-600 dark:text-amber-300'
+    : 'text-slate-400 dark:text-slate-500'
   /** 可见的快捷提示词（居中模式和非居中模式都显示 2 个） */
   const visiblePrompts = quickPrompts.slice(0, centered ? 2 : 2)
   /** 附件按钮的提示文字（通用模式和资料模式不同） */
   const attachmentTooltip = mode === 'GENERAL'
-    ? '可上传图片和文件；智能问答临时文件最大 500MB'
+    ? '可上传图片和文件；智能问答临时文件最大 100MB'
     : '可上传图片和文件；资料文件最大 2GB'
   /** 临时文件附件列表（用于在输入框上方显示已上传的临时文件卡片） */
   const temporaryFileItems: TemporaryAttachmentItem[] = temporaryUploadFiles.length > 0
     ? temporaryUploadFiles
     : temporaryMaterialAttachmentItems(temporaryMaterial)
+  /** 临时资料太长时提醒用户：普通智能问答不会建立完整索引。 */
+  const temporaryMaterialTooLong = mode === 'GENERAL'
+    && Boolean(temporaryMaterial)
+    && temporaryMaterialTextLength(temporaryMaterial) > TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT
 
   // === 事件处理 ===
 
@@ -351,18 +370,24 @@ export function ChatComposer({
                 }}
               />
 
-              {/* ---- 已上传的临时资料附件卡片（仅通用模式，显示在输入框上方） ---- */}
-              {mode === 'GENERAL' && temporaryFileItems.length > 0 && (
-                <ChatAttachmentCards
+        {/* ---- 已上传的临时资料附件卡片（仅通用模式，显示在输入框上方） ---- */}
+        {mode === 'GENERAL' && temporaryFileItems.length > 0 && (
+          <ChatAttachmentCards
                   files={temporaryFileItems}
                   onOpen={(file) => setPreviewMaterial((file as TemporaryAttachmentItem).previewMaterial || temporaryMaterial || null)}
                   onRemove={(_, index) => onRemoveTemporaryMaterialFile?.(index)}
-                />
-              )}
+          />
+        )}
+        {temporaryMaterialTooLong && (
+          <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+            临时资料较长，本轮智能问答会优先带入开头和结尾；如果需要完整检索每一页/每一段，请切换到资料问答上传。
+          </div>
+        )}
 
               {/* ---- 文本输入框 ---- */}
-              <Textarea ref={textareaRef} value={value} onChange={(e) => onChange(e.target.value)}
+              <Textarea ref={textareaRef} value={value} onChange={(e) => onChange(e.target.value.slice(0, MAX_CHAT_INPUT_CHARS))}
                 onKeyDown={handleKeyDown} onPaste={handlePaste}
+                maxLength={MAX_CHAT_INPUT_CHARS}
                 placeholder={mode === 'GENERAL' ? '描述你的问题，或粘贴图片后提问' : '基于当前资料提问，可附加图片...'}
                 className={
                   centered
@@ -388,7 +413,7 @@ export function ChatComposer({
                       key={`${prompt}-${index}`}
                       type="button"
                       className="hidden h-8 max-w-[168px] shrink truncate rounded-full px-2.5 text-xs font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200 sm:inline-block"
-                      onClick={() => !disabled && onChange(prompt)}
+                      onClick={() => !disabled && onChange(prompt.slice(0, MAX_CHAT_INPUT_CHARS))}
                       title={prompt}
                     >
                       {prompt}
@@ -411,10 +436,17 @@ export function ChatComposer({
                       ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600 dark:border-slate-600 dark:border-t-slate-100" />
                       : <Paperclip className="h-4 w-4" />}
                   </Button>
-                  {/* 发送按钮：有内容时高亮（actionButtonReady），无内容时灰色（actionButtonIdle），loading 时显示旋转动画 */}
-                  <Button size="icon" className={`h-9 w-9 rounded-full ${actionButtonBase} ${canSend ? actionButtonReady : actionButtonIdle}`}
-                    onClick={onSubmit} disabled={!canSend}>
-                    {loading ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <Send className="h-4 w-4" />}
+                  {/* 发送/暂停按钮：未生成时发送，生成中切换为暂停，保留已输出内容。 */}
+                  <Button
+                    type="button"
+                    size="icon"
+                    className={`h-9 w-9 rounded-full ${actionButtonBase} ${canSend || canPauseOutput ? actionButtonReady : actionButtonIdle}`}
+                    onClick={canPauseOutput ? onPauseOutput : onSubmit}
+                    disabled={canPauseOutput ? false : !canSend}
+                    aria-label={canPauseOutput ? '暂停输出' : '发送消息'}
+                    title={canPauseOutput ? '暂停输出' : '发送消息'}
+                  >
+                    {canPauseOutput ? <Pause className="h-4 w-4" /> : <Send className="h-4 w-4" />}
                   </Button>
                 </div>
               </div>
@@ -425,6 +457,7 @@ export function ChatComposer({
         {/* ---- 底部提示文字（AI 免责声明 + 使用量；手机端也显示次数，空间不足时自动换行） ---- */}
         <div className="flex min-h-4 flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-center text-[11px] text-slate-400 dark:text-slate-500">
           <span>内容由 AI 生成，请仔细甄别</span>
+          <span className={cn('whitespace-nowrap', inputCounterTone)}>· {value.length}/{MAX_CHAT_INPUT_CHARS}</span>
           {usageLabel && <span className="whitespace-nowrap">· {usageLabel}</span>}
         </div>
       </div>
@@ -607,4 +640,13 @@ function temporaryMaterialAttachmentItems(material?: TemporaryMaterial | null): 
     .map((name) => name.trim())
     .filter(Boolean)
     .map((name) => ({ name, type: 'FILE', previewMaterial: material }))
+}
+
+/** 统计临时资料正文长度；多文件资料按 parts 累加，用于判断是否需要展示截断提示。 */
+function temporaryMaterialTextLength(material?: TemporaryMaterial | null): number {
+  if (!material) return 0
+  if (material.parts?.length) {
+    return material.parts.reduce((sum, part) => sum + temporaryMaterialTextLength(part), 0)
+  }
+  return (material.text || '').length
 }

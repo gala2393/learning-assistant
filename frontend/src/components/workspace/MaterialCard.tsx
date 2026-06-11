@@ -60,8 +60,29 @@ export function MaterialCard({
   const typeLabel = SOURCE_TYPE_LABELS[material.sourceType] || material.sourceType
   // 是否正在解析中（包括 PARSING、PROCESSING、PENDING 三种状态）
   const isProcessing = material.parseStatus === 'PARSING' || material.parseStatus === 'PROCESSING' || material.parseStatus === 'PENDING'
-  // 解析进度百分比，限制在 0~100 范围
-  const parsePercent = Math.max(0, Math.min(100, Math.round(material.parseProgressPercent ?? (isProcessing ? 0 : 100))))
+  // 综合处理进度优先使用新流水线字段，旧解析字段作为兼容兜底。
+  const parsePercent = Math.max(0, Math.min(100, Math.round(
+    material.processingProgressPercent ?? material.parseProgressPercent ?? (isProcessing ? 0 : 100)
+  )))
+  const stageText = material.processingStage || material.parseStage || '后台处理中'
+  const messageText = material.processingMessage || material.parseMessage
+  const ocrInProgress = ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.ocrStatus || '').toUpperCase())
+  const pipelineVisible = isProcessing
+    || parsePercent < 100
+    || ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.textStatus || ''))
+    || ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.indexStatus || ''))
+    // 图片型 PDF 的文本和索引可能先部分可用，OCR 仍在后台逐页补齐；此时也要展示流水线，避免用户误以为已经彻底结束。
+    || ocrInProgress
+  const pageProgressText = material.pageCount && material.textPageCount != null
+    ? `${material.textPageCount}/${material.pageCount} 页`
+    : null
+  const pageProgressLabel = pageProgressText
+    ? (ocrInProgress ? `页面 ${material.pageCount} 页` : `已处理 ${pageProgressText}`)
+    : null
+  const indexedText = material.indexedChunkCount != null ? `${material.indexedChunkCount} 片段` : null
+  const detailText = [messageText, pageProgressLabel, indexedText ? `已索引 ${indexedText}` : null]
+    .filter(Boolean)
+    .join(' / ')
 
   return (
     <Card
@@ -94,12 +115,12 @@ export function MaterialCard({
           </div>
           <span className="truncate sm:shrink-0">{formatDate(material.createdAt)}</span>
         </div>
-        {/* 解析进度条（仅在解析中且进度 < 100% 时显示） */}
-        {isProcessing && parsePercent < 100 && (
+        {/* 后台处理流水线：展示上传、文本抽取、OCR、索引构建的真实进度。 */}
+        {pipelineVisible && (
           <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 dark:border-slate-800 dark:bg-slate-900/40">
             <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
               <span className="truncate font-medium text-slate-700 dark:text-slate-200">
-                {material.parseStage || '后台解析中'}
+                {stageText}
               </span>
               <span className="shrink-0 tabular-nums text-slate-500">{parsePercent}%</span>
             </div>
@@ -110,9 +131,16 @@ export function MaterialCard({
                 style={{ width: `${parsePercent}%` }}
               />
             </div>
-            {/* 解析阶段说明文字 */}
-            {material.parseMessage && (
-              <p className="mt-1.5 line-clamp-1 text-[11px] text-slate-500 dark:text-slate-400">{material.parseMessage}</p>
+            <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
+              <PipelineBadge label="上传" status={material.uploadStatus} />
+              <PipelineBadge label="文本" status={material.textStatus} />
+              <PipelineBadge label="OCR" status={material.ocrStatus} />
+              <PipelineBadge label="索引" status={material.indexStatus} />
+            </div>
+            {detailText && (
+              <p className="mt-1.5 line-clamp-1 text-[11px] text-slate-500 dark:text-slate-400">
+                {detailText}
+              </p>
             )}
           </div>
         )}
@@ -153,4 +181,33 @@ export function MaterialCard({
       </CardContent>
     </Card>
   )
+}
+
+function PipelineBadge({ label, status }: { label: string; status?: string | null }) {
+  const normalized = String(status || 'PENDING').toUpperCase()
+  return (
+    <span className={cn(
+      'inline-flex min-w-0 items-center justify-center rounded-md border px-1.5 py-1 font-medium',
+      pipelineClass(normalized),
+    )}>
+      <span className="truncate">{label} {pipelineLabel(normalized)}</span>
+    </span>
+  )
+}
+
+function pipelineLabel(status: string) {
+  if (status === 'READY' || status === 'UPLOADED') return '完成'
+  if (status === 'RUNNING' || status === 'UPLOADING') return '处理中'
+  if (status === 'PARTIAL') return '部分可用'
+  if (status === 'FAILED') return '失败'
+  if (status === 'DISABLED') return '跳过'
+  return '等待'
+}
+
+function pipelineClass(status: string) {
+  if (status === 'READY' || status === 'UPLOADED') return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300'
+  if (status === 'PARTIAL') return 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300'
+  if (status === 'RUNNING' || status === 'UPLOADING') return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300'
+  if (status === 'FAILED') return 'border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300'
+  return 'border-slate-200 bg-white text-slate-500 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-400'
 }

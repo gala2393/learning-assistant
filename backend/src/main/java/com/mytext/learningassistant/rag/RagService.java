@@ -27,6 +27,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -45,9 +46,11 @@ import com.mytext.learningassistant.material.LearningMaterialEntity;
 import com.mytext.learningassistant.material.LearningMaterialRepository;
 import com.mytext.learningassistant.material.MaterialChunkEntity;
 import com.mytext.learningassistant.material.MaterialChunkRepository;
-import com.mytext.learningassistant.material.MaterialParseStatus;
 import com.mytext.learningassistant.material.MaterialSummaryStatus;
+import com.mytext.learningassistant.material.MaterialTextStatus;
 import com.mytext.learningassistant.material.MaterialSourceType;
+import com.mytext.learningassistant.material.TemporaryMaterialContextEntity;
+import com.mytext.learningassistant.material.TemporaryMaterialContextRepository;
 import com.mytext.learningassistant.rerank.RerankCandidate;
 import com.mytext.learningassistant.rerank.RerankedCandidate;
 import com.mytext.learningassistant.rerank.RerankerClient;
@@ -138,6 +141,21 @@ public class RagService {
     /** 选中文本直接作为资料依据时的最大字符数。 */
     private static final int MAX_SELECTED_TEXT_CONTEXT_CHARS = 8_000;
 
+    /** 临时资料进入模型前的片段上下文预算，避免整篇文档一次性塞爆上下文。 */
+    private static final int MAX_TEMPORARY_MATERIAL_CONTEXT_CHARS = 16_000;
+
+    /** 临时资料每个检索片段的目标长度。 */
+    private static final int TEMPORARY_MATERIAL_CHUNK_CHARS = 1_200;
+
+    /** 临时资料片段之间的重叠长度，保证跨段落内容不被切断。 */
+    private static final int TEMPORARY_MATERIAL_CHUNK_OVERLAP = 160;
+
+    /** 每次问答最多带入的临时资料片段数。 */
+    private static final int MAX_TEMPORARY_MATERIAL_EXCERPTS = 8;
+
+    /** 问答历史里保存的临时资料正文上限，防止大附件撑爆数据库和历史接口。 */
+    private static final int MAX_TEMPORARY_MATERIAL_HISTORY_TEXT_CHARS = 20_000;
+
     /** 至少保留这些最近问答为原文，较早内容才会滚动进入摘要。 */
     private static final int MEMORY_RECENT_QUESTION_WINDOW = 8;
 
@@ -146,6 +164,13 @@ public class RagService {
 
     /** 未写明字数但明确要求"超长文档"时使用的默认目标长度。 */
     private static final int DEFAULT_LONG_DOCUMENT_TARGET_CHARS = 9_000;
+
+    /** 普通单轮回答的前端展示与历史保存上限，避免超长输出压垮浏览器、SSE 末帧或历史接口。 */
+    private static final int MAX_SINGLE_ANSWER_CHARS = 12_000;
+
+    /** 普通回答达到上限时附加的可继续提示。 */
+    private static final String ANSWER_LIMIT_CONTINUE_NOTICE =
+        "\n\n[本次回答已达到 12000 字上限。可以点击“继续生成”或输入“继续”，系统会接着生成。]";
 
     /** BM25 索引缓存的最大条目数，避免内存无限增长 */
     private static final int BM25_CACHE_MAX_ENTRIES = 64;
@@ -195,6 +220,14 @@ public class RagService {
      */
     private static final Pattern TERM_DEFINITION_PATTERN = Pattern.compile(
         "(?i)(?:什么是|何为|解释一下|解释|定义|含义|概念|define|definition of|what is|what are)\\s*[\"“'‘]?([^\"”'’？?，,。；;：:\\n]{2,80})[\"”'’]?"
+    );
+
+    /**
+     * "询问文档尾部"的模式。
+     * 临时资料没有持久化向量索引，遇到这类问题时必须显式补入尾部片段，否则容易只回答前文。
+     */
+    private static final Pattern TEMPORARY_MATERIAL_TAIL_QUESTION_PATTERN = Pattern.compile(
+        "(?i)(最后|末尾|结尾|后面|后半|后半部分|尾部|最后一页|last|ending|end of|tail|final)"
     );
 
     /**
@@ -248,6 +281,9 @@ public class RagService {
 
     /** 使用记录仓库，用于记录 Token 消耗等操作日志 */
     private final UsageRecordRepository usageRecordRepository;
+
+    /** 临时资料全文上下文仓库，用于通用问答跨轮恢复临时资料全文。 */
+    private final TemporaryMaterialContextRepository temporaryMaterialContextRepository;
 
     // ========== 依赖注入：AI 能力层 ==========
 
@@ -305,6 +341,7 @@ public class RagService {
      * @param materialSummaryRepository  资料摘要仓库
      * @param userRepository             用户仓库
      * @param usageRecordRepository      使用记录仓库
+     * @param temporaryMaterialContextRepository 临时资料全文上下文仓库
      * @param thirdPartyLlmClient        大语言模型客户端
      * @param embeddingClient            向量嵌入客户端
      * @param embeddingProperties        嵌入配置属性
@@ -328,6 +365,7 @@ public class RagService {
         MaterialSummaryRepository materialSummaryRepository,
         UserRepository userRepository,
         UsageRecordRepository usageRecordRepository,
+        TemporaryMaterialContextRepository temporaryMaterialContextRepository,
         ThirdPartyLlmClient thirdPartyLlmClient,
         EmbeddingClient embeddingClient,
         EmbeddingProperties embeddingProperties,
@@ -350,6 +388,7 @@ public class RagService {
         this.materialSummaryRepository = materialSummaryRepository;
         this.userRepository = userRepository;
         this.usageRecordRepository = usageRecordRepository;
+        this.temporaryMaterialContextRepository = temporaryMaterialContextRepository;
         this.thirdPartyLlmClient = thirdPartyLlmClient;
         this.embeddingClient = embeddingClient;
         this.embeddingProperties = embeddingProperties;
@@ -384,6 +423,10 @@ public class RagService {
         ensureChatUsageAvailable(userId);
         boolean generalChat = isGeneralChat(request);
         Long conversationId = resolveConversationId(userId, request.conversationId());
+        if (generalChat) {
+            request = withStoredTemporaryMaterial(userId, request);
+            request = withConversationTemporaryMaterial(userId, conversationId, request);
+        }
         // 如果用户问的是"你是什么模型"，走专门的身份回答逻辑
         if (thirdPartyLlmClient.isModelIdentityQuestion(request.question())) {
             return chatModelIdentity(userId, request);
@@ -398,6 +441,7 @@ public class RagService {
 
         // ===== 上下文构建阶段：将检索到的片段组装为 LLM 可理解的上下文文本 =====
         List<String> excerpts = buildExcerpts(request, selectedChunks);
+        excerpts = withTemporaryMaterialExcerpts(request, excerpts);
 
         // ===== 图片收集阶段：收集用户上传的图片 + 资料中的嵌入图片 =====
         List<LlmImage> images = new ArrayList<>(userImages(request));
@@ -428,6 +472,7 @@ public class RagService {
         String llmQuestion = thirdPartyLlmClient.isModelIdentityQuestion(request.question())
             ? request.question()
             : continuation == null ? questionWithContext : continuationQuestionWithHistory(questionWithContext, continuation);
+        ChatRequest fallbackRequest = request;
         // 调用第三方 LLM 生成回答；超长文档每次只生成一段，用户输入"继续"后再续写下一段。
         LlmCompletion rawCompletion = answerWithLongDocumentSupport(
             userId,
@@ -442,18 +487,21 @@ public class RagService {
         )
             .orElseGet(() -> new LlmCompletion(
                 generalChat
-                    ? buildGeneralFallbackAnswer(request.question())
-                    : buildCleanAnswer(request.question(), selectedChunks, request.answerStyle()),
+                    ? buildGeneralFallbackAnswer(fallbackRequest.question())
+                    : buildCleanAnswer(fallbackRequest.question(), selectedChunks, fallbackRequest.answerStyle()),
                 "local-rag-demo"
             ));
         // 计算 Token 消耗量（优先使用模型返回的实际值，否则估算）
         TokenUsage usage = completionUsage(rawCompletion, llmQuestion, rawCompletion.content());
         // ===== 后处理阶段：装饰回答（添加引用依据等） =====
         boolean longDocumentAnswer = longDocumentPlan(effectiveQuestion).parts() > 1;
+        String answerForStorage = longDocumentAnswer ? rawCompletion.content() : limitAnswerText(rawCompletion.content());
+        String decoratedContent = generalChat
+            ? decorateGeneralAnswer(answerForStorage)
+            : longDocumentAnswer ? decorateLongDocumentAnswer(answerForStorage) : decorateAnswer(request, answerForStorage, selectedChunks);
+        AnswerContinuation continuationMetadata = answerContinuationMetadata(decoratedContent);
         LlmCompletion completion = new LlmCompletion(
-            generalChat
-                ? decorateGeneralAnswer(rawCompletion.content())
-                : longDocumentAnswer ? decorateLongDocumentAnswer(rawCompletion.content()) : decorateAnswer(request, rawCompletion.content(), selectedChunks),
+            decoratedContent,
             rawCompletion.modelName(),
             usage.promptTokens(),
             usage.completionTokens(),
@@ -493,7 +541,9 @@ public class RagService {
             savedQuestion.getQuestionText(),
             savedQuestion.getAnswerText(),
             sourceEntities.stream().map(this::toSourceResponse).toList(),
-            savedQuestion.getCreatedAt() == null ? null : savedQuestion.getCreatedAt().format(DATETIME_FORMATTER)
+            savedQuestion.getCreatedAt() == null ? null : savedQuestion.getCreatedAt().format(DATETIME_FORMATTER),
+            continuationMetadata.continuable(),
+            continuationMetadata.hint()
         );
     }
 
@@ -543,7 +593,9 @@ public class RagService {
             savedQuestion.getQuestionText(),
             savedQuestion.getAnswerText(),
             List.of(),
-            savedQuestion.getCreatedAt() == null ? null : savedQuestion.getCreatedAt().format(DATETIME_FORMATTER)
+            savedQuestion.getCreatedAt() == null ? null : savedQuestion.getCreatedAt().format(DATETIME_FORMATTER),
+            false,
+            null
         );
     }
 
@@ -795,6 +847,73 @@ public class RagService {
         return "\n\n[本段已完成。输入“继续”生成第 " + (part + 1) + "/" + plan.parts() + " 部分。]";
     }
 
+    /**
+     * 限制普通单轮回答长度。
+     * <p>
+     * 超长文档模式本身已经按段生成；这里处理普通问答或模型异常长输出，避免浏览器、
+     * SSE 完成帧、历史列表和数据库记录被一次超大回答拖垮。
+     */
+    private String limitAnswerText(String answer) {
+        if (answer == null || answer.length() <= MAX_SINGLE_ANSWER_CHARS) {
+            return answer == null ? "" : answer;
+        }
+        return answer.substring(0, MAX_SINGLE_ANSWER_CHARS).trim() + ANSWER_LIMIT_CONTINUE_NOTICE;
+    }
+
+    /**
+     * 对流式增量实时套用普通回答上限。
+     * <p>
+     * LLM 客户端不一定支持中途取消生成，因此这里至少保证前端只接收可控长度的内容；
+     * 最终落库时还会再次调用 {@link #limitAnswerText(String)} 做兜底。
+     */
+    private String limitStreamDelta(
+        String delta,
+        boolean longDocumentAnswer,
+        AtomicInteger streamedAnswerChars,
+        AtomicBoolean streamedLimitNotice
+    ) {
+        if (delta == null || delta.isEmpty()) {
+            return "";
+        }
+        if (longDocumentAnswer) {
+            return delta;
+        }
+        int emitted = streamedAnswerChars.get();
+        if (emitted >= MAX_SINGLE_ANSWER_CHARS) {
+            if (streamedLimitNotice.compareAndSet(false, true)) {
+                return ANSWER_LIMIT_CONTINUE_NOTICE;
+            }
+            return "";
+        }
+        int remaining = MAX_SINGLE_ANSWER_CHARS - emitted;
+        if (delta.length() <= remaining) {
+            streamedAnswerChars.addAndGet(delta.length());
+            return delta;
+        }
+        streamedAnswerChars.set(MAX_SINGLE_ANSWER_CHARS);
+        String visible = delta.substring(0, remaining).trim();
+        if (streamedLimitNotice.compareAndSet(false, true)) {
+            return visible + ANSWER_LIMIT_CONTINUE_NOTICE;
+        }
+        return visible;
+    }
+
+    /** 从回答文本中提取是否可继续生成以及展示给前端的提示。 */
+    private AnswerContinuation answerContinuationMetadata(String answer) {
+        String value = answer == null ? "" : answer;
+        int start = value.lastIndexOf("[");
+        int end = value.lastIndexOf("]");
+        if (start < 0 || end <= start) {
+            return new AnswerContinuation(false, null);
+        }
+        String hint = value.substring(start + 1, end).trim();
+        boolean canContinue = hint.contains("输入“继续”")
+            || hint.contains("点击“继续生成”")
+            || hint.contains("输入\"继续\"")
+            || hint.contains("输入'继续'");
+        return new AnswerContinuation(canContinue, canContinue ? hint : null);
+    }
+
     /** 用户继续请求已经超过计划段数时，直接返回明确提示，避免模型无边界续写。 */
     private String longDocumentCompleteMessage(LongDocumentPlan plan) {
         return "这篇超长文档已经生成到计划末段（共 " + plan.parts() + " 部分）。如需扩写，请直接说明新的补充要求。";
@@ -914,9 +1033,23 @@ public class RagService {
      */
     @Transactional
     public RagStreamResult chatStream(long userId, ChatRequest request, java.util.function.Consumer<String> onChunk) {
+        return chatStream(userId, request, onChunk, status -> {});
+    }
+
+    @Transactional
+    public RagStreamResult chatStream(
+        long userId,
+        ChatRequest request,
+        java.util.function.Consumer<String> onChunk,
+        java.util.function.Consumer<Map<String, Object>> onStatus
+    ) {
         ensureChatUsageAvailable(userId);
         boolean generalChat = isGeneralChat(request);
         Long conversationId = resolveConversationId(userId, request.conversationId());
+        if (generalChat) {
+            request = withStoredTemporaryMaterial(userId, request);
+            request = withConversationTemporaryMaterial(userId, conversationId, request);
+        }
         if (thirdPartyLlmClient.isModelIdentityQuestion(request.question())) {
             return streamModelIdentity(userId, request, onChunk);
         }
@@ -926,6 +1059,7 @@ public class RagService {
 
         List<ScoredChunk> selectedChunks = selectContextChunks(userId, request, generalChat);
         List<String> excerpts = buildExcerpts(request, selectedChunks);
+        excerpts = withTemporaryMaterialExcerpts(request, excerpts);
 
         if (excerpts.isEmpty() && !generalChat && request.materialId() != null) {
             LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(request.materialId(), userId).orElse(null);
@@ -957,13 +1091,21 @@ public class RagService {
         boolean customModel = thirdPartyLlmClient.hasActiveUserConfig(userId);
         String modelName = thirdPartyLlmClient.effectiveModelName(userId);
         AtomicBoolean streamedAnyChunk = new AtomicBoolean(false);
+        boolean longDocumentAnswer = longDocumentPlan(effectiveQuestion).parts() > 1;
+        AtomicInteger streamedAnswerChars = new AtomicInteger(0);
+        AtomicBoolean streamedLimitNotice = new AtomicBoolean(false);
         java.util.function.Consumer<String> trackedChunk = delta -> {
-            if (delta != null && !delta.isEmpty()) {
+            String visibleDelta = limitStreamDelta(delta, longDocumentAnswer, streamedAnswerChars, streamedLimitNotice);
+            if (!visibleDelta.isEmpty()) {
                 streamedAnyChunk.set(true);
-                onChunk.accept(delta);
+                onChunk.accept(visibleDelta);
             }
         };
         String answerStyle = isHomeworkStyle(request.answerStyle()) ? request.answerStyle() : "STUDY";
+        onStatus.accept(Map.of(
+            "stage", "generating",
+            "message", "正在生成回答..."
+        ));
         LlmCompletion rawCompletion = answerWithLongDocumentSupport(
             userId,
             effectiveQuestion,
@@ -990,13 +1132,14 @@ public class RagService {
         }
         if (!streamedAnyChunk.get() && !answer.isBlank()) {
             // 部分兼容接口会一次性返回全文，这里补发小块以维持前端流式体验。
-            streamAnswerInSmallChunks(answer, onChunk);
+            streamAnswerInSmallChunks(longDocumentAnswer ? answer : limitAnswerText(answer), onChunk);
         }
 
-        boolean longDocumentAnswer = longDocumentPlan(effectiveQuestion).parts() > 1;
+        String answerForStorage = longDocumentAnswer ? answer : limitAnswerText(answer);
         String decoratedAnswer = generalChat
-            ? decorateGeneralAnswer(answer)
-            : longDocumentAnswer ? decorateLongDocumentAnswer(answer) : decorateAnswer(request, answer, selectedChunks);
+            ? decorateGeneralAnswer(answerForStorage)
+            : longDocumentAnswer ? decorateLongDocumentAnswer(answerForStorage) : decorateAnswer(request, answerForStorage, selectedChunks);
+        AnswerContinuation continuationMetadata = answerContinuationMetadata(decoratedAnswer);
 
         TokenUsage usage = estimateUsage(llmQuestion, answer);
         RagQuestionEntity savedQuestion = saveStreamResult(userId, request, conversationId, decoratedAnswer, selectedChunks, modelName, customModel, usage);
@@ -1014,7 +1157,14 @@ public class RagService {
             .map(this::toSourceResponse)
             .toList();
 
-        return new RagStreamResult(savedQuestion.getId(), savedQuestion.getConversationId(), decoratedAnswer, sources);
+        return new RagStreamResult(
+            savedQuestion.getId(),
+            savedQuestion.getConversationId(),
+            decoratedAnswer,
+            sources,
+            continuationMetadata.continuable(),
+            continuationMetadata.hint()
+        );
     }
 
     /**
@@ -1049,7 +1199,7 @@ public class RagService {
         );
         updateConversationMemory(userId, savedQuestion.getConversationId());
         recordUsageLog(userId, "RAG_CHAT_STREAM", savedQuestion.getId(), request, completion);
-        return new RagStreamResult(savedQuestion.getId(), savedQuestion.getConversationId(), completion.content(), List.of());
+        return new RagStreamResult(savedQuestion.getId(), savedQuestion.getConversationId(), completion.content(), List.of(), false, null);
     }
 
     /**
@@ -1259,23 +1409,42 @@ public class RagService {
      * 也不应该在历史消息里显示成可预览资料。</p>
      */
     private String questionTemporaryMaterialJson(ChatRequest request) {
-        ChatTemporaryMaterial material = request.temporaryMaterial();
+        ChatTemporaryMaterial material = compactTemporaryMaterialForHistory(request.temporaryMaterial());
+        if (!hasUsableTemporaryMaterial(material)) {
+            return null;
+        }
+        return writeJson(material);
+    }
+
+    /** 历史记录只保存临时资料引用和预览文本，完整正文从上下文表恢复。 */
+    private ChatTemporaryMaterial compactTemporaryMaterialForHistory(ChatTemporaryMaterial material) {
         if (material == null) {
             return null;
         }
+        List<ChatTemporaryMaterial> parts = material.parts() == null
+            ? List.of()
+            : material.parts().stream()
+                .map(this::compactTemporaryMaterialForHistory)
+                .filter(this::hasUsableTemporaryMaterial)
+                .toList();
         String text = material.text() == null ? "" : material.text().trim();
-        if (text.isBlank()) {
+        if (text.isBlank() && parts.isEmpty()) {
             return null;
         }
-        return writeJson(new ChatTemporaryMaterial(
+        String historyText = truncate(text, MAX_TEMPORARY_MATERIAL_HISTORY_TEXT_CHARS);
+        String historyExcerpt = material.excerpt() == null || material.excerpt().isBlank()
+            ? excerpt(historyText)
+            : material.excerpt();
+        return new ChatTemporaryMaterial(
             material.id(),
             material.title(),
             material.originalName(),
             material.sourceType(),
-            text,
-            material.excerpt(),
-            material.fileSize()
-        ));
+            historyText,
+            historyExcerpt,
+            material.fileSize(),
+            parts.isEmpty() ? null : parts
+        );
     }
 
     /**
@@ -1293,6 +1462,165 @@ public class RagService {
         } catch (Exception exception) {
             return null;
         }
+    }
+
+    /**
+     * 为通用问答恢复会话级临时资料上下文。
+     *
+     * <p>临时资料在产品语义上属于“当前对话”，不是“单轮问题”。如果后续轮次因为刷新、
+     * 历史恢复或前端状态压缩没有继续传 temporaryMaterial，后端会从同一 conversation
+     * 最近一次带附件的问答中恢复它，避免用户感觉“第二轮就忘了资料”。</p>
+     */
+    private ChatRequest withConversationTemporaryMaterial(long userId, Long conversationId, ChatRequest request) {
+        if (request == null || hasUsableTemporaryMaterial(request.temporaryMaterial()) || conversationId == null) {
+            return request;
+        }
+        ChatTemporaryMaterial restored = latestTemporaryMaterialInConversation(userId, conversationId).orElse(null);
+        if (!hasUsableTemporaryMaterial(restored)) {
+            return request;
+        }
+        return withTemporaryMaterial(request, restored);
+    }
+
+    /**
+     * 查询同一会话里最近一次可用的临时资料。
+     */
+    private Optional<ChatTemporaryMaterial> latestTemporaryMaterialInConversation(long userId, Long conversationId) {
+        if (conversationId == null) {
+            return Optional.empty();
+        }
+        List<RagQuestionEntity> questions = ragQuestionRepository.findByUserIdAndConversationIdOrderByCreatedAtAsc(userId, conversationId);
+        for (int index = questions.size() - 1; index >= 0; index--) {
+            ChatTemporaryMaterial material = readQuestionTemporaryMaterial(questions.get(index));
+            if (hasUsableTemporaryMaterial(material)) {
+                return Optional.of(resolveStoredTemporaryMaterial(userId, material));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * 判断临时资料是否有可注入模型的正文。
+     */
+    private boolean hasUsableTemporaryMaterial(ChatTemporaryMaterial material) {
+        if (material == null) {
+            return false;
+        }
+        if (material.text() != null && !material.text().isBlank()) {
+            return true;
+        }
+        return material.parts() != null && material.parts().stream().anyMatch(this::hasUsableTemporaryMaterial);
+    }
+
+    /** 如果请求里带的是临时资料引用，则在进入检索前恢复后端保存的完整正文。 */
+    private ChatRequest withStoredTemporaryMaterial(long userId, ChatRequest request) {
+        if (request == null || request.temporaryMaterial() == null) {
+            return request;
+        }
+        ChatTemporaryMaterial resolved = resolveStoredTemporaryMaterial(userId, request.temporaryMaterial());
+        if (!hasUsableTemporaryMaterial(resolved)) {
+            return request;
+        }
+        return withTemporaryMaterial(request, resolved);
+    }
+
+    /** 从临时资料上下文表恢复全文；没有命中时保留请求中已有的预览文本作为降级上下文。 */
+    private ChatTemporaryMaterial resolveStoredTemporaryMaterial(long userId, ChatTemporaryMaterial material) {
+        return resolveStoredTemporaryMaterial(userId, material, 0);
+    }
+
+    private ChatTemporaryMaterial resolveStoredTemporaryMaterial(long userId, ChatTemporaryMaterial material, int depth) {
+        if (material == null || depth > 4) {
+            return material;
+        }
+        List<ChatTemporaryMaterial> resolvedParts = material.parts() == null
+            ? List.of()
+            : material.parts().stream()
+                .map(part -> resolveStoredTemporaryMaterial(userId, part, depth + 1))
+                .filter(this::hasUsableTemporaryMaterial)
+                .toList();
+        if (!resolvedParts.isEmpty()) {
+            String mergedText = mergeTemporaryMaterialParts(resolvedParts);
+            return new ChatTemporaryMaterial(
+                material.id(),
+                material.title(),
+                material.originalName(),
+                material.sourceType() == null || material.sourceType().isBlank() ? "MULTI" : material.sourceType(),
+                mergedText,
+                material.excerpt() == null || material.excerpt().isBlank() ? excerpt(mergedText) : material.excerpt(),
+                material.fileSize(),
+                resolvedParts
+            );
+        }
+        String materialId = normalizeOptionalText(material.id());
+        if (materialId == null) {
+            return material;
+        }
+        Optional<TemporaryMaterialContextEntity> context = temporaryMaterialContextRepository.findByIdAndOwnerId(materialId, userId);
+        if (context.isEmpty()) {
+            return material;
+        }
+        TemporaryMaterialContextEntity stored = context.get();
+        String text = stored.getText() == null ? "" : stored.getText();
+        return new ChatTemporaryMaterial(
+            stored.getId(),
+            firstNonBlank(stored.getTitle(), material.title(), stored.getOriginalName(), material.originalName()),
+            firstNonBlank(stored.getOriginalName(), material.originalName(), stored.getTitle(), material.title()),
+            firstNonBlank(stored.getSourceType(), material.sourceType()),
+            text,
+            firstNonBlank(stored.getExcerpt(), material.excerpt(), excerpt(text)),
+            stored.getFileSize() == null ? material.fileSize() : stored.getFileSize(),
+            null
+        );
+    }
+
+    /** 把多文件临时资料合并为一段可检索文本，同时保留每个文件的标题边界。 */
+    private String mergeTemporaryMaterialParts(List<ChatTemporaryMaterial> parts) {
+        List<String> texts = new ArrayList<>();
+        for (int index = 0; index < parts.size(); index++) {
+            ChatTemporaryMaterial part = parts.get(index);
+            if (part == null || part.text() == null || part.text().isBlank()) {
+                continue;
+            }
+            String title = firstNonBlank(part.title(), part.originalName(), "临时资料 " + (index + 1));
+            String type = firstNonBlank(part.sourceType(), "UNKNOWN");
+            texts.add("[临时资料 " + (index + 1) + "] " + title
+                + "\n类型：" + type
+                + "\n\n" + part.text());
+        }
+        return String.join("\n\n---\n\n", texts);
+    }
+
+    /** 替换请求里的临时资料对象，保持其他聊天参数不变。 */
+    private ChatRequest withTemporaryMaterial(ChatRequest request, ChatTemporaryMaterial material) {
+        return new ChatRequest(
+            request.question(),
+            request.materialId(),
+            request.mode(),
+            request.chunkId(),
+            request.currentPageNo(),
+            request.currentPageChunkIds(),
+            request.selectedText(),
+            request.images(),
+            material,
+            request.answerStyle(),
+            request.history(),
+            request.conversationId()
+        );
+    }
+
+    /** 返回第一个非空白字符串。 */
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            String normalized = normalizeOptionalText(value);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+        return null;
     }
 
     // ========== 检索阶段：上下文片段选择（RAG 核心） ==========
@@ -1451,7 +1779,7 @@ public class RagService {
         List<LearningMaterialEntity> materials = retrievalScopeMaterials(userId, materialId);
         List<ScoredChunk> seeds = new ArrayList<>();
         for (LearningMaterialEntity material : materials) {
-            if (material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+            if (!isMaterialReadyForRetrieval(material)) {
                 continue;
             }
             List<MaterialSummaryEntity> summaries = materialSummaryRepository.findByMaterialIdAndUserIdOrderByCreatedAtDesc(material.getId(), userId);
@@ -1559,11 +1887,25 @@ public class RagService {
     private List<LearningMaterialEntity> retrievalScopeMaterials(long userId, Long materialId) {
         return materialId == null
             ? learningMaterialRepository.findByOwnerIdOrderByCreatedAtDesc(userId).stream()
-                .filter(material -> material.getParseStatus() == MaterialParseStatus.SUCCESS)
+                .filter(material -> isMaterialReadyForRetrieval(material))
                 .toList()
             : learningMaterialRepository.findByIdAndOwnerId(materialId, userId).stream()
-                .filter(material -> material.getParseStatus() == MaterialParseStatus.SUCCESS)
+                .filter(material -> isMaterialReadyForRetrieval(material))
                 .toList();
+    }
+
+    /**
+     * 判断资料是否可以进入 RAG 检索。
+     *
+     * <p>新流水线允许 PARTIAL 资料先问答，因此这里不能只依赖旧 parseStatus。
+     * 只要文本层已经 READY 或 PARTIAL，且存在 chunk，BM25 检索就可以使用。</p>
+     */
+    private boolean isMaterialReadyForRetrieval(LearningMaterialEntity material) {
+        if (material == null) {
+            return false;
+        }
+        MaterialTextStatus textStatus = material.getTextStatus();
+        return textStatus == MaterialTextStatus.READY || textStatus == MaterialTextStatus.PARTIAL;
     }
 
     private String retrievalCacheKey(long userId, Long materialId, String question, List<LearningMaterialEntity> materials) {
@@ -1594,7 +1936,7 @@ public class RagService {
                 return null;
             }
             LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(chunk.getMaterialId(), userId).orElse(null);
-            if (material == null || material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+            if (material == null || !isMaterialReadyForRetrieval(material)) {
                 // 资料归属或解析状态变化时，缓存结果不再可信。
                 retrievalResultCache.remove(cacheKey);
                 return null;
@@ -1858,7 +2200,7 @@ public class RagService {
         }
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
             .orElse(null);
-        if (material == null || material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+        if (material == null || !isMaterialReadyForRetrieval(material)) {
             return List.of();
         }
         List<String> normalizedTerms = query.terms().stream()
@@ -2251,7 +2593,7 @@ public class RagService {
         }
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
             .orElse(null);
-        if (material == null || material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+        if (material == null || !isMaterialReadyForRetrieval(material)) {
             return List.of();
         }
         List<MaterialChunkEntity> chunks = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId()).stream()
@@ -2292,7 +2634,7 @@ public class RagService {
         }
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(request.materialId(), userId)
             .orElse(null);
-        if (material == null || material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+        if (material == null || !isMaterialReadyForRetrieval(material)) {
             return List.of();
         }
         List<MaterialChunkEntity> allChunks = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId());
@@ -2362,6 +2704,152 @@ public class RagService {
             excerpts.add(sourceContext(selectedChunks.get(i), label));
         }
         return excerpts;
+    }
+
+    /**
+     * 将智能问答临时资料加入上下文。
+     *
+     * <p>临时资料不进入资料管理，也没有长期向量索引；这里在单次请求内把全文切成小片段，
+     * 再按用户问题做 BM25 检索。这样大一点的临时文件不会只把前 16000 字塞给模型，
+     * 问到文档后半部分的关键词时也能召回尾部片段。</p>
+     */
+    private List<String> withTemporaryMaterialExcerpts(ChatRequest request, List<String> baseExcerpts) {
+        List<String> temporaryExcerpts = temporaryMaterialExcerpts(request);
+        if (temporaryExcerpts.isEmpty()) {
+            return baseExcerpts;
+        }
+        List<String> merged = new ArrayList<>(temporaryExcerpts.size() + baseExcerpts.size());
+        merged.addAll(temporaryExcerpts);
+        merged.addAll(baseExcerpts);
+        return limitTemporaryMergedExcerpts(merged);
+    }
+
+    /**
+     * 从临时资料全文中检索当前问题最相关的片段。
+     *
+     * <p>如果问题没有明显关键词，则保留开头和结尾各一段；如果用户问"最后/后面/结尾"，
+     * 即使 BM25 没有命中，也强制补入最后一段，避免回答永远偏向文档开头。</p>
+     */
+    private List<String> temporaryMaterialExcerpts(ChatRequest request) {
+        ChatTemporaryMaterial material = request.temporaryMaterial();
+        if (material == null || material.text() == null || material.text().isBlank()) {
+            return List.of();
+        }
+        List<TemporaryContextChunk> chunks = splitTemporaryMaterial(material.text());
+        if (chunks.isEmpty()) {
+            return List.of();
+        }
+        Bm25Scorer scorer = new Bm25Scorer(chunks.stream()
+            .map(chunk -> new Bm25Scorer.ChunkData(chunk.id(), chunk.text()))
+            .toList());
+        Set<String> queryTokens = scorer.tokenize(rewriteQuestionForRetrieval(request.question(), request.history()));
+        List<TemporaryContextChunk> ranked = chunks.stream()
+            .map(chunk -> chunk.withScore(scorer.score(queryTokens, chunk.id())))
+            .filter(chunk -> chunk.score() > 0.0)
+            .sorted(Comparator.comparingDouble(TemporaryContextChunk::score).reversed())
+            .limit(MAX_TEMPORARY_MATERIAL_EXCERPTS)
+            .collect(Collectors.toCollection(ArrayList::new));
+        if (ranked.isEmpty()) {
+            ranked.add(chunks.get(0).withScore(0.2));
+            if (chunks.size() > 1) {
+                ranked.add(chunks.get(chunks.size() - 1).withScore(0.15));
+            }
+        }
+        if (asksTemporaryMaterialTail(request.question())) {
+            TemporaryContextChunk tail = chunks.get(chunks.size() - 1).withScore(1.0);
+            boolean alreadySelected = ranked.stream().anyMatch(chunk -> chunk.id() == tail.id());
+            if (!alreadySelected) {
+                ranked.add(0, tail);
+            }
+        }
+        return ranked.stream()
+            .limit(MAX_TEMPORARY_MATERIAL_EXCERPTS)
+            .map(chunk -> temporarySourceContext(material, chunk))
+            .toList();
+    }
+
+    /**
+     * 将临时资料切成带重叠的小片段。
+     *
+     * <p>切片只在内存中存在，不写数据库；ID 使用片段序号，供 BM25 在本次请求内打分。</p>
+     */
+    private List<TemporaryContextChunk> splitTemporaryMaterial(String text) {
+        String normalized = cleanExcerptText(text);
+        if (normalized.isBlank()) {
+            return List.of();
+        }
+        List<TemporaryContextChunk> chunks = new ArrayList<>();
+        int index = 0;
+        int cursor = 0;
+        while (cursor < normalized.length()) {
+            int end = Math.min(normalized.length(), cursor + TEMPORARY_MATERIAL_CHUNK_CHARS);
+            if (end < normalized.length()) {
+                int sentenceEnd = findTemporaryChunkBoundary(normalized, cursor, end);
+                if (sentenceEnd > cursor + TEMPORARY_MATERIAL_CHUNK_CHARS / 2) {
+                    end = sentenceEnd;
+                }
+            }
+            String chunkText = normalized.substring(cursor, end).trim();
+            if (!chunkText.isBlank()) {
+                chunks.add(new TemporaryContextChunk(index + 1L, index, chunkText, 0.0));
+                index++;
+            }
+            if (end >= normalized.length()) {
+                break;
+            }
+            cursor = Math.max(end - TEMPORARY_MATERIAL_CHUNK_OVERLAP, cursor + 1);
+        }
+        return chunks;
+    }
+
+    /** 在目标长度附近向前寻找句子边界，减少把一句话切成两半的概率。 */
+    private int findTemporaryChunkBoundary(String text, int start, int preferredEnd) {
+        int lowerBound = start + TEMPORARY_MATERIAL_CHUNK_CHARS / 2;
+        for (int i = preferredEnd; i > lowerBound; i--) {
+            char c = text.charAt(i - 1);
+            if (c == '\n' || c == '。' || c == '！' || c == '？' || c == ';' || c == '；' || c == '.') {
+                return i;
+            }
+        }
+        return preferredEnd;
+    }
+
+    /** 临时资料检索片段转为 LLM 上下文文本。 */
+    private String temporarySourceContext(ChatTemporaryMaterial material, TemporaryContextChunk chunk) {
+        String title = normalizeOptionalText(material.title());
+        if (title == null) {
+            title = normalizeOptionalText(material.originalName());
+        }
+        if (title == null) {
+            title = "临时资料";
+        }
+        String type = normalizeOptionalText(material.sourceType());
+        return "[临时资料片段]《" + title + "》/"
+            + (type == null ? "UNKNOWN" : type)
+            + "/片段 " + (chunk.index() + 1)
+            + "\n[片段内容]\n原文：" + truncate(chunk.text(), 2_400);
+    }
+
+    /** 限制临时资料和资料片段合并后的总上下文长度。 */
+    private List<String> limitTemporaryMergedExcerpts(List<String> excerpts) {
+        List<String> limited = new ArrayList<>();
+        int totalChars = 0;
+        for (String excerpt : excerpts) {
+            if (excerpt == null || excerpt.isBlank()) {
+                continue;
+            }
+            if (!limited.isEmpty() && totalChars + excerpt.length() > MAX_TEMPORARY_MATERIAL_CONTEXT_CHARS) {
+                break;
+            }
+            limited.add(excerpt);
+            totalChars += excerpt.length();
+        }
+        return limited;
+    }
+
+    /** 判断用户是否明确询问临时资料尾部内容。 */
+    private boolean asksTemporaryMaterialTail(String question) {
+        return question != null && TEMPORARY_MATERIAL_TAIL_QUESTION_PATTERN.matcher(question).find();
     }
 
     /**
@@ -2951,7 +3439,7 @@ public class RagService {
         }
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
             .orElseThrow(() -> new BusinessException(404, "material not found"));
-        if (material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+        if (!isMaterialReadyForRetrieval(material)) {
             throw new BusinessException(400, "material has not been parsed successfully");
         }
     }
@@ -3448,7 +3936,7 @@ public class RagService {
     public RagSummaryResponse summarize(long userId, SummarizeRequest request) {
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(request.materialId(), userId)
             .orElseThrow(() -> new BusinessException(404, "material not found"));
-        if (material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+        if (!isMaterialReadyForRetrieval(material)) {
             throw new BusinessException(400, "material has not been parsed successfully");
         }
 
@@ -4683,7 +5171,7 @@ public class RagService {
         List<Bm25Scorer.ChunkData> allChunkData = new ArrayList<>();
         List<MaterialChunks> validMaterialChunks = new ArrayList<>();
         for (LearningMaterialEntity material : materials) {
-            if (material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+            if (!isMaterialReadyForRetrieval(material)) {
                 continue;
             }
             List<MaterialChunkEntity> chunks = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId());
@@ -4785,7 +5273,7 @@ public class RagService {
 
         List<ScoredChunk> scoredChunks = new ArrayList<>();
         for (LearningMaterialEntity material : materials) {
-            if (material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+            if (!isMaterialReadyForRetrieval(material)) {
                 continue;
             }
             for (MaterialChunkEntity chunk : materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId())) {
@@ -4828,7 +5316,7 @@ public class RagService {
         for (VectorSearchResult result : results) {
             LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(result.materialId(), userId)
                 .orElse(null);
-            if (material == null || material.getParseStatus() != MaterialParseStatus.SUCCESS) {
+            if (material == null || !isMaterialReadyForRetrieval(material)) {
                 continue;
             }
             MaterialChunkEntity chunk = materialChunkRepository.findById(result.chunkId()).orElse(null);
@@ -5387,8 +5875,19 @@ public class RagService {
     ) {
     }
 
+    /** 回答是否支持继续生成，以及给前端展示的提示文本。 */
+    private record AnswerContinuation(boolean continuable, String hint) {
+    }
+
     /** 缓存中的片段记录：仅保存 chunkId 和分数（不持有实体引用，避免内存泄漏） */
     private record CachedScoredChunk(Long chunkId, double score, List<String> highlightTerms) {
+    }
+
+    /** 临时资料的内存检索片段，仅在单次问答请求内使用。 */
+    private record TemporaryContextChunk(long id, int index, String text, double score) {
+        private TemporaryContextChunk withScore(double nextScore) {
+            return new TemporaryContextChunk(id, index, text, nextScore);
+        }
     }
 
     /** 关键词覆盖率结果：包含覆盖率分数和缺失的关键词列表 */

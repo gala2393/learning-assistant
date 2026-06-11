@@ -435,6 +435,9 @@ export function HistoryPage() {
         <DialogContent className="max-w-lg max-h-[80vh] overflow-auto">
           <DialogHeader>
             <DialogTitle className="text-base">问答详情</DialogTitle>
+            <DialogDescription>
+              查看这条历史记录的问题、回答内容和创建时间。
+            </DialogDescription>
           </DialogHeader>
           {viewTarget && (
             <div className="space-y-3">

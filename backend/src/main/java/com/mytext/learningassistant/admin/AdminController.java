@@ -1,13 +1,26 @@
 package com.mytext.learningassistant.admin;
 
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+
 import com.mytext.learningassistant.common.ApiResponse;
 import com.mytext.learningassistant.common.PageResponse;
+import com.mytext.learningassistant.material.MaterialService;
+import com.mytext.learningassistant.vector.VectorStoreClient;
+import com.mytext.learningassistant.vector.VectorStoreProperties;
 
 import jakarta.validation.Valid;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestAttribute;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -34,14 +47,37 @@ public class AdminController {
 
     /** 管理员业务服务，处理具体的业务逻辑 */
     private final AdminService adminService;
+    private final MaterialService materialService;
+    private final VectorStoreClient vectorStoreClient;
+    private final VectorStoreProperties vectorStoreProperties;
+    private final boolean ocrEnabled;
+    private final String ocrCommand;
+    private final boolean converterEnabled;
+    private final String converterCommand;
 
     /**
      * 构造方法，通过 Spring 依赖注入 AdminService。
      *
      * @param adminService 管理员业务服务
      */
-    public AdminController(AdminService adminService) {
+    public AdminController(
+        AdminService adminService,
+        MaterialService materialService,
+        VectorStoreClient vectorStoreClient,
+        VectorStoreProperties vectorStoreProperties,
+        @Value("${app.ocr.enabled:false}") boolean ocrEnabled,
+        @Value("${app.ocr.command:tesseract}") String ocrCommand,
+        @Value("${app.document-preview.converter.enabled:true}") boolean converterEnabled,
+        @Value("${app.document-preview.converter.command:soffice}") String converterCommand
+    ) {
         this.adminService = adminService;
+        this.materialService = materialService;
+        this.vectorStoreClient = vectorStoreClient;
+        this.vectorStoreProperties = vectorStoreProperties;
+        this.ocrEnabled = ocrEnabled;
+        this.ocrCommand = ocrCommand == null || ocrCommand.isBlank() ? "tesseract" : ocrCommand.trim();
+        this.converterEnabled = converterEnabled;
+        this.converterCommand = converterCommand == null || converterCommand.isBlank() ? "soffice" : converterCommand.trim();
     }
 
     /**
@@ -56,6 +92,79 @@ public class AdminController {
     @GetMapping("/stats")
     public ApiResponse<AdminStatsResponse> stats(@RequestAttribute("currentUserId") long currentUserId) {
         return ApiResponse.ok(adminService.stats(currentUserId));
+    }
+
+    @GetMapping("/system/dependencies")
+    public ApiResponse<List<SystemDependencyResponse>> dependencies(@RequestAttribute("currentUserId") long currentUserId) {
+        adminService.requireAdminUser(currentUserId);
+        List<SystemDependencyResponse> dependencies = new ArrayList<>();
+        dependencies.add(checkCommand("pdfinfo", true, "pdfinfo"));
+        dependencies.add(checkCommand("pdftotext", true, "pdftotext"));
+        dependencies.add(checkCommand("pdftoppm", true, "pdftoppm"));
+        dependencies.add(checkCommand("LibreOffice", converterEnabled, converterCommand));
+        dependencies.add(checkCommand("Tesseract OCR", ocrEnabled, ocrCommand));
+        dependencies.add(checkQdrant());
+        return ApiResponse.ok(dependencies);
+    }
+
+    private SystemDependencyResponse checkCommand(String name, boolean enabled, String command) {
+        if (!enabled) {
+            return new SystemDependencyResponse(name, false, false, "配置未启用");
+        }
+        try {
+            Process process = new ProcessBuilder(command, "--version")
+                .redirectErrorStream(true)
+                .start();
+            boolean finished = process.waitFor(Duration.ofSeconds(3).toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return new SystemDependencyResponse(name, true, false, "命令超时：" + command);
+            }
+            return new SystemDependencyResponse(
+                name,
+                true,
+                process.exitValue() == 0,
+                process.exitValue() == 0 ? "可用：" + command : "命令返回非 0：" + command
+            );
+        } catch (Exception exception) {
+            return new SystemDependencyResponse(name, true, false, "命令不可用：" + command);
+        }
+    }
+
+    private SystemDependencyResponse checkQdrant() {
+        if (!vectorStoreClient.configured()) {
+            return new SystemDependencyResponse(
+                "Qdrant",
+                false,
+                false,
+                "向量库未启用或未配置，系统将只使用 MySQL embedding 和 BM25"
+            );
+        }
+        try {
+            String baseUrl = vectorStoreProperties.baseUrl();
+            while (baseUrl.endsWith("/")) {
+                baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+            }
+            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(URI.create(baseUrl + "/healthz"))
+                .timeout(Duration.ofSeconds(3))
+                .GET();
+            if (!vectorStoreProperties.apiKey().isBlank()) {
+                requestBuilder.header("api-key", vectorStoreProperties.apiKey());
+            }
+            HttpResponse<String> response = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(2))
+                .build()
+                .send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString());
+            boolean healthy = response.statusCode() >= 200 && response.statusCode() < 300;
+            return new SystemDependencyResponse(
+                "Qdrant",
+                true,
+                healthy,
+                healthy ? "可用：" + baseUrl : "Qdrant 返回状态码：" + response.statusCode()
+            );
+        } catch (Exception exception) {
+            return new SystemDependencyResponse("Qdrant", true, false, "Qdrant 无法访问：" + vectorStoreProperties.baseUrl());
+        }
     }
 
     /**
@@ -165,6 +274,30 @@ public class AdminController {
             request.parseStatus(),
             request.summaryStatus()
         ));
+    }
+
+    /**
+     * 管理员手动提交 Qdrant 向量索引重建任务。
+     * <p>
+     * 该接口不会重新上传、重新切片或重新 OCR，只会读取数据库中已有的资料片段，
+     * 补齐缺失 Embedding，并异步写入 Qdrant。适合在首次启用 Qdrant 后对历史资料做回填。
+     * </p>
+     *
+     * @param currentUserId 当前登录管理员的用户 ID
+     * @param materialId    可选资料 ID；不传则提交所有已解析资料
+     * @return 已提交后台任务数量
+     */
+    @PostMapping("/materials/vector-index/rebuild")
+    public ApiResponse<AdminVectorIndexRebuildResponse> rebuildVectorIndex(
+        @RequestAttribute("currentUserId") long currentUserId,
+        @RequestParam(value = "materialId", required = false) Long materialId
+    ) {
+        adminService.requireAdminUser(currentUserId);
+        int submitted = materialService.rebuildVectorIndexesForAdmin(materialId);
+        String message = submitted == 0
+            ? "没有可重建的已解析资料"
+            : "已提交 " + submitted + " 个向量索引重建任务，后台会分批写入 Qdrant";
+        return ApiResponse.ok(new AdminVectorIndexRebuildResponse(submitted, materialId, message));
     }
 
     /**

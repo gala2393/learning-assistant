@@ -14,7 +14,7 @@ import jakarta.persistence.Table;
  * 资料页面文本层块实体。
  *
  * <p>阅读器需要把可选中文本直接覆盖在页面视觉层上，而不是在页面下方再放一份解析正文。
- * 这个实体保存每个页面上的文本和坐标，MinerU 可写入精确 bbox；旧解析器没有坐标时会写入
+ * 这个实体保存每个页面上的文本和坐标；内置解析器没有坐标时会写入
  * 归一化的整页文本块，前端仍可作为兜底文本层使用。
  */
 @Entity
@@ -46,7 +46,7 @@ public class MaterialPageTextBlockEntity {
     @Column(name = "block_type", length = 40)
     private String blockType;
 
-    /** 坐标来源，例如 MINERU、PDFBOX、LEGACY */
+    /** 坐标来源，例如 PDFBOX、OCR、LEGACY */
     @Column(name = "source", length = 40)
     private String source;
 
@@ -78,7 +78,7 @@ public class MaterialPageTextBlockEntity {
     @Column(name = "bbox_height")
     private Double bboxHeight;
 
-    /** 识别置信度，MinerU/OCR 可填；旧解析器为空 */
+    /** 识别置信度，OCR 可填；旧解析器为空 */
     @Column(name = "confidence")
     private Double confidence;
 

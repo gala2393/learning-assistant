@@ -3,6 +3,7 @@ services:
     image: qdrant/qdrant:v1.12.6
     container_name: learning-assistant-qdrant
     restart: unless-stopped
+    # 本地开发暴露 REST 和 gRPC 端口；服务器部署时建议只在内网或 Docker 网络内访问。
     ports:
       - "6333:6333"
       - "6334:6334"

@@ -60,15 +60,19 @@ type CaptchaState = {
 const REMEMBERED_LOGIN_KEY = 'learning-assistant.remembered-login'
 
 function loadRememberedLogin() {
-  if (typeof window === 'undefined') return { username: '', password: '', remember: true }
+  if (typeof window === 'undefined') return { username: '', remember: true }
   try {
     const raw = localStorage.getItem(REMEMBERED_LOGIN_KEY)
-    if (!raw) return { username: '', password: '', remember: true }
+    if (!raw) return { username: '', remember: true }
     const saved = JSON.parse(raw) as { username?: string; password?: string }
-    return { username: saved.username || '', password: saved.password || '', remember: true }
+    // 旧版本曾把密码写入本地存储；读取时主动清理，只保留用户名。
+    if (saved.password) {
+      localStorage.setItem(REMEMBERED_LOGIN_KEY, JSON.stringify({ username: saved.username || '' }))
+    }
+    return { username: saved.username || '', remember: true }
   } catch {
     localStorage.removeItem(REMEMBERED_LOGIN_KEY)
-    return { username: '', password: '', remember: true }
+    return { username: '', remember: true }
   }
 }
 
@@ -95,7 +99,7 @@ export function LoginForm() {
   // 密码登录表单实例
   const passwordForm = useForm<PasswordLoginValues>({
     resolver: zodResolver(passwordLoginSchema),
-    defaultValues: { username: rememberedLogin.username, password: rememberedLogin.password, captchaCode: '' },
+    defaultValues: { username: rememberedLogin.username, password: '', captchaCode: '' },
   })
 
   // 验证码登录表单实例
@@ -152,7 +156,6 @@ export function LoginForm() {
     }
     localStorage.setItem(REMEMBERED_LOGIN_KEY, JSON.stringify({
       username: data.username,
-      password: data.password,
     }))
   }
 

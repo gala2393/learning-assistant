@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * RAG 问答来源数据访问接口 —— 提供对 {@link RagQuestionSourceEntity} 的数据库操作。
@@ -35,6 +36,7 @@ public interface RagQuestionSourceRepository extends JpaRepository<RagQuestionSo
      *
      * @param questionId 问答记录 ID
      */
+    @Transactional
     void deleteByQuestionId(Long questionId);
 
     /**
@@ -42,7 +44,11 @@ public interface RagQuestionSourceRepository extends JpaRepository<RagQuestionSo
      *
      * @param materialId 资料 ID
      */
-    void deleteByMaterialId(Long materialId);
+    /** 批量删除资料关联来源，避免删除资料时逐条加载问答来源实体。 */
+    @Modifying
+    @Query("delete from RagQuestionSourceEntity source where source.materialId = :materialId")
+    @Transactional
+    void deleteByMaterialId(@Param("materialId") Long materialId);
 
     /**
      * 批量删除多个问答 ID 对应的来源记录。
@@ -51,5 +57,6 @@ public interface RagQuestionSourceRepository extends JpaRepository<RagQuestionSo
      */
     @Modifying
     @Query("delete from RagQuestionSourceEntity source where source.questionId in :questionIds")
+    @Transactional
     void deleteByQuestionIdIn(@Param("questionIds") List<Long> questionIds);
 }

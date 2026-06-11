@@ -1,5 +1,7 @@
 package com.mytext.learningassistant.material;
 
+import java.util.List;
+
 /**
  * 分片上传会话响应记录。
  *
@@ -17,6 +19,7 @@ package com.mytext.learningassistant.material;
  * @param chunkSize            每个分片大小（字节）
  * @param totalChunks          总分片数
  * @param uploadedChunks       已上传分片数
+ * @param uploadedChunkIndexes 已上传分片索引，前端用于精确断点续传
  * @param status               会话状态（UPLOADING / PROCESSING / SUCCESS / FAILED）
  * @param errorMessage         失败时的错误信息
  * @param parseProgressPercent 解析进度百分比（0 ~ 100）
@@ -37,11 +40,21 @@ public record MaterialUploadSessionResponse(
     Integer chunkSize,
     Integer totalChunks,
     Integer uploadedChunks,
+    List<Integer> uploadedChunkIndexes,
     String status,
     String errorMessage,
     Integer parseProgressPercent,
     String parseStage,
     String parseMessage,
+    String uploadStatus,
+    String textStatus,
+    String indexStatus,
+    String ocrStatus,
+    Integer processingProgressPercent,
+    String processingStage,
+    String processingMessage,
+    Integer indexedChunkCount,
+    Integer textPageCount,
     String createdAt,
     String updatedAt
 ) {
