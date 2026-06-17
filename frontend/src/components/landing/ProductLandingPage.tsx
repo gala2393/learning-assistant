@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
+import { SiteBeianFooter } from '@/components/layout/SiteBeianFooter'
 import {
   ArrowLeft,
   ArrowRight,
@@ -1033,6 +1034,8 @@ export function ProductLandingPage() {
           </div>
         </div>
       </section>
+
+      <SiteBeianFooter />
     </main>
   )
 }
