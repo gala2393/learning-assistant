@@ -6,19 +6,17 @@ Live site: [https://learnstudy.cloud](https://learnstudy.cloud)
 
 Learning Assistant is a full-stack study platform for managing learning materials, reading documents, and asking AI-powered questions. It supports PDF, scanned PDF, Word, PowerPoint, TXT, Markdown, and HTML materials, with document reading, material-based Q&A, temporary file context, RAG retrieval, streaming answers, answer interruption, favorites, history, summaries, and an admin console.
 
-The project is built with Spring Boot, React, MySQL, Redis, Qdrant, Nginx, and Docker Compose.
+This README focuses only on local setup so first-time users can install, configure, start, and troubleshoot the project quickly.
 
 ## Features
 
-- Account system: registration, login, password reset, profile, avatar, password update.
-- Admin console: user management, material management, usage records, logs, RAG evaluation, dependency checks.
-- Material management: upload, chunked upload, parsing status, listing, details, deletion, reparse, index rebuild.
-- Document parsing: PDF, scanned PDF, Word, PowerPoint, TXT, Markdown, HTML.
-- Scanned PDFs: preview pages first, run OCR in small background batches to avoid blocking large files.
-- Reader: PDF page preview, basic TXT/Word layout, continue reading, ask while reading, source navigation.
-- AI chat: general chat, material chat, temporary material context, image questions, streaming output, pause output.
-- RAG: keyword retrieval, vector retrieval, hybrid retrieval, rerank, Qdrant vector store, historical index rebuild.
-- Usability improvements: realistic input truncation, cached material page images, multi-turn temporary material context.
+- Account system: registration, login, password reset, profile, avatar, and password update.
+- Material management: upload, chunked upload, parsing status, list, details, deletion, reparse, and index rebuild.
+- Document parsing: PDF, scanned PDF, Word, PowerPoint, TXT, Markdown, and HTML.
+- Reader: PDF page preview, basic TXT/Word layout, continue reading, ask while reading, and source navigation.
+- AI chat: general chat, material chat, temporary material context, image questions, streaming output, and pause output.
+- RAG: keyword retrieval, vector retrieval, hybrid retrieval, rerank, and Qdrant vector store.
+- Admin console: user management, material management, usage records, system logs, RAG evaluation, and dependency checks.
 
 ## Tech Stack
 
@@ -27,7 +25,6 @@ The project is built with Spring Boot, React, MySQL, Redis, Qdrant, Nginx, and D
 - UI: Tailwind CSS, Radix UI, Lucide Icons, Framer Motion
 - Document processing: PDFBox, Poppler, Tesseract OCR, LibreOffice, Ghostscript
 - Retrieval: BM25, Embedding, Qdrant, rerank
-- Deployment: Docker Compose, Nginx, Docker volumes
 
 ## Project Structure
 
@@ -35,14 +32,12 @@ The project is built with Spring Boot, React, MySQL, Redis, Qdrant, Nginx, and D
 learning-assistant/
 ├── backend/                 # Spring Boot backend
 ├── frontend/                # React + Vite frontend
-├── deploy/                  # Deployment environment templates
-├── docker-compose.yml       # Full Docker Compose deployment
-├── DOCKER_DEPLOY.md         # Additional Docker deployment notes
 ├── 更新说明.md              # Release notes in Chinese
+├── README.en.md             # English README
 └── README.md
 ```
 
-## Local Development
+## Local Requirements
 
 Required:
 
@@ -51,14 +46,18 @@ Required:
 - Node.js 20 or newer
 - MySQL 8
 
-Recommended:
+Recommended later as needed:
 
-- Redis 7 for captcha, rate limiting, and short-lived state
-- Qdrant for vector retrieval
-- Tesseract OCR for scanned PDFs
-- Poppler for PDF page rendering
-- LibreOffice for Word/PPT preview conversion
-- Ghostscript for large PDF compression
+- Redis 7 for captcha, rate limiting, and short-lived state.
+- Qdrant for vector retrieval.
+- Tesseract OCR for scanned PDFs.
+- Poppler for PDF page rendering.
+- LibreOffice for Word/PPT preview conversion.
+- Ghostscript for large PDF compression.
+
+For the first local run, Git, Java, Node.js, and MySQL are enough. AI, OCR, vector search, and Office preview can be enabled later.
+
+## Local Setup
 
 ### 1. Clone
 
@@ -75,7 +74,7 @@ CREATE DATABASE learning_assistant
   DEFAULT COLLATE utf8mb4_unicode_ci;
 ```
 
-Flyway migrations under `backend/src/main/resources/db/migration` will run automatically when the backend starts.
+Flyway migrations under `backend/src/main/resources/db/migration` run automatically when the backend starts.
 
 ### 3. Configure Backend
 
@@ -126,9 +125,10 @@ PDF_COMPRESSION_ENABLED=false
 
 Notes:
 
-- `LLM_ENABLED=false` is useful for first-time bootstrapping. Real AI answers require `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
+- `LLM_ENABLED=false` uses a limited local fallback, which is useful for first-time setup.
+- Real AI answers require `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
 - Vector retrieval requires an embedding service and Qdrant.
-- After the initial admin account is created, set `APP_ADMIN_BOOTSTRAP_ENABLED=false` in production.
+- `APP_ADMIN_BOOTSTRAP_ENABLED=true` creates the initial admin account. After that account is created, change it to `false`.
 
 ### 4. Start Backend
 
@@ -152,7 +152,15 @@ Health check:
 http://127.0.0.1:8080/api/health
 ```
 
-### 5. Configure and Start Frontend
+Expected response:
+
+```json
+{"status":"ok","service":"智学引擎"}
+```
+
+### 5. Configure Frontend
+
+Open a new terminal:
 
 ```bash
 cd frontend
@@ -166,15 +174,16 @@ cd frontend
 Copy-Item .env.example .env.local
 ```
 
-Set:
+Confirm `frontend/.env.local` contains:
 
 ```env
 VITE_API_BASE=http://localhost:8080/api
 ```
 
-Install dependencies and start:
+### 6. Start Frontend
 
 ```bash
+cd frontend
 npm install
 npm run dev -- --host 127.0.0.1 --port 5174
 ```
@@ -185,34 +194,26 @@ Open:
 http://127.0.0.1:5174
 ```
 
-## Docker Compose
+The default admin account depends on your `backend/.env.local` values:
 
-Docker Compose starts MySQL, Redis, Qdrant, the Spring Boot backend, and the frontend Nginx server.
-
-### 1. Prepare Environment
-
-```bash
-cp deploy/server.env.example deploy/server.env
+```text
+Username: admin
+Password: the value of APP_ADMIN_PASSWORD
 ```
 
-Windows PowerShell:
+## Optional Capabilities
 
-```powershell
-Copy-Item deploy/server.env.example deploy/server.env
-```
+### AI Chat
 
-Edit `deploy/server.env`:
+To only test uploads, the reader, and page flows, keep:
 
 ```env
-MYSQL_ROOT_PASSWORD=replace_with_mysql_root_password
-MYSQL_PASSWORD=replace_with_mysql_root_password
-REDIS_PASSWORD=replace_with_redis_password
+LLM_ENABLED=false
+```
 
-APP_AUTH_SECRET=replace_with_32_chars_or_longer_random_secret
-APP_ADMIN_BOOTSTRAP_ENABLED=true
-APP_ADMIN_USERNAME=admin
-APP_ADMIN_PASSWORD=replace_with_secure_password
+To enable real model answers, edit `backend/.env.local`:
 
+```env
 LLM_ENABLED=true
 LLM_BASE_URL=https://your-model-endpoint
 LLM_API_KEY=your_model_api_key
@@ -220,268 +221,154 @@ LLM_MODEL=your_model_name
 LLM_API_FORMAT=responses
 ```
 
-For a startup-only check, you can temporarily disable external AI services:
+Restart the backend after changing these values.
+
+### Vector Retrieval
+
+Vector retrieval improves RAG recall quality. You need:
+
+- A working embedding service.
+- A locally reachable Qdrant service.
+
+Then configure:
 
 ```env
-LLM_ENABLED=false
+EMBEDDING_ENABLED=true
+EMBEDDING_BASE_URL=https://your-embedding-endpoint
+EMBEDDING_API_KEY=your_embedding_api_key
+EMBEDDING_MODEL=your_embedding_model
+
+VECTOR_STORE_ENABLED=true
+VECTOR_STORE_PROVIDER=qdrant
+VECTOR_STORE_BASE_URL=http://127.0.0.1:6333
+VECTOR_STORE_COLLECTION=learning_assistant_chunks
+```
+
+If you do not need vector search yet, keep:
+
+```env
 EMBEDDING_ENABLED=false
 VECTOR_STORE_ENABLED=false
 ```
 
-### 2. Start Locally With Docker
+### OCR and Document Preview
 
-```bash
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=160 backend
-curl -i http://127.0.0.1/api/health
-```
-
-Open:
-
-```text
-http://127.0.0.1
-```
-
-## Server Deployment
-
-The following generic deployment flow assumes Ubuntu, Debian, CentOS, Rocky Linux, or a similar Linux server.
-
-### 1. Install Docker
-
-Ubuntu / Debian:
-
-```bash
-sudo apt update
-sudo apt install -y git ca-certificates curl
-curl -fsSL https://get.docker.com | sudo sh
-sudo systemctl enable --now docker
-docker compose version
-```
-
-CentOS / Rocky Linux:
-
-```bash
-sudo yum install -y git yum-utils
-curl -fsSL https://get.docker.com | sudo sh
-sudo systemctl enable --now docker
-docker compose version
-```
-
-### 2. Pull the Project
-
-```bash
-sudo mkdir -p /opt/learning-assistant
-sudo chown -R "$USER":"$USER" /opt/learning-assistant
-git clone https://github.com/gala2393/learning-assistant.git /opt/learning-assistant
-cd /opt/learning-assistant
-```
-
-### 3. Configure
-
-```bash
-cp deploy/server.env.example deploy/server.env
-nano deploy/server.env
-```
-
-Important values:
+Scanned PDF OCR requires Tesseract:
 
 ```env
-MYSQL_ROOT_PASSWORD=replace_with_strong_password
-MYSQL_PASSWORD=replace_with_same_mysql_password
-REDIS_PASSWORD=replace_with_strong_password
-APP_AUTH_SECRET=replace_with_32_chars_or_longer_random_secret
-APP_ADMIN_PASSWORD=replace_with_initial_admin_password
-APP_CORS_ALLOWED_ORIGINS=https://your-domain,http://your-domain
-LLM_ENABLED=true
-LLM_BASE_URL=https://your-model-endpoint
-LLM_API_KEY=your_model_api_key
-LLM_MODEL=your_model_name
+OCR_ENABLED=true
+OCR_COMMAND=tesseract
+OCR_LANG=eng+chi_sim
 ```
 
-### 4. Start and Verify
-
-```bash
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=160 backend
-curl -i http://127.0.0.1/api/health
-```
-
-If port 80 is open:
-
-```text
-http://server-ip
-```
-
-## Domain and HTTPS
-
-The frontend container already runs Nginx over HTTP. For HTTPS, terminate TLS on the host, a cloud load balancer, CDN, or Caddy, and proxy requests to the frontend container.
-
-Recommended host-Nginx setup:
-
-1. Bind the frontend container to localhost:
+Word/PPT preview conversion requires LibreOffice:
 
 ```env
-WEB_PORT=127.0.0.1:8088
-APP_CORS_ALLOWED_ORIGINS=https://your-domain
+DOCUMENT_PREVIEW_CONVERTER_ENABLED=true
+DOCUMENT_PREVIEW_CONVERTER_COMMAND=soffice
 ```
 
-2. Recreate the frontend:
+Large PDF compression requires Ghostscript:
 
-```bash
-docker compose up -d --build frontend
+```env
+PDF_COMPRESSION_ENABLED=true
+PDF_COMPRESSION_COMMAND=gs
 ```
 
-3. Add a host Nginx reverse proxy:
+If these tools are not installed locally, keep the related switches set to `false`. The app can still start, but those enhanced capabilities will be unavailable.
 
-```nginx
-server {
-    listen 80;
-    server_name your-domain;
-    return 301 https://$host$request_uri;
-}
+## Useful URLs
 
-server {
-    listen 443 ssl http2;
-    server_name your-domain;
-
-    ssl_certificate /path/to/fullchain.crt;
-    ssl_certificate_key /path/to/private.key;
-
-    client_max_body_size 2g;
-
-    location / {
-        proxy_pass http://127.0.0.1:8088;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-    }
-}
-```
-
-4. Validate and reload:
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-curl -I https://your-domain
-curl -i https://your-domain/api/health
-```
-
-## Updating a Server Deployment
-
-```bash
-cd /opt/learning-assistant
-git pull origin main
-docker compose up -d --build
-docker compose ps
-curl -i http://127.0.0.1/api/health
-```
-
-Frontend-only:
-
-```bash
-docker compose up -d --build frontend
-```
-
-Backend-only:
-
-```bash
-docker compose up -d --build backend
-```
-
-Logs:
-
-```bash
-docker compose logs --tail=160 backend
-docker compose logs --tail=160 frontend
-```
-
-## Data Persistence and Backup
-
-Compose creates these volumes:
-
-- `mysql_data`: MySQL data
-- `redis_data`: Redis data
-- `qdrant_data`: Qdrant vector data
-- `app_files`: uploaded materials, previews, OCR intermediate files
-
-Back up MySQL:
-
-```bash
-mkdir -p backups
-set -a
-. deploy/server.env
-set +a
-docker compose exec -T mysql mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" learning_assistant > backups/mysql-$(date +%Y%m%d%H%M%S).sql
-```
-
-Back up uploaded files:
-
-```bash
-mkdir -p backups
-docker volume ls
-docker run --rm \
-  -v learning-assistant_app_files:/data:ro \
-  -v "$PWD/backups:/backup" \
-  alpine tar -czf /backup/app-files-$(date +%Y%m%d%H%M%S).tar.gz -C /data .
-```
-
-Do not use `docker compose down -v` unless you intentionally want to delete all persisted data.
-
-## Qdrant
-
-Qdrant speeds up the retrieval phase of RAG, especially when you have many material chunks. It does not speed up OCR, parsing, embedding generation, HyDE/query expansion, or final LLM text generation.
-
-Already uploaded materials do not need to be parsed again after enabling Qdrant, but their vector index should be rebuilt from the admin console.
-
-## Useful Pages
-
-User:
-
-- `/login`
-- `/register`
-- `/workspace/chat`
-- `/workspace/materials`
-- `/workspace/reader`
-- `/workspace/history`
-- `/workspace/favorites`
-- `/workspace/summary`
-
-Admin:
-
-- `/admin/dashboard`
-- `/admin/users`
-- `/admin/materials`
-- `/admin/evaluation`
-- `/admin/usage-records`
-- `/admin/logs`
+- Frontend: `http://127.0.0.1:5174`
+- Backend health check: `http://127.0.0.1:8080/api/health`
+- Live site: `https://learnstudy.cloud`
 
 ## Common Commands
 
-Backend build:
+Build backend:
 
-```bash
+```powershell
 cd backend
-./mvnw -DskipTests package
+.\mvnw.cmd -DskipTests package
 ```
 
-Frontend build:
+Build frontend:
 
 ```bash
 cd frontend
 npm run build
 ```
 
-Docker rebuild:
+Check Git status:
 
 ```bash
-docker compose up -d --build
-docker compose ps
+git status --short
 ```
 
+## Troubleshooting
+
+### 1. Backend cannot connect to MySQL
+
+Make sure MySQL is running and verify `MYSQL_URL`, `MYSQL_USERNAME`, and `MYSQL_PASSWORD` in `backend/.env.local`.
+
+### 2. Frontend API requests fail
+
+Make sure the backend is running and `frontend/.env.local` contains:
+
+```env
+VITE_API_BASE=http://localhost:8080/api
+```
+
+Also make sure backend CORS includes:
+
+```env
+http://localhost:5174,http://127.0.0.1:5174
+```
+
+### 3. Admin login fails
+
+Before the first backend start, set:
+
+```env
+APP_ADMIN_BOOTSTRAP_ENABLED=true
+APP_ADMIN_USERNAME=admin
+APP_ADMIN_PASSWORD=your_password
+```
+
+If the admin user already exists, changing `.env.local` may not overwrite the old password. Reset the user in the database or start with a clean local database.
+
+### 4. Scanned PDFs have no OCR result
+
+Make sure Tesseract is installed and available:
+
+```bash
+tesseract --version
+```
+
+Then enable:
+
+```env
+OCR_ENABLED=true
+```
+
+### 5. Word or PPT preview is unavailable
+
+Make sure LibreOffice is installed and available:
+
+```bash
+soffice --version
+```
+
+Then enable:
+
+```env
+DOCUMENT_PREVIEW_CONVERTER_ENABLED=true
+```
+
+### 6. RAG answers are slow or retrieval is weak
+
+The minimal local setup does not require vector search. To improve material Q&A quality, configure Embedding and Qdrant, then rebuild indexes for existing materials.
+
+## Release Notes
+
+See [更新说明.md](更新说明.md).
