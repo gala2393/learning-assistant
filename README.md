@@ -1,5 +1,9 @@
 # 智学引擎 Learning Assistant
 
+[中文](README.md) | [English](README.en.md)
+
+在线访问：[https://learnstudy.cloud](https://learnstudy.cloud)
+
 智学引擎是一个面向学习资料管理、资料阅读和智能问答的全栈项目。它支持 PDF、图片型 PDF、Word、PPT、TXT、Markdown 等资料上传解析，提供资料阅读、边读边问、普通智能问答、临时资料多轮上下文、RAG 检索增强、图片问答、收藏、历史、总结和管理员后台。
 
 项目由 Spring Boot 后端、React 前端、MySQL、Redis、Qdrant、Nginx 和 Docker Compose 组成。你可以用本地开发模式启动，也可以用 Docker Compose 一键拉起完整服务。
@@ -36,30 +40,6 @@ learning-assistant/
 ├── DOCKER_DEPLOY.md         # 服务器 Docker 部署补充说明
 ├── 更新说明.md              # 版本更新记录
 └── README.md
-```
-
-## 不要提交的文件
-
-仓库已经通过 `.gitignore` 忽略常见敏感文件和构建产物。请不要提交：
-
-- `.env`、`.env.local`、`deploy/server.env`
-- `*.pem`、`*.key`、`*.crt`、`*.ppk`
-- SSL 证书目录，例如 `learnstudy.cloud_nginx（重要，是ssl）/`
-- `backend/target/`、`frontend/dist/`、`node_modules/`
-- 数据目录、上传资料、备份目录、部署压缩包
-
-如果你准备公开仓库，提交前建议执行：
-
-```bash
-git status --short
-git ls-files | grep -Ei '(\.env|\.pem|\.key|\.crt|server\.env|ssl|node_modules|target|dist)'
-```
-
-Windows PowerShell：
-
-```powershell
-git status --short
-git ls-files | Select-String -Pattern '(\.env|\.pem|\.key|\.crt|server\.env|ssl|node_modules|target|dist)'
 ```
 
 ## 本地开发环境准备
@@ -232,7 +212,7 @@ http://127.0.0.1:5174
 
 ## 方式二：Docker Compose 启动完整环境
 
-Docker 方式适合服务器部署，也适合本地快速体验完整依赖。
+Docker 方式适合服务器部署，也适合本地快速体验完整依赖。Compose 会启动 MySQL、Redis、Qdrant、后端和前端 Nginx。
 
 ### 1. 安装 Docker
 
@@ -249,6 +229,8 @@ docker compose version
 ```
 
 ### 2. 准备环境变量
+
+复制生产环境变量模板：
 
 ```bash
 cp deploy/server.env.example deploy/server.env
@@ -287,7 +269,13 @@ EMBEDDING_ENABLED=false
 VECTOR_STORE_ENABLED=false
 ```
 
-### 3. 启动容器
+如果部署到服务器并使用域名，建议把 CORS 改成你的站点地址：
+
+```env
+APP_CORS_ALLOWED_ORIGINS=https://你的域名,http://你的域名
+```
+
+### 3. 本地 Docker 一键启动
 
 在项目根目录执行：
 
@@ -319,7 +307,180 @@ http://127.0.0.1
 curl -i http://127.0.0.1/api/health
 ```
 
-### 4. Docker 数据持久化
+### 4. 服务器首次部署
+
+下面是一套通用服务器部署流程，假设服务器系统为 Ubuntu、Debian、CentOS、Rocky Linux 或类似发行版。
+
+1. 安装 Git、Docker 和 Docker Compose。
+
+Ubuntu / Debian 示例：
+
+```bash
+sudo apt update
+sudo apt install -y git ca-certificates curl
+curl -fsSL https://get.docker.com | sudo sh
+sudo systemctl enable --now docker
+docker compose version
+```
+
+CentOS / Rocky Linux 示例：
+
+```bash
+sudo yum install -y git yum-utils
+curl -fsSL https://get.docker.com | sudo sh
+sudo systemctl enable --now docker
+docker compose version
+```
+
+2. 拉取项目。
+
+```bash
+sudo mkdir -p /opt/learning-assistant
+sudo chown -R "$USER":"$USER" /opt/learning-assistant
+git clone https://github.com/gala2393/learning-assistant.git /opt/learning-assistant
+cd /opt/learning-assistant
+```
+
+3. 配置环境变量。
+
+```bash
+cp deploy/server.env.example deploy/server.env
+nano deploy/server.env
+```
+
+至少检查这些字段：
+
+```env
+MYSQL_ROOT_PASSWORD=请换成强密码
+MYSQL_PASSWORD=请换成同一个MySQL密码
+REDIS_PASSWORD=请换成强密码
+APP_AUTH_SECRET=请换成至少32位随机字符串
+APP_ADMIN_PASSWORD=请换成管理员初始密码
+APP_CORS_ALLOWED_ORIGINS=https://你的域名,http://你的域名
+LLM_ENABLED=true
+LLM_BASE_URL=https://你的模型服务地址
+LLM_API_KEY=你的模型APIKey
+LLM_MODEL=你的模型名称
+```
+
+4. 启动。
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail=160 backend
+```
+
+5. 验证。
+
+```bash
+curl -i http://127.0.0.1/api/health
+```
+
+如果服务器安全组或防火墙开放了 80 端口，可以访问：
+
+```text
+http://服务器IP
+```
+
+### 5. 域名和 HTTPS 部署
+
+项目自带的前端容器已经包含 Nginx，可以直接提供 HTTP 服务。如果需要 HTTPS，推荐在宿主机或云服务商负载均衡上做 TLS 终止，再反向代理到前端容器。
+
+推荐做法：
+
+1. 在 `deploy/server.env` 中把前端容器只暴露到本机端口，例如：
+
+```env
+WEB_PORT=127.0.0.1:8088
+APP_CORS_ALLOWED_ORIGINS=https://你的域名
+```
+
+2. 重启前端容器：
+
+```bash
+docker compose up -d --build frontend
+```
+
+3. 在宿主机 Nginx 中配置 HTTPS 反向代理。示例：
+
+```nginx
+server {
+    listen 80;
+    server_name 你的域名;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name 你的域名;
+
+    ssl_certificate /path/to/fullchain.crt;
+    ssl_certificate_key /path/to/private.key;
+
+    client_max_body_size 2g;
+
+    location / {
+        proxy_pass http://127.0.0.1:8088;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+}
+```
+
+4. 校验并重载 Nginx：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+5. 验证：
+
+```bash
+curl -I https://你的域名
+curl -i https://你的域名/api/health
+```
+
+如果你不想维护宿主机 Nginx，也可以使用云服务商证书、CDN、负载均衡或 Caddy 来做 HTTPS，核心要求是把外部 HTTPS 流量转发到前端容器的 HTTP 端口。
+
+### 6. 后续更新部署
+
+服务器上更新代码时：
+
+```bash
+cd /opt/learning-assistant
+git pull origin main
+docker compose up -d --build
+docker compose ps
+curl -i http://127.0.0.1/api/health
+```
+
+如果只改了前端：
+
+```bash
+docker compose up -d --build frontend
+```
+
+如果只改了后端：
+
+```bash
+docker compose up -d --build backend
+```
+
+查看日志：
+
+```bash
+docker compose logs --tail=160 backend
+docker compose logs --tail=160 frontend
+```
+
+### 7. Docker 数据持久化和备份
 
 Compose 会创建这些 volume：
 
@@ -328,12 +489,46 @@ Compose 会创建这些 volume：
 - `qdrant_data`：Qdrant 向量数据
 - `app_files`：用户上传资料、预览图、OCR 中间文件等
 
+查看 volume：
+
+```bash
+docker volume ls
+```
+
+备份 MySQL：
+
+```bash
+mkdir -p backups
+set -a
+. deploy/server.env
+set +a
+docker compose exec -T mysql mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" learning_assistant > backups/mysql-$(date +%Y%m%d%H%M%S).sql
+```
+
+备份上传资料 volume：
+
+```bash
+mkdir -p backups
+docker run --rm \
+  -v learning-assistant_app_files:/data:ro \
+  -v "$PWD/backups:/backup" \
+  alpine tar -czf /backup/app-files-$(date +%Y%m%d%H%M%S).tar.gz -C /data .
+```
+
+不同机器上的 volume 前缀可能不同，可以用 `docker volume ls` 先确认实际名称。
+
 不要执行下面这类命令，除非你明确要清空所有数据：
 
 ```bash
 docker compose down -v
 docker volume rm mysql_data
 docker volume rm app_files
+```
+
+日常停止服务请使用：
+
+```bash
+docker compose down
 ```
 
 ## Qdrant 向量检索说明
