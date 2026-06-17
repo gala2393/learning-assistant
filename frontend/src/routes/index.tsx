@@ -7,6 +7,9 @@ import { ProtectedRoute } from '@/components/layout/ProtectedRoute'
 import { RouteFallback } from '@/components/layout/RouteFallback'
 
 const ProductLandingPage = lazy(() => import('@/components/landing/ProductLandingPage').then((module) => ({ default: module.ProductLandingPage })))
+const TermsPage = lazy(() => import('@/components/legal/LegalPages').then((module) => ({ default: module.TermsPage })))
+const PrivacyPage = lazy(() => import('@/components/legal/LegalPages').then((module) => ({ default: module.PrivacyPage })))
+const AboutPage = lazy(() => import('@/components/legal/LegalPages').then((module) => ({ default: module.AboutPage })))
 const LoginForm = lazy(() => import('@/components/auth/LoginForm').then((module) => ({ default: module.LoginForm })))
 const RegisterForm = lazy(() => import('@/components/auth/RegisterForm').then((module) => ({ default: module.RegisterForm })))
 const ForgotPasswordForm = lazy(() => import('@/components/auth/ForgotPasswordForm').then((module) => ({ default: module.ForgotPasswordForm })))
@@ -70,6 +73,9 @@ export const router = createBrowserRouter([
     children: [
       // 根路径重定向到登录页
       { index: true, element: lazyElement(<ProductLandingPage />) },
+      { path: 'terms', element: lazyElement(<TermsPage />) },
+      { path: 'privacy', element: lazyElement(<PrivacyPage />) },
+      { path: 'about', element: lazyElement(<AboutPage />) },
 
       // ===== 认证页面（不需要登录） =====
       {

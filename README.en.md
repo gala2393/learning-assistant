@@ -4,6 +4,12 @@
 
 Live site: [https://learnstudy.cloud](https://learnstudy.cloud)
 
+Public pages:
+
+- [Terms](https://learnstudy.cloud/terms)
+- [Privacy Policy](https://learnstudy.cloud/privacy)
+- [About](https://learnstudy.cloud/about)
+
 Learning Assistant is a full-stack study platform for managing learning materials, reading documents, and asking AI-powered questions. It supports PDF, scanned PDF, Word, PowerPoint, TXT, Markdown, and HTML materials, with document reading, material-based Q&A, temporary file context, RAG retrieval, streaming answers, answer interruption, favorites, history, summaries, and an admin console.
 
 This README focuses only on local setup so first-time users can install, configure, start, and troubleshoot the project quickly.
@@ -304,6 +310,8 @@ Check Git status:
 ```bash
 git status --short
 ```
+
+To update the production frontend static files, see the safe deployment script in [DOCKER_DEPLOY.md](DOCKER_DEPLOY.md). It keeps the server-side `frontend-dist` directory and replaces only its contents, avoiding Docker bind mount issues that can make Nginx return 403 on the home page or 500 on SPA routes.
 
 ## Troubleshooting
 

@@ -4,6 +4,12 @@
 
 在线访问：[https://learnstudy.cloud](https://learnstudy.cloud)
 
+公开页面：
+
+- [使用协议](https://learnstudy.cloud/terms)
+- [隐私政策](https://learnstudy.cloud/privacy)
+- [关于我们](https://learnstudy.cloud/about)
+
 智学引擎是一个面向学习资料管理、资料阅读和智能问答的全栈学习项目。它支持 PDF、图片型 PDF、Word、PPT、TXT、Markdown 等资料上传解析，提供资料阅读、边读边问、普通智能问答、临时资料多轮上下文、RAG 检索增强、图片问答、收藏、历史、总结和管理员后台。
 
 这份 README 只说明如何在本地把项目跑起来，帮助新用户尽快完成安装、配置、启动和基础排错。
@@ -308,6 +314,8 @@ npm run build
 ```bash
 git status --short
 ```
+
+如果需要更新线上前端静态文件，请参考 [DOCKER_DEPLOY.md](DOCKER_DEPLOY.md) 中的安全部署脚本说明。脚本会保留服务器上的 `frontend-dist` 目录本身，只替换目录内容，避免 Docker bind mount 失效导致 Nginx 首页 403 或子路由 500。
 
 ## 常见问题
 

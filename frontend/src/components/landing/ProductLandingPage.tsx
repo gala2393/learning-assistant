@@ -63,7 +63,6 @@ const navItems = [
   { icon: Sparkles, label: '知识总结' },
 ]
 
-const TRACK_TRANSITION_MS = 1450
 const CAROUSEL_INTERVAL_MS = 3500
 const INTRO_STORAGE_KEY = 'landing-intro-seen'
 const INTRO_DURATION_MS = 2600
@@ -235,6 +234,22 @@ const landingAnimationCss = `
   50% { opacity: .82; transform: translate(-50%, -50%) scaleX(1); }
 }
 
+@keyframes hexGridDrift {
+  0%, 100% { transform: translate3d(-10px, -6px, 0); opacity: .42; }
+  50% { transform: translate3d(10px, 6px, 0); opacity: .7; }
+}
+
+@keyframes hexTrace {
+  0% { stroke-dashoffset: 360; opacity: .18; }
+  42% { opacity: .55; }
+  100% { stroke-dashoffset: 0; opacity: .18; }
+}
+
+@keyframes hexPanelFloat {
+  0%, 100% { translate: 0 0; }
+  50% { translate: 0 -6px; }
+}
+
 @keyframes landingSelectedBreath {
   0%, 100% { box-shadow: 0 0 0 1px rgba(34,40,51,.08), 0 12px 32px rgba(34,40,51,.04); }
   50% { box-shadow: 0 0 0 1px rgba(34,40,51,.22), 0 18px 44px rgba(34,40,51,.1); }
@@ -264,7 +279,6 @@ const landingAnimationCss = `
 .landing-page {
   --pointer-x: 50%;
   --pointer-y: 28%;
-  --carousel-overlap: 180px;
 }
 
 .intro-overlay {
@@ -481,63 +495,159 @@ const landingAnimationCss = `
   animation: heroRuleGlow 3.6s ease-in-out infinite;
 }
 
-.carousel-stage {
-  overflow: visible;
-}
-
-.carousel-track {
-  display: flex;
-  height: 100%;
-  width: 100%;
-  transition: transform 1.45s cubic-bezier(.2, .78, .18, 1);
-  will-change: transform;
-}
-
-.carousel-track.is-instant {
-  transition: none;
-}
-
-.carousel-panel {
+.hex-carousel-stage {
   position: relative;
-  flex: 0 0 100%;
-  margin-inline: calc(var(--carousel-overlap) / -2);
-  min-width: 0;
-  pointer-events: none;
-  opacity: .7;
-  filter: blur(3.2px);
-  transform: scale(.982);
-  z-index: 1;
-  transition:
-    filter 1.12s cubic-bezier(.22, 1, .36, 1),
-    opacity 1.12s cubic-bezier(.22, 1, .36, 1),
-    transform 1.12s cubic-bezier(.22, 1, .36, 1);
-  will-change: filter, opacity, transform;
+  min-height: 520px;
+  overflow: hidden;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 50% 44%, rgba(34,40,51,.07), transparent 25rem),
+    linear-gradient(135deg, rgba(255,255,255,.98), rgba(248,250,252,.9));
+  isolation: isolate;
 }
 
-.carousel-panel::after {
+.hex-carousel-stage::before {
   content: '';
   position: absolute;
-  inset: 3px;
-  border-radius: 16px;
-  background: rgba(255,255,255,.2);
+  left: 50%;
+  top: 50%;
+  width: min(880px, 86%);
+  aspect-ratio: 1.9;
+  transform: translate(-50%, -50%) perspective(900px) rotateX(58deg);
+  border-radius: 999px;
+  background:
+    radial-gradient(ellipse at center, rgba(34,40,51,.11), transparent 58%),
+    linear-gradient(90deg, transparent, rgba(34,40,51,.08), transparent);
+  filter: blur(18px);
+  opacity: .55;
+  animation: hexGridDrift 10s ease-in-out infinite;
+  z-index: 0;
+}
+
+.hex-carousel-stage::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(820px, 82%);
+  aspect-ratio: 1.72;
+  transform: translate(-50%, -50%) perspective(1200px) rotateX(6deg);
+  clip-path: polygon(9% 50%, 25% 6%, 75% 6%, 91% 50%, 75% 94%, 25% 94%);
+  border: 1px solid rgba(34,40,51,.08);
+  background: linear-gradient(135deg, rgba(255,255,255,.08), rgba(34,40,51,.018));
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,.7),
+    0 28px 90px rgba(34,40,51,.07);
+  opacity: .78;
   pointer-events: none;
-  transition: opacity 1.12s cubic-bezier(.22, 1, .36, 1);
+  z-index: 1;
 }
 
-.carousel-panel.is-sharp {
+.hex-trace {
+  position: absolute;
+  inset: 50px 12%;
+  opacity: .38;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.hex-trace path {
+  stroke-dasharray: 360;
+  animation: hexTrace 7s ease-in-out infinite;
+}
+
+.hex-panel {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(820px, 68vw);
+  height: 470px;
+  min-width: 0;
+  perspective: 1400px;
+  transform: translate(-50%, -50%) translate3d(var(--hex-x), var(--hex-y), 0) scale(var(--hex-scale)) rotateY(var(--hex-rotate));
+  transform-origin: center center;
+  opacity: var(--hex-opacity);
+  filter: blur(var(--hex-blur));
+  pointer-events: none;
+  z-index: var(--hex-z);
+  transition:
+    transform .9s cubic-bezier(.22, 1, .36, 1),
+    opacity .9s cubic-bezier(.22, 1, .36, 1),
+    filter .9s cubic-bezier(.22, 1, .36, 1);
+  will-change: transform, opacity, filter;
+}
+
+.hex-panel.is-active {
   pointer-events: auto;
-  opacity: 1;
-  filter: blur(0);
-  transform: scale(1);
-  z-index: 3;
+  animation: hexPanelFloat 5s ease-in-out infinite;
 }
 
-.carousel-panel.is-sharp::after {
-  opacity: 0;
+.hex-panel.is-side {
+  width: min(300px, 24vw);
+  height: 190px;
 }
 
-.carousel-panel.is-soft .preview-sheen::after {
-  opacity: .36;
+.hex-panel.is-side .preview-sheen {
+  clip-path: polygon(8% 50%, 22% 8%, 78% 8%, 92% 50%, 78% 92%, 22% 92%);
+  opacity: .18;
+}
+
+.hex-panel.is-side::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(8% 50%, 22% 8%, 78% 8%, 92% 50%, 78% 92%, 22% 92%);
+  border: 1px solid rgba(34,40,51,.08);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.62), rgba(226,232,240,.4)),
+    radial-gradient(circle at 50% 50%, rgba(34,40,51,.08), transparent 58%);
+  box-shadow: 0 22px 70px rgba(34,40,51,.08);
+  pointer-events: none;
+}
+
+.hex-chip {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .hex-carousel-stage {
+    min-height: 560px;
+  }
+
+  .hex-panel {
+    width: min(860px, 64vw);
+    height: 490px;
+  }
+
+  .hex-panel.is-side {
+    width: min(320px, 24vw);
+    height: 200px;
+  }
+}
+
+@media (max-width: 767px) {
+  .hex-carousel-stage {
+    min-height: 430px;
+  }
+
+  .hex-carousel-stage::after,
+  .hex-trace {
+    display: none;
+  }
+
+  .hex-panel {
+    width: calc(100% - 18px);
+    height: 392px;
+    transform: translate(-50%, -50%) scale(var(--hex-scale));
+  }
+
+  .hex-panel.is-side {
+    opacity: 0;
+  }
+
+  .hex-chip {
+    display: none;
+  }
 }
 
 .feature-card {
@@ -638,14 +748,14 @@ const landingAnimationCss = `
   .retrieval-node,
   .feature-card,
   .hero-rule::after,
-  .carousel-track,
-  .carousel-panel,
+  .hex-carousel-stage::before,
+  .hex-trace path,
+  .hex-panel,
   .flow-card::before {
     animation: none !important;
   }
 
-  .carousel-track,
-  .carousel-panel {
+  .hex-panel {
     transition: none !important;
   }
 
@@ -660,43 +770,18 @@ export function ProductLandingPage() {
   })
   const [introFinished, setIntroFinished] = useState(false)
   const [activeSlide, setActiveSlide] = useState(0)
-  const [trackIndex, setTrackIndex] = useState(2)
-  const [trackTransitionEnabled, setTrackTransitionEnabled] = useState(true)
-  const [isTrackAnimating, setIsTrackAnimating] = useState(false)
-  const [carouselOverlap, setCarouselOverlap] = useState(180)
   const [pointer, setPointer] = useState({ x: 50, y: 28 })
   const activeSlideRef = useRef(0)
-  const trackIndexRef = useRef(2)
-  const isTrackAnimatingRef = useRef(false)
-  const resetTimerRef = useRef<number | null>(null)
   const heroTitleRef = useRef<HTMLHeadingElement | null>(null)
   const heroSubtitleRef = useRef<HTMLParagraphElement | null>(null)
   const [introTarget, setIntroTarget] = useState<IntroTargetMetrics>(DEFAULT_INTRO_TARGET)
-
-  const carouselItems = useMemo(() => {
-    const lastIndex = previewSlides.length - 1
-    const beforeLastIndex = previewSlides.length - 2
-
-    return [
-      { key: 'clone-before-last', slide: previewSlides[beforeLastIndex], realIndex: beforeLastIndex },
-      { key: 'clone-last', slide: previewSlides[lastIndex], realIndex: lastIndex },
-      ...previewSlides.map((slide, index) => ({ key: slide.id, slide, realIndex: index })),
-      { key: 'clone-first', slide: previewSlides[0], realIndex: 0 },
-      { key: 'clone-second', slide: previewSlides[1], realIndex: 1 },
-    ]
-  }, [])
-
-  const clearCarouselTimers = () => {
-    if (resetTimerRef.current) window.clearTimeout(resetTimerRef.current)
-  }
 
   const pageStyle = useMemo(
     () => ({
       '--pointer-x': `${pointer.x}%`,
       '--pointer-y': `${pointer.y}%`,
-      '--carousel-overlap': `${carouselOverlap}px`,
     }) as CSSProperties,
-    [carouselOverlap, pointer],
+    [pointer],
   )
 
   const measureIntroTarget = () => {
@@ -723,49 +808,17 @@ export function ProductLandingPage() {
     })
   }
 
-  const startSlideChange = (nextSlide: number, nextTrackIndex: number) => {
-    if (isTrackAnimatingRef.current) return
-
-    clearCarouselTimers()
-    activeSlideRef.current = nextSlide
-    trackIndexRef.current = nextTrackIndex
-    isTrackAnimatingRef.current = true
-    setTrackTransitionEnabled(true)
-    setIsTrackAnimating(true)
-    setActiveSlide(nextSlide)
-    setTrackIndex(nextTrackIndex)
-
-    resetTimerRef.current = window.setTimeout(() => {
-      if (nextTrackIndex <= 1 || nextTrackIndex >= previewSlides.length + 2) {
-        const realTrackIndex = nextSlide + 2
-        setTrackTransitionEnabled(false)
-        trackIndexRef.current = realTrackIndex
-        setTrackIndex(realTrackIndex)
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(() => setTrackTransitionEnabled(true))
-        })
-      }
-      isTrackAnimatingRef.current = false
-      setIsTrackAnimating(false)
-    }, TRACK_TRANSITION_MS)
-  }
-
   const moveSlide = (direction: 1 | -1) => {
     const currentSlide = activeSlideRef.current
-    const currentTrackIndex = trackIndexRef.current
     const nextSlide = (currentSlide + direction + previewSlides.length) % previewSlides.length
-    startSlideChange(nextSlide, currentTrackIndex + direction)
+    activeSlideRef.current = nextSlide
+    setActiveSlide(nextSlide)
   }
 
   const selectSlide = (index: number) => {
     if (index === activeSlide) return
-
-    const lastIndex = previewSlides.length - 1
-    let nextTrackIndex = index + 2
-    if (activeSlide === 0 && index === lastIndex) nextTrackIndex = 1
-    if (activeSlide === lastIndex && index === 0) nextTrackIndex = previewSlides.length + 2
-
-    startSlideChange(index, nextTrackIndex)
+    activeSlideRef.current = index
+    setActiveSlide(index)
   }
 
   useEffect(() => {
@@ -774,21 +827,6 @@ export function ProductLandingPage() {
     }, CAROUSEL_INTERVAL_MS)
 
     return () => window.clearInterval(timer)
-  }, [])
-
-  useEffect(() => {
-    const updateOverlap = () => {
-      setCarouselOverlap(Math.round(Math.min(220, Math.max(72, window.innerWidth * 0.16))))
-    }
-
-    updateOverlap()
-    window.addEventListener('resize', updateOverlap)
-
-    return () => window.removeEventListener('resize', updateOverlap)
-  }, [])
-
-  useEffect(() => {
-    return () => clearCarouselTimers()
   }, [])
 
   useEffect(() => {
@@ -914,39 +952,41 @@ export function ProductLandingPage() {
           </div>
 
           <section id="preview" className={`${introClass('intro-page-reveal [animation-delay:2.38s]', 'rise-in [animation-delay:.3s]')} mt-7 w-full max-w-6xl text-left sm:mt-8`}>
-            <div className="preview-shell rounded-[20px] bg-white p-3 shadow-[0_34px_90px_rgba(34,40,51,0.16)]">
+            <div className="preview-shell rounded-[20px] bg-white/84 p-3 shadow-[0_34px_90px_rgba(34,40,51,0.13)] backdrop-blur">
               <span className="corner-glow" aria-hidden="true" />
               <div className="relative overflow-visible">
-                <div className="carousel-stage relative min-h-[540px] rounded-[16px] bg-[#f8fafc] sm:min-h-[580px] lg:min-h-[590px]">
-                  <div
-                    className={`carousel-track ${trackTransitionEnabled ? '' : 'is-instant'}`}
-                    style={{
-                      transform: `translate3d(calc(${carouselOverlap / 2}px - ${trackIndex * 100}% + ${trackIndex * carouselOverlap}px), 0, 0)`,
-                    }}
-                  >
-                    {carouselItems.map(({ key, slide, realIndex }, itemIndex) => {
-                      const panelState = trackIndex === itemIndex ? 'is-sharp' : 'is-soft'
+                <div className="hex-carousel-stage">
+                  <svg className="hex-trace" viewBox="0 0 900 480" aria-hidden="true">
+                    <path d="M88 240 L220 58 L680 58 L812 240 L680 422 L220 422 Z" fill="none" stroke="rgba(34,40,51,.22)" strokeWidth="1.4" />
+                    <path d="M220 58 L450 240 L680 58" fill="none" stroke="rgba(34,40,51,.1)" strokeWidth="1.2" />
+                    <path d="M220 422 L450 240 L680 422" fill="none" stroke="rgba(34,40,51,.1)" strokeWidth="1.2" />
+                  </svg>
 
-                      return (
-                        <div
-                          key={key}
-                          className={`carousel-panel ${panelState}`}
-                          aria-hidden={realIndex !== activeSlide}
-                        >
-                          <PreviewFrame title={slide.title} desc={slide.desc}>
-                            {slide.id === 'chat' && <ChatPreview />}
-                            {slide.id === 'materials' && <MaterialsPreview />}
-                            {slide.id === 'summary' && <SummaryPreview />}
-                          </PreviewFrame>
-                        </div>
-                      )
-                    })}
-                  </div>
+                  {previewSlides.map((slide, index) => {
+                    const position = hexPanelPosition(index, activeSlide, previewSlides.length)
+                    if (position.hidden) return null
+
+                    return (
+                      <div
+                        key={slide.id}
+                        className={`hex-panel ${position.role === 'active' ? 'is-active' : 'is-side'}`}
+                        style={position.style}
+                        aria-hidden={index !== activeSlide}
+                      >
+                        <PreviewFrame title={slide.title} desc={slide.desc}>
+                          {slide.id === 'chat' && <ChatPreview />}
+                          {slide.id === 'materials' && <MaterialsPreview />}
+                          {slide.id === 'summary' && <SummaryPreview />}
+                        </PreviewFrame>
+                      </div>
+                    )
+                  })}
+
                 </div>
 
                 <button
                   type="button"
-                  className="absolute left-3 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full border border-white/80 bg-white/65 text-[#222833] shadow-[0_18px_45px_rgba(34,40,51,0.13)] backdrop-blur transition hover:bg-white sm:left-5"
+                  className="absolute left-4 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full border border-white/80 bg-white/82 text-[#222833] shadow-[0_16px_38px_rgba(34,40,51,0.12)] backdrop-blur transition hover:-translate-x-0.5 hover:bg-white sm:left-8"
                   aria-label="上一张"
                   onClick={() => moveSlide(-1)}
                 >
@@ -954,7 +994,7 @@ export function ProductLandingPage() {
                 </button>
                 <button
                   type="button"
-                  className="absolute right-3 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full border border-white/80 bg-white/65 text-[#222833] shadow-[0_18px_45px_rgba(34,40,51,0.13)] backdrop-blur transition hover:bg-white sm:right-5"
+                  className="absolute right-4 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full border border-white/80 bg-white/82 text-[#222833] shadow-[0_16px_38px_rgba(34,40,51,0.12)] backdrop-blur transition hover:translate-x-0.5 hover:bg-white sm:right-8"
                   aria-label="下一张"
                   onClick={() => moveSlide(1)}
                 >
@@ -1038,6 +1078,65 @@ export function ProductLandingPage() {
       <SiteBeianFooter />
     </main>
   )
+}
+
+function hexPanelPosition(index: number, activeIndex: number, total: number) {
+  const previousIndex = (activeIndex - 1 + total) % total
+  const nextIndex = (activeIndex + 1) % total
+
+  if (index === activeIndex) {
+    return {
+      role: 'active',
+      hidden: false,
+      style: {
+        '--hex-x': '0px',
+        '--hex-y': '8px',
+        '--hex-scale': 1,
+        '--hex-rotate': '0deg',
+        '--hex-opacity': 1,
+        '--hex-blur': '0px',
+        '--hex-z': 4,
+      } as CSSProperties,
+    }
+  }
+
+  if (index === previousIndex) {
+    return {
+      role: 'previous',
+      hidden: false,
+      style: {
+        '--hex-x': '-28vw',
+        '--hex-y': '18px',
+        '--hex-scale': 0.82,
+        '--hex-rotate': '18deg',
+        '--hex-opacity': 0.26,
+        '--hex-blur': '3.5px',
+        '--hex-z': 2,
+      } as CSSProperties,
+    }
+  }
+
+  if (index === nextIndex) {
+    return {
+      role: 'next',
+      hidden: false,
+      style: {
+        '--hex-x': '28vw',
+        '--hex-y': '18px',
+        '--hex-scale': 0.82,
+        '--hex-rotate': '-18deg',
+        '--hex-opacity': 0.26,
+        '--hex-blur': '3.5px',
+        '--hex-z': 2,
+      } as CSSProperties,
+    }
+  }
+
+  return {
+    role: 'hidden',
+    hidden: true,
+    style: {} as CSSProperties,
+  }
 }
 
 function LandingMotionCanvas() {

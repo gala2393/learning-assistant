@@ -77,7 +77,26 @@ docker compose down
 
 生产环境不要执行 `docker compose down -v`，避免误删数据卷。
 
-## 3. Qdrant 对速度的影响
+## 3. 更新线上前端静态文件
+
+如果只是改了前端页面，可以使用仓库里的安全部署脚本：
+
+```powershell
+.\deploy\deploy-frontend.ps1 -Server root@your-server-ip -SshKey .\your_key.pem
+```
+
+这个脚本会完成：
+
+- 使用线上环境变量构建前端，接口地址固定为 `/api`。
+- 检查构建产物里不能出现 `localhost:8080`。
+- 上传 `frontend/dist` 到服务器。
+- 在服务器上备份 `/opt/learning-assistant/frontend-dist`。
+- 保留 `frontend-dist` 目录本身，只清空并替换目录内容。
+- reload Nginx，并检查容器内 `/usr/share/nginx/html/index.html` 是否存在。
+
+不要在服务器上直接执行 `rm -rf frontend-dist && mv frontend-dist.new frontend-dist`。Nginx 容器通过 Docker bind mount 挂载这个目录，删除并重建目录会让运行中的容器继续指向旧目录，表现为首页 403、子路由 500。正确方式是保留目录，只替换里面的文件。
+
+## 4. Qdrant 对速度的影响
 
 Qdrant 能加速的是“从大量资料片段中找相似片段”的阶段。资料数量越多、片段越多，收益越明显。
 
