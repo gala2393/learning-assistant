@@ -38,8 +38,8 @@ const MAX_IMAGES = 8
 const MAX_IMAGE_EDGE = 1280
 /** 常量：JPEG 压缩质量 0.82（平衡画质与文件大小） */
 const JPEG_QUALITY = 0.82
-/** 常量：后端 ChatRequest 限制单次问题最多 50000 字，前端提前截断并展示计数。 */
-const MAX_CHAT_INPUT_CHARS = 50000
+/** 单次直接输入上限：实测 8000 字左右容易卡住，因此限制为 6000 字；更长内容请通过资料上传进入上下文。 */
+const MAX_CHAT_INPUT_CHARS = 6000
 /** 临时资料请求正文上限与 chat-session.ts 保持一致，超过后只会带入开头和结尾。 */
 const TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT = 120_000
 
@@ -142,8 +142,7 @@ export function ChatComposer({
 
   // === 派生值 ===
   /** 是否可以发送（有文本或有图片，且不在 loading 和 disabled 状态，且临时资料不在解析中） */
-  const canSend = (value.trim().length > 0 || images.length > 0)
-    && value.length <= MAX_CHAT_INPUT_CHARS
+  const canSend = (value.slice(0, MAX_CHAT_INPUT_CHARS).trim().length > 0 || images.length > 0)
     && !loading
     && !disabled
     && !temporaryMaterialUploading

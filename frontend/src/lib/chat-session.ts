@@ -29,6 +29,8 @@ const RECENT_CONVERSATION_HISTORY_LIMIT = 24
 const TEMPORARY_MATERIAL_REQUEST_TEXT_LIMIT = 120_000
 /** 有后端全文引用时，前端请求只携带少量预览，真正检索由后端按 ID 取全文。 */
 const TEMPORARY_MATERIAL_REQUEST_PREVIEW_LIMIT = 2_000
+/** 单次直接提问的真实可用上限；发送前统一截断，避免超长请求导致接口失败。 */
+const MAX_CHAT_QUESTION_CHARS = 6000
 /**
  * 临时资料持久化文本上限。
  *
@@ -229,6 +231,8 @@ export function startChatSessionStream(params: {
 }) {
   if (state.streaming) return  // 防止重复提交
 
+  const question = clampChatQuestion(params.question)
+  if (!question) return
   const historyBefore = state.conversationHistory  // 保存旧的对话历史
   const conversationIdBefore = state.conversationId
   const requestImages = params.images || state.images || []
@@ -255,7 +259,7 @@ export function startChatSessionStream(params: {
   const userMsg: ChatMessage = {
     id: 'pending-user-' + Date.now(),
     role: 'user',
-    text: params.question,
+    text: question,
     images: requestImages,
     temporaryMaterial: displayTemporaryMaterial,
   }
@@ -286,7 +290,7 @@ export function startChatSessionStream(params: {
   // 发起 SSE 流式请求
   activeController = chatStream(
     {
-      question: params.question, mode: params.mode,
+      question, mode: params.mode,
       materialId: params.mode === 'MATERIAL' ? (params.materialId || undefined) : undefined,
       chunkId: params.mode === 'MATERIAL' ? (params.chunkId || undefined) : undefined,
       selectedText: requestSelectedText || undefined,
@@ -333,7 +337,7 @@ export function startChatSessionStream(params: {
         // 更新多轮对话上下文（保留最近 24 条，避免前端请求体无限增长）
         const nextConversationHistory = [
           ...historyBefore,
-          { role: 'user', content: params.question },
+          { role: 'user', content: question },
           { role: 'assistant', content: cleanAnswer },
         ].slice(-RECENT_CONVERSATION_HISTORY_LIMIT)
 
@@ -404,6 +408,10 @@ export function startChatSessionStream(params: {
  * 浏览器容易卡顿，甚至因为存储写入失败导致页面恢复为"回答已中断"。这里保留页面刷新恢复能力，
  * 但把写入频率降到约每 1.5 秒一次；流结束时仍会通过 persistSnapshot() 保存最终全文。
  */
+function clampChatQuestion(question: string) {
+  return question.trim().slice(0, MAX_CHAT_QUESTION_CHARS)
+}
+
 function persistStreamSnapshot() {
   const now = Date.now()
   if (now - lastStreamPersistAt < 1500) return

@@ -53,8 +53,8 @@ import {
 } from '@/lib/reader-ask-session'
 import type { HistoryItem, Material, MaterialChunk, RagSource } from '@/types'
 
-/** 边读边问与主聊天共用后端 ChatRequest 限制，前端同步限制为 50000 字。 */
-const READER_ASK_INPUT_MAX_CHARS = 50000
+/** 边读边问的单次直接输入上限，与主聊天和后端 ChatRequest 保持一致。 */
+const READER_ASK_INPUT_MAX_CHARS = 6000
 
 /**
  * ReaderAsk 组件属性
@@ -288,7 +288,7 @@ export function ReaderAsk({
    */
   const submitQuestion = useCallback((rawQuestion: string, selection?: string | null) => {
     if (!requireLogin()) return
-    const q = rawQuestion.trim()
+    const q = rawQuestion.trim().slice(0, READER_ASK_INPUT_MAX_CHARS)
     if (!q || loading || !material) return
     startReaderAskStream({
       question: q,

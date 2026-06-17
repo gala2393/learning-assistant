@@ -98,21 +98,22 @@ public class AdminController {
     public ApiResponse<List<SystemDependencyResponse>> dependencies(@RequestAttribute("currentUserId") long currentUserId) {
         adminService.requireAdminUser(currentUserId);
         List<SystemDependencyResponse> dependencies = new ArrayList<>();
-        dependencies.add(checkCommand("pdfinfo", true, "pdfinfo"));
-        dependencies.add(checkCommand("pdftotext", true, "pdftotext"));
-        dependencies.add(checkCommand("pdftoppm", true, "pdftoppm"));
-        dependencies.add(checkCommand("LibreOffice", converterEnabled, converterCommand));
-        dependencies.add(checkCommand("Tesseract OCR", ocrEnabled, ocrCommand));
+        dependencies.add(checkCommand("pdfinfo", true, "pdfinfo", "-v"));
+        dependencies.add(checkCommand("pdftotext", true, "pdftotext", "-v"));
+        dependencies.add(checkCommand("pdftoppm", true, "pdftoppm", "-v"));
+        dependencies.add(checkCommand("LibreOffice", converterEnabled, converterCommand, "--version"));
+        dependencies.add(checkCommand("Tesseract OCR", ocrEnabled, ocrCommand, "--version"));
         dependencies.add(checkQdrant());
         return ApiResponse.ok(dependencies);
     }
 
-    private SystemDependencyResponse checkCommand(String name, boolean enabled, String command) {
+    private SystemDependencyResponse checkCommand(String name, boolean enabled, String command, String versionArg) {
         if (!enabled) {
             return new SystemDependencyResponse(name, false, false, "配置未启用");
         }
         try {
-            Process process = new ProcessBuilder(command, "--version")
+            // 不同工具的版本参数不完全一致：Poppler 使用 -v，LibreOffice/Tesseract 使用 --version。
+            Process process = new ProcessBuilder(command, versionArg)
                 .redirectErrorStream(true)
                 .start();
             boolean finished = process.waitFor(Duration.ofSeconds(3).toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);

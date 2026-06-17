@@ -5199,13 +5199,32 @@ public class MaterialService {
             result.computeIfAbsent(chunk.getPageNo(), ignored -> new ArrayList<>()).add(chunk.getId());
         }
         if (result.isEmpty() && pageCount > 0 && !chunks.isEmpty()) {
-            for (int index = 0; index < chunks.size(); index++) {
+            return fallbackChunksByPage(chunks, pageCount);
+        }
+        return result;
+    }
+
+    /**
+     * 为没有真实页码的资料估算页面与片段关系。
+     *
+     * <p>Word/PPT 转成预览 PDF 后能显示真实页面，但 POI 抽出的正文通常没有页码。
+     * 如果只按比例硬切，最后一页很容易只映射到图片 OCR 片段，漏掉前一个正文片段。
+     * 因此这里给每页补一个向前重叠片段，让边读边问能带上跨页正文上下文。</p>
+     */
+    private Map<Integer, List<Long>> fallbackChunksByPage(List<MaterialChunkEntity> chunks, int pageCount) {
+        Map<Integer, List<Long>> result = new LinkedHashMap<>();
+        int chunkCount = chunks.size();
+        for (int pageNo = 1; pageNo <= pageCount; pageNo++) {
+            int pageIndex = pageNo - 1;
+            int start = (int) Math.floor((pageIndex * chunkCount) / (double) pageCount);
+            int end = (int) Math.ceil(((pageIndex + 1) * chunkCount) / (double) pageCount);
+            start = Math.max(0, start - 1);
+            end = Math.min(chunkCount, Math.max(start + 1, end));
+            for (int index = start; index < end; index++) {
                 MaterialChunkEntity chunk = chunks.get(index);
-                if (chunk.getId() == null) {
-                    continue;
+                if (chunk.getId() != null) {
+                    result.computeIfAbsent(pageNo, ignored -> new ArrayList<>()).add(chunk.getId());
                 }
-                int pageNo = Math.min(pageCount, Math.max(1, (index * pageCount) / chunks.size() + 1));
-                result.computeIfAbsent(pageNo, ignored -> new ArrayList<>()).add(chunk.getId());
             }
         }
         return result;

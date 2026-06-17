@@ -33,7 +33,11 @@ delete-test-material.py
 !.env.example
 !**/.env.example
 *.key
+*.pem
+*.crt
 .idea/
 *.ppk
+learnstudy.cloud_nginx*/
+*ssl*/
 
 .vercel

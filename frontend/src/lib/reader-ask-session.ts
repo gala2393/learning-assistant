@@ -29,6 +29,9 @@ const defaultState: ReaderAskSnapshot = {
   skipAutoRestoreForMaterialId: null,
 }
 
+/** 边读边问直接提问上限；发送层兜底截断，防止绕过输入框限制后请求失败。 */
+const MAX_READER_ASK_QUESTION_CHARS = 6000
+
 let state: ReaderAskSnapshot = { ...defaultState }
 let activeController: AbortController | null = null
 let activeRunId: string | null = null
@@ -53,7 +56,7 @@ export function subscribeReaderAsk(listener: () => void) {
 
 /** 更新输入框文本；输入框也放进 store，避免切走再回来时正在编辑的问题丢失。 */
 export function updateReaderAskQuestion(question: string) {
-  setState({ question })
+  setState({ question: question.slice(0, MAX_READER_ASK_QUESTION_CHARS) })
 }
 
 /** 更新阅读区选中文本；选区跟随当前资料保存，提交问题时作为补充上下文发送给后端。 */
@@ -120,7 +123,7 @@ export function startReaderAskStream(params: {
   currentPageChunkIds?: Array<string | number>
   selectedText?: string | null
 }) {
-  const q = params.question.trim()
+  const q = clampReaderAskQuestion(params.question)
   if (!q || state.loading) return
 
   abortActiveStream()
@@ -237,6 +240,10 @@ export function startReaderAskStream(params: {
 function setState(next: Partial<ReaderAskSnapshot>) {
   state = { ...state, ...next }
   notify()
+}
+
+function clampReaderAskQuestion(question: string) {
+  return question.trim().slice(0, MAX_READER_ASK_QUESTION_CHARS)
 }
 
 function updateAssistantMessage(assistantId: string, patch: Partial<ChatMessage>) {

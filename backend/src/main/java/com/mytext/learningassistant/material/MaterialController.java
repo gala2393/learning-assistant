@@ -1,6 +1,8 @@
 package com.mytext.learningassistant.material;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 import com.mytext.learningassistant.common.ApiResponse;
@@ -13,6 +15,7 @@ import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.CacheControl;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -403,9 +406,14 @@ public class MaterialController {
         @PathVariable("fileName") String fileName
     ) throws IOException {
         MaterialFileResource image = materialService.image(currentUserId, id, fileName);
+        Instant lastModified = java.nio.file.Files.getLastModifiedTime(image.path()).toInstant();
         return ResponseEntity.ok()
             .contentType(MediaType.parseMediaType(image.contentType()))
             .contentLength(image.contentLength())
+            // 页面图片生成后内容稳定，允许浏览器私有缓存，减少大 PDF 翻页和返回阅读器时的重复下载。
+            .cacheControl(CacheControl.maxAge(Duration.ofDays(7)).cachePrivate())
+            .lastModified(lastModified)
+            .eTag("\"" + image.contentLength() + "-" + lastModified.toEpochMilli() + "\"")
             .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.inline()
                 .filename(image.fileName(), java.nio.charset.StandardCharsets.UTF_8)
                 .build()

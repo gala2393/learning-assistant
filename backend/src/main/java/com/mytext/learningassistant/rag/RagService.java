@@ -4916,8 +4916,8 @@ public class RagService {
             .map(chunk -> {
                 MaterialChunkEntity materialChunk = chunk.chunk();
                 LearningMaterialEntity material = chunk.material();
-                String page = materialChunk.getPageNo() == null ? "未知页" : "第 " + materialChunk.getPageNo() + " 页";
-                return "• 《" + material.getTitle() + "》" + page + "：" + excerpt(materialChunk.getChunkText());
+                String location = sourceLocation(material, materialChunk);
+                return "• 《" + material.getTitle() + "》" + location + "：" + excerpt(materialChunk.getChunkText());
             })
             .collect(Collectors.joining("\n"));
         return "可以从这些资料片段入手回答“" + question + "”：\n\n"
@@ -4934,8 +4934,8 @@ public class RagService {
             .map(chunk -> {
                 MaterialChunkEntity materialChunk = chunk.chunk();
                 LearningMaterialEntity material = chunk.material();
-                String page = materialChunk.getPageNo() == null ? "未知页" : "第 " + materialChunk.getPageNo() + " 页";
-                return "原文：《" + material.getTitle() + "》" + page + "：" + excerpt(materialChunk.getChunkText());
+                String location = sourceLocation(material, materialChunk);
+                return "原文：《" + material.getTitle() + "》" + location + "：" + excerpt(materialChunk.getChunkText());
             })
             .distinct()
             .collect(Collectors.joining("\n"));
@@ -4951,13 +4951,35 @@ public class RagService {
     private String sourceContext(ScoredChunk scoredChunk, String label) {
         MaterialChunkEntity materialChunk = scoredChunk.chunk();
         LearningMaterialEntity material = scoredChunk.material();
-        String page = materialChunk.getPageNo() == null ? "未知页" : "第 " + materialChunk.getPageNo() + " 页";
+        String location = sourceLocation(material, materialChunk);
         String section = materialChunk.getSectionTitle() == null || materialChunk.getSectionTitle().isBlank()
             ? "未命名章节"
             : materialChunk.getSectionTitle();
         String text = excerptWithImageMarkers(materialChunk.getChunkText());
-        return label + "《" + material.getTitle() + "》/" + page + "/" + section
+        return label + "《" + material.getTitle() + "》/" + location + "/" + section
             + "\n[片段内容]\n原文：" + text;
+    }
+
+    private String sourceLocation(LearningMaterialEntity material, MaterialChunkEntity chunk) {
+        if (chunk.getPageNo() != null && chunk.getPageNo() > 0) {
+            return "第 " + chunk.getPageNo() + " 页";
+        }
+        int segmentNo = chunk.getChunkIndex() == null || chunk.getChunkIndex() < 0
+            ? 1
+            : chunk.getChunkIndex() + 1;
+        if (material != null && isPagelessDocument(material.getSourceType())) {
+            return "第 " + segmentNo + " 个片段（原文档未提供固定页码）";
+        }
+        return "第 " + segmentNo + " 个片段";
+    }
+
+    private boolean isPagelessDocument(MaterialSourceType sourceType) {
+        return sourceType == MaterialSourceType.WORD
+            || sourceType == MaterialSourceType.DOCX
+            || sourceType == MaterialSourceType.TXT
+            || sourceType == MaterialSourceType.MD
+            || sourceType == MaterialSourceType.HTML
+            || sourceType == MaterialSourceType.WEB;
     }
 
     private String excerptWithImageMarkers(String text) {
@@ -5016,8 +5038,8 @@ public class RagService {
             .map(chunk -> {
                 MaterialChunkEntity materialChunk = chunk.chunk();
                 LearningMaterialEntity material = chunk.material();
-                String page = materialChunk.getPageNo() == null ? "未知页" : "第 " + materialChunk.getPageNo() + " 页";
-                return "《" + material.getTitle() + "》" + page;
+                String location = sourceLocation(material, materialChunk);
+                return "《" + material.getTitle() + "》" + location;
             })
             .distinct()
             .collect(Collectors.joining("\n"));
