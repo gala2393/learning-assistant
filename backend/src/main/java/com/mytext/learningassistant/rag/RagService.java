@@ -171,9 +171,6 @@ public class RagService {
     /** 资料问答中低于该分数时，只能视为弱匹配，不能当作可靠资料依据。 */
     private static final double MATERIAL_WEAK_EVIDENCE_SCORE = 0.62;
 
-    /** 资料问答至少要覆盖用户问题中的这些关键词，避免 rerank 第一名被误当成 100% 相关。 */
-    private static final double MATERIAL_MIN_TERM_COVERAGE = 0.34;
-
     /** 普通回答达到上限时附加的可继续提示。 */
     private static final String ANSWER_LIMIT_CONTINUE_NOTICE =
         "\n\n[本次回答已达到 12000 字上限。可以点击“继续生成”或输入“继续”，系统会接着生成。]";
@@ -5193,71 +5190,10 @@ public class RagService {
             .mapToDouble(chunk -> queryTermCoverage(retrievalText(chunk.chunk()), queryTerms))
             .max()
             .orElse(0.0);
-        if (!selectedChunks.isEmpty() && hasKeywordEvidence(selectedChunks, queryTerms)) {
-            return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
-        }
-        if (isMaterialLocatorQuestion(request.question()) && !selectedChunks.isEmpty()) {
-            return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
-        }
-        if (hasCurrentReadingContext(request)
-            && isCurrentReadingExtractionQuestion(request.question())
-            && containsCurrentReadingChunk(request, selectedChunks)) {
-            return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
-        }
-        if (selectedChunks.isEmpty() || topScore < MATERIAL_WEAK_EVIDENCE_SCORE || topTermCoverage < MATERIAL_MIN_TERM_COVERAGE) {
+        if (selectedChunks.isEmpty() || topScore < MATERIAL_WEAK_EVIDENCE_SCORE) {
             return new EvidenceStatus(true, topScore, topTermCoverage, queryTerms);
         }
         return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
-    }
-
-    private boolean hasKeywordEvidence(List<ScoredChunk> selectedChunks, List<String> queryTerms) {
-        if (selectedChunks == null || selectedChunks.isEmpty()) {
-            return false;
-        }
-        return selectedChunks.stream().anyMatch(chunk -> {
-            List<String> highlightTerms = chunk.highlightTerms() == null ? List.of() : chunk.highlightTerms();
-            if (!highlightTerms.isEmpty()) {
-                return true;
-            }
-            return queryTermCoverage(retrievalText(chunk.chunk()), queryTerms) > 0.0;
-        });
-    }
-
-    private boolean isMaterialLocatorQuestion(String question) {
-        return materialLocatorQuery(question) != null;
-    }
-
-    private boolean hasCurrentReadingContext(ChatRequest request) {
-        return request != null
-            && request.materialId() != null
-            && (request.chunkId() != null
-                || request.currentPageNo() != null
-                || request.currentPageChunkIds() != null && !request.currentPageChunkIds().isEmpty());
-    }
-
-    private boolean containsCurrentReadingChunk(ChatRequest request, List<ScoredChunk> selectedChunks) {
-        if (request == null || selectedChunks == null || selectedChunks.isEmpty()) {
-            return false;
-        }
-        Set<Long> currentPageChunkIds = request.currentPageChunkIds() == null
-            ? Set.of()
-            : request.currentPageChunkIds().stream()
-                .filter(id -> id != null)
-                .collect(Collectors.toSet());
-        return selectedChunks.stream().anyMatch(chunk -> {
-            MaterialChunkEntity materialChunk = chunk.chunk();
-            if (materialChunk == null) {
-                return false;
-            }
-            Long chunkId = materialChunk.getId();
-            if (request.chunkId() != null && request.chunkId().equals(chunkId)) {
-                return true;
-            }
-            if (chunkId != null && currentPageChunkIds.contains(chunkId)) {
-                return true;
-            }
-            return request.currentPageNo() != null && request.currentPageNo().equals(materialChunk.getPageNo());
-        });
     }
 
     private List<String> withEvidenceStatusInstruction(List<String> excerpts, EvidenceStatus evidenceStatus) {
