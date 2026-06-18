@@ -22,6 +22,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -232,6 +233,16 @@ public class RagService {
             + "\\u8fd9(?:\\u662f)?\\u4ec0\\u4e48(?:\\u4e66|\\u8d44\\u6599|\\u6587\\u6863|\\u6587\\u4ef6)|"
             + "\\u8fd9\\u672c\\u4e66|\\u8fd9\\u4efd(?:\\u8d44\\u6599|\\u6587\\u6863|\\u6587\\u4ef6)|"
             + "\\u8bb2\\u4ec0\\u4e48|\\u4ecb\\u7ecd\\u4e00\\u4e0b|\\u7b80\\u4ecb|\\u6982\\u62ec|\\u4e3b\\u8981\\u5185\\u5bb9)"
+    );
+    private static final Pattern TABLE_OF_CONTENTS_QUESTION_PATTERN = Pattern.compile(
+        "(?i)(\\u76ee\\s*\\u5f55|\\u7ae0\\u8282\\s*(?:\\u76ee\\u5f55|\\u5217\\u8868|\\u6709\\u54ea\\u4e9b)|"
+            + "\\u6709\\u54ea\\u4e9b\\u7ae0\\u8282|\\u5168\\u90e8\\u7ae0\\u8282|table\\s+of\\s+contents|contents|toc)"
+    );
+    private static final Pattern CHAPTER_QUESTION_PATTERN = Pattern.compile(
+        "(?i)(?:\\u7b2c\\s*([\\d\\u4e00\\u4e8c\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341\\u767e\\u5343\\u96f6\\u3007\\u4e24]+)\\s*[\\u7ae0\\u8282\\u7bc7\\u90e8\\u5206]|chapter\\s+(\\d+))"
+    );
+    private static final Pattern PRIMARY_CHAPTER_HEADING_PATTERN = Pattern.compile(
+        "(?im)^\\s*(?:\\u7b2c\\s*([\\d\\u4e00\\u4e8c\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341\\u767e\\u5343\\u96f6\\u3007\\u4e24]+)\\s*\\u7ae0.*|chapter\\s+(\\d+)\\b.*)$"
     );
     /**
      * "术语定义问题"的正则匹配模式。
@@ -1675,6 +1686,10 @@ public class RagService {
             return List.of();
         }
         String retrievalQuestion = rewriteQuestionForRetrieval(request.question(), request.history());
+        List<ScoredChunk> structureChunks = findStructureAwareChunks(userId, request, retrievalQuestion);
+        if (!structureChunks.isEmpty()) {
+            return structureChunks;
+        }
         List<ScoredChunk> currentPageChunks = findCurrentPageChunks(userId, request);
         List<ScoredChunk> locatorChunks = findMaterialLocatorChunks(userId, request);
         if (!locatorChunks.isEmpty()) {
@@ -2224,6 +2239,190 @@ public class RagService {
         return findKeywordChunks(userId, new KeywordQuery(List.of(term), KeywordIntent.DEFINITION), materialId);
     }
 
+    private List<ScoredChunk> findStructureAwareChunks(long userId, ChatRequest request, String retrievalQuestion) {
+        if (request.materialId() == null) {
+            return List.of();
+        }
+        if (isTableOfContentsQuestion(request.question())) {
+            return tableOfContentsChunks(userId, request.materialId());
+        }
+        String chapterNo = extractChapterNo(request.question());
+        if (chapterNo != null) {
+            List<ScoredChunk> chapterChunks = chapterChunks(userId, request.materialId(), chapterNo);
+            if (!chapterChunks.isEmpty()) {
+                return chapterChunks;
+            }
+        }
+        return List.of();
+    }
+
+    private List<ScoredChunk> tableOfContentsChunks(long userId, Long materialId) {
+        LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
+            .orElse(null);
+        if (material == null || !isMaterialReadyForRetrieval(material)) {
+            return List.of();
+        }
+        List<MaterialChunkEntity> chunks = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId());
+        if (chunks.isEmpty()) {
+            return List.of();
+        }
+
+        List<ScoredChunk> tocChunks = chunks.stream()
+            .filter(chunk -> looksLikeContentsChunk(retrievalText(chunk)))
+            .map(chunk -> new ScoredChunk(material, chunk, 0.96, List.of("\u76ee\u5f55", "\u7ae0", "contents")))
+            .limit(8)
+            .toList();
+        if (!tocChunks.isEmpty()) {
+            return tableOfContentsWindow(material, chunks, tocChunks);
+        }
+
+        List<ScoredChunk> headingChunks = chunks.stream()
+            .filter(chunk -> looksLikeChapterHeading(chunk.getSectionTitle()) || looksLikeChapterHeading(firstContentLine(chunk.getChunkText())))
+            .map(chunk -> new ScoredChunk(material, chunk, 0.9, List.of("\u7ae0\u8282", "\u6807\u9898")))
+            .limit(12)
+            .toList();
+        if (!headingChunks.isEmpty()) {
+            return headingChunks;
+        }
+        return chunks.stream()
+            .limit(6)
+            .map(chunk -> new ScoredChunk(material, chunk, 0.72, List.of("\u76ee\u5f55", "\u7ae0\u8282")))
+            .toList();
+    }
+
+    private List<ScoredChunk> chapterChunks(long userId, Long materialId, String rawChapterNo) {
+        LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
+            .orElse(null);
+        if (material == null || !isMaterialReadyForRetrieval(material)) {
+            return List.of();
+        }
+        String chapterNo = normalizeChapterNo(rawChapterNo);
+        if (chapterNo == null || chapterNo.isBlank()) {
+            return List.of();
+        }
+        List<MaterialChunkEntity> chunks = materialChunkRepository.findByMaterialIdOrderByChunkIndexAsc(material.getId());
+        List<MaterialChunkEntity> matched = new ArrayList<>();
+        MaterialChunkEntity headingChunk = null;
+        boolean inTargetChapter = false;
+        for (MaterialChunkEntity chunk : chunks) {
+            String section = firstNonBlank(chunk.getSectionTitle(), firstContentLine(chunk.getChunkText()));
+            String sectionChapterNo = extractChapterNo(section);
+            if (sectionChapterNo != null) {
+                String normalizedSectionChapter = normalizeChapterNo(sectionChapterNo);
+                if (chapterNo.equals(normalizedSectionChapter)) {
+                    if (headingChunk == null) {
+                        headingChunk = chunk;
+                    }
+                    inTargetChapter = true;
+                } else if (inTargetChapter && isPrimaryChapterHeading(section)) {
+                    break;
+                }
+            }
+            if (inTargetChapter) {
+                matched.add(chunk);
+            }
+        }
+        if (matched.isEmpty()) {
+            List<MaterialChunkEntity> clipped = chunks.stream()
+                .map(chunk -> chapterClippedChunk(chunk, chapterNo))
+                .filter(Objects::nonNull)
+                .toList();
+            if (!clipped.isEmpty()) {
+                matched = clipped;
+            }
+        } else if (matched.size() == 1 && headingChunk != null) {
+            MaterialChunkEntity clipped = chapterClippedChunk(headingChunk, chapterNo);
+            if (clipped != null) {
+                matched = List.of(clipped);
+            }
+        }
+        if (matched.isEmpty()) {
+            String normalizedQuestionChapter = normalizeForTermMatch("\u7b2c" + chapterNo + "\u7ae0");
+            matched = chunks.stream()
+                .filter(chunk -> normalizeForTermMatch(retrievalText(chunk)).contains(normalizedQuestionChapter))
+                .toList();
+        }
+        return matched.stream()
+            .limit(10)
+            .map(chunk -> new ScoredChunk(material, chunk, 0.88, List.of("\u7b2c" + chapterNo + "\u7ae0", "chapter " + chapterNo)))
+            .toList();
+    }
+
+    private List<ScoredChunk> tableOfContentsWindow(
+        LearningMaterialEntity material,
+        List<MaterialChunkEntity> chunks,
+        List<ScoredChunk> tocChunks
+    ) {
+        List<ScoredChunk> selected = new ArrayList<>();
+        Set<Long> seenChunkIds = new HashSet<>();
+        int firstTocIndex = tocChunks.stream()
+            .map(ScoredChunk::chunk)
+            .map(MaterialChunkEntity::getChunkIndex)
+            .filter(Objects::nonNull)
+            .min(Integer::compareTo)
+            .orElse(0);
+        chunks.stream()
+            .filter(chunk -> chunk.getChunkIndex() != null && chunk.getChunkIndex() >= Math.max(0, firstTocIndex - 1))
+            .limit(12)
+            .map(chunk -> new ScoredChunk(material, chunk, 0.96, List.of("\u76ee\u5f55", "\u7ae0", "contents")))
+            .forEach(chunk -> appendUniqueChunks(selected, seenChunkIds, List.of(chunk)));
+        appendUniqueChunks(selected, seenChunkIds, tocChunks);
+        return selected.stream().limit(8).toList();
+    }
+
+    private MaterialChunkEntity chapterClippedChunk(MaterialChunkEntity source, String chapterNo) {
+        if (source == null || source.getChunkText() == null || source.getChunkText().isBlank()) {
+            return null;
+        }
+        String text = source.getChunkText();
+        Matcher headingMatcher = primaryChapterHeadingPattern().matcher(text);
+        int start = -1;
+        int end = text.length();
+        while (headingMatcher.find()) {
+            String headingChapterNo = normalizeChapterNo(headingMatcher.group(1) == null ? headingMatcher.group(2) : headingMatcher.group(1));
+            if (chapterNo.equals(headingChapterNo)) {
+                start = headingMatcher.start();
+                if (headingMatcher.find()) {
+                    end = headingMatcher.start();
+                }
+                break;
+            }
+        }
+        if (start < 0) {
+            return null;
+        }
+        String clippedText = text.substring(start, Math.max(start, end)).trim();
+        if (clippedText.isBlank()) {
+            return null;
+        }
+        MaterialChunkEntity clipped = copyChunkForRetrieval(source);
+        clipped.setChunkText(clippedText);
+        clipped.setSectionTitle(firstNonBlank(source.getSectionTitle(), firstContentLine(clippedText)));
+        return clipped;
+    }
+
+    private MaterialChunkEntity copyChunkForRetrieval(MaterialChunkEntity source) {
+        MaterialChunkEntity copy = new MaterialChunkEntity();
+        copy.setId(source.getId());
+        copy.setMaterialId(source.getMaterialId());
+        copy.setChunkIndex(source.getChunkIndex());
+        copy.setChunkText(source.getChunkText());
+        copy.setPageNo(source.getPageNo());
+        copy.setSourcePageStart(source.getSourcePageStart());
+        copy.setSourcePageEnd(source.getSourcePageEnd());
+        copy.setSectionTitle(source.getSectionTitle());
+        copy.setHierarchyPath(source.getHierarchyPath());
+        copy.setSummary(source.getSummary());
+        copy.setKeywords(source.getKeywords());
+        copy.setEmbeddingJson(source.getEmbeddingJson());
+        copy.setCharCount(source.getCharCount());
+        copy.setTokenCount(source.getTokenCount());
+        copy.setEmbeddingStatus(source.getEmbeddingStatus());
+        copy.setIndexStatus(source.getIndexStatus());
+        copy.setCreatedAt(source.getCreatedAt());
+        return copy;
+    }
+
     private List<ScoredChunk> findKeywordChunks(long userId, String question, Long materialId) {
         KeywordQuery query = extractKeywordQuery(question);
         if (query == null) {
@@ -2539,6 +2738,132 @@ public class RagService {
     private boolean containsAnyTerm(String text, List<String> normalizedTerms) {
         String normalizedText = normalizeForTermMatch(text);
         return normalizedTerms.stream().anyMatch(normalizedText::contains);
+    }
+
+    private boolean isTableOfContentsQuestion(String question) {
+        return question != null && TABLE_OF_CONTENTS_QUESTION_PATTERN.matcher(question).find();
+    }
+
+    private String extractChapterNo(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        Matcher matcher = CHAPTER_QUESTION_PATTERN.matcher(text);
+        if (!matcher.find()) {
+            return null;
+        }
+        String chapter = matcher.group(1) == null ? matcher.group(2) : matcher.group(1);
+        return chapter == null || chapter.isBlank() ? null : chapter.trim();
+    }
+
+    private String normalizeChapterNo(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (trimmed.matches("\\d+")) {
+            return String.valueOf(Integer.parseInt(trimmed));
+        }
+        int number = chineseNumberValue(trimmed);
+        return number <= 0 ? normalizeForTermMatch(trimmed) : String.valueOf(number);
+    }
+
+    private int chineseNumberValue(String value) {
+        int total = 0;
+        int current = 0;
+        for (int i = 0; i < value.length(); i++) {
+            int digit = chineseDigitValue(value.charAt(i));
+            if (digit >= 0) {
+                current = digit;
+                continue;
+            }
+            int unit = chineseUnitValue(value.charAt(i));
+            if (unit > 0) {
+                total += (current == 0 ? 1 : current) * unit;
+                current = 0;
+            }
+        }
+        return total + current;
+    }
+
+    private int chineseDigitValue(char value) {
+        return switch (value) {
+            case '\u96f6', '\u3007' -> 0;
+            case '\u4e00' -> 1;
+            case '\u4e8c', '\u4e24' -> 2;
+            case '\u4e09' -> 3;
+            case '\u56db' -> 4;
+            case '\u4e94' -> 5;
+            case '\u516d' -> 6;
+            case '\u4e03' -> 7;
+            case '\u516b' -> 8;
+            case '\u4e5d' -> 9;
+            default -> -1;
+        };
+    }
+
+    private int chineseUnitValue(char value) {
+        return switch (value) {
+            case '\u5341' -> 10;
+            case '\u767e' -> 100;
+            case '\u5343' -> 1000;
+            default -> 0;
+        };
+    }
+
+    private boolean looksLikeContentsChunk(String text) {
+        String normalized = normalizeForTermMatch(text);
+        int headingCount = 0;
+        Matcher matcher = Pattern.compile("(?m)(?:^|\\n)\\s*(?:\\u7b2c\\s*[\\d\\u4e00-\\u9fa5]+\\s*[\\u7ae0\\u8282\\u7bc7]|\\d+(?:\\.\\d+){0,3})").matcher(text == null ? "" : text);
+        while (matcher.find()) {
+            headingCount++;
+            if (headingCount >= 3 || (headingCount >= 2 && (normalized.contains("\u76ee\u5f55") || normalized.contains("contents")))) {
+                return true;
+            }
+        }
+        return normalized.contains("\u7b2c\u4e00\u7ae0") || normalized.contains("\u7b2c1\u7ae0");
+    }
+
+    private boolean looksLikeChapterHeading(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String trimmed = text.trim();
+        return Pattern.compile("^(?:\\u7b2c\\s*[\\d\\u4e00-\\u9fa5]+\\s*[\\u7ae0\\u8282\\u7bc7]|chapter\\s+\\d+|\\d+(?:\\.\\d+){0,3})\\b.*", Pattern.CASE_INSENSITIVE)
+            .matcher(trimmed)
+            .find();
+    }
+
+    private boolean isPrimaryChapterHeading(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        return primaryChapterHeadingPattern()
+            .matcher(text.trim())
+            .find();
+    }
+
+    private Pattern primaryChapterHeadingPattern() {
+        return PRIMARY_CHAPTER_HEADING_PATTERN;
+    }
+
+    private boolean chunkMentionsChapter(MaterialChunkEntity chunk, String chapterNo) {
+        String normalizedText = normalizeForTermMatch(retrievalText(chunk));
+        return normalizedText.contains(normalizeForTermMatch("\u7b2c" + chapterNo + "\u7ae0"))
+            || normalizedText.contains(normalizeForTermMatch("chapter " + chapterNo));
+    }
+
+    private String firstContentLine(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        for (String line : text.split("\\R")) {
+            String trimmed = line.trim();
+            if (!trimmed.isBlank()) {
+                return trimmed;
+            }
+        }
+        return null;
     }
 
     /**

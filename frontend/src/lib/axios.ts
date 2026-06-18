@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { SESSION_KEY } from '@/constants'
+import { apiBaseUrl } from '@/lib/api-base'
 
 /**
  * Axios 实例 — 封装了请求/响应拦截器，是前端与后端通信的核心。
@@ -12,7 +13,7 @@ import { SESSION_KEY } from '@/constants'
  */
 
 const api = axios.create({
-  baseURL: (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, ''),  // API 基础地址，去掉尾部斜杠
+  baseURL: apiBaseUrl(),  // API 基础地址，生产环境会自动规避误打包的 localhost 地址
   timeout: 60000,  // 60 秒超时（AI 问答可能需要较长时间）
 })
 

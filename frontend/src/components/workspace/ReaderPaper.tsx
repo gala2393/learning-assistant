@@ -44,6 +44,7 @@ import {
   Plus,
 } from 'lucide-react'
 import { SESSION_KEY } from '@/constants'
+import { apiBaseUrl } from '@/lib/api-base'
 import { cn } from '@/lib/utils'
 import { useMaterialPageTextLayer } from '@/api/materials'
 import type { MaterialChunk, Material, MaterialPage, MaterialPageTextBlock } from '@/types'
@@ -72,7 +73,7 @@ const A4_PAGE_ASPECT_RATIO = 210 / 297
 const A4_PAGE_HEIGHT_RATIO = 297 / 210
 
 /** API 基础地址（从环境变量读取，去除尾部斜杠） */
-const API_BASE = ((import.meta.env.VITE_API_BASE as string) || '/api').replace(/\/$/, '')
+const API_BASE = apiBaseUrl()
 
 /** PDF.js Worker 必须显式指定，否则 Vite 构建后会找不到 worker 文件。 */
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl

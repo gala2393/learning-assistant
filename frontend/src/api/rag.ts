@@ -2,6 +2,7 @@ import api from '@/lib/axios'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { queryClient } from '@/lib/query-client'
 import { hasStoredSession } from '@/lib/auth-gate'
+import { apiBaseUrl } from '@/lib/api-base'
 import { SESSION_KEY } from '@/constants'
 import type {
   ChatPayload, HistoryItem, RagEvaluationSuiteDetail, RagEvaluationSuitePayload,
@@ -87,7 +88,7 @@ export interface StreamCallbacks {
  */
 export function chatStream(payload: StreamChatPayload, callbacks: StreamCallbacks): AbortController {
   const controller = new AbortController()
-  const base = ((import.meta.env.VITE_API_BASE as string) || '/api').replace(/\/$/, '')
+  const base = apiBaseUrl()
   const session = localStorage.getItem(SESSION_KEY)
   // 流式接口绕过 Axios，需要和普通接口一样从统一 SESSION_KEY 读取 Token。
   const token = session ? JSON.parse(session).token : ''

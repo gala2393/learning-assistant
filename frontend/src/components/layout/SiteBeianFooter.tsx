@@ -2,13 +2,13 @@ import { Link } from 'react-router-dom'
 
 /**
  * 首页底部信息栏。
- * ICP 备案号通过环境变量配置；法律页面入口始终展示，方便本地和线上访问。
+ * ICP 备案号和公安备案号都支持环境变量覆盖，默认展示当前线上备案信息。
  */
 const ICP_BEIAN_TEXT = import.meta.env.VITE_ICP_BEIAN_TEXT?.trim()
 const ICP_BEIAN_URL = import.meta.env.VITE_ICP_BEIAN_URL?.trim() || 'https://beian.miit.gov.cn/'
-const PUBLIC_SECURITY_BEIAN_TEXT = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_TEXT?.trim()
-const PUBLIC_SECURITY_BEIAN_URL = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_URL?.trim()
-const PUBLIC_SECURITY_BEIAN_ICON = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_ICON?.trim() || '/beian-police.png'
+const PUBLIC_SECURITY_BEIAN_TEXT = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_TEXT?.trim() || '闽公网安备35052402061802号'
+const PUBLIC_SECURITY_BEIAN_URL = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_URL?.trim() || 'https://beian.mps.gov.cn/#/query/webSearch?code=35052402061802'
+const PUBLIC_SECURITY_BEIAN_ICON = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_ICON?.trim() || '/beian-icon.png'
 
 export function SiteBeianFooter() {
   return (
