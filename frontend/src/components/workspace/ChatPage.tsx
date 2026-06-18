@@ -911,8 +911,8 @@ export function ChatPage() {
       animate={{ opacity: 1 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="grid h-9 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 bg-white px-3 dark:bg-[#171a21] md:px-5">
-        <div className="min-w-0">
+      <div className="grid min-h-11 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-2 border-b bg-white px-2 py-1.5 dark:border-slate-800 dark:bg-[#171a21] md:h-9 md:grid-cols-[1fr_auto_1fr] md:border-b-0 md:px-5 md:py-0">
+        <div className="hidden min-w-0 md:block">
           <p className="truncate text-xs text-muted-foreground">
             {isGeneral
               ? temporaryMaterial && temporaryMaterialPending
@@ -923,7 +923,7 @@ export function ChatPage() {
                 : '请选择资料后提问'}
           </p>
         </div>
-        <div className="flex rounded-full bg-[#f2f4f7] p-0.5 dark:bg-white/[0.08]">
+        <div className="flex justify-self-start rounded-full bg-[#f2f4f7] p-0.5 dark:bg-white/[0.08] md:justify-self-center">
           <Button
             variant="ghost"
             size="sm"
@@ -949,7 +949,7 @@ export function ChatPage() {
             资料
           </Button>
         </div>
-        <div className="flex min-w-0 items-center justify-end gap-2">
+        <div className="flex min-w-0 items-center justify-end gap-1.5 md:gap-2">
           {!isGeneral && (
             <Button
               type="button"
@@ -986,9 +986,9 @@ export function ChatPage() {
       </div>
 
       {isEmptyChat ? (
-        <div className="flex flex-1 flex-col items-center justify-center px-6 pb-14">
-          <div className="mb-6 text-center">
-            <h2 className="text-4xl font-black tracking-[0.02em] text-black dark:text-white sm:text-5xl">
+        <div className="flex flex-1 flex-col items-center justify-center px-3 pb-4 md:px-6 md:pb-14">
+          <div className="mb-4 text-center md:mb-6">
+            <h2 className="text-3xl font-black tracking-[0.02em] text-black dark:text-white sm:text-5xl">
               {isGeneral ? '智能问答' : '资料问答'}
             </h2>
             <p className="mt-3 text-sm text-muted-foreground">描述问题、上传资料或选择资料后开始提问</p>
@@ -1069,7 +1069,9 @@ export function ChatPage() {
         </div>
       ) : (
         <>
-          <ChatThread messages={messages} onOpenSource={handleOpenSource} onContinueGeneration={handleContinueGeneration} />
+          <div className="min-h-0 flex-1">
+            <ChatThread messages={messages} onOpenSource={handleOpenSource} onContinueGeneration={handleContinueGeneration} />
+          </div>
             <ChatComposer
               value={input}
               onChange={(value) => updateChatSession({ input: value })}

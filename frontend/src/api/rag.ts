@@ -100,7 +100,7 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
   })
     .then(async (response) => {
       if (!response.ok) {
-        callbacks.onError?.(await readStreamErrorMessage(response))
+        callbacks.onError?.(normalizeStreamErrorMessage(await readStreamErrorMessage(response), response.status))
         return
       }
       const reader = response.body?.getReader()
@@ -127,7 +127,7 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
           else if (currentEvent === 'chunk') callbacks.onChunk?.(data.delta || '')
           else if (currentEvent === 'status') callbacks.onStatus?.(data)
           else if (currentEvent === 'done') { receivedTerminalEvent = true; callbacks.onDone?.(data) }
-          else if (currentEvent === 'error') { receivedTerminalEvent = true; callbacks.onError?.(data.message || '未知错误') }
+          else if (currentEvent === 'error') { receivedTerminalEvent = true; callbacks.onError?.(normalizeStreamErrorMessage(data.message || '未知错误')) }
         } catch { /* 跳过格式错误的 SSE 数据，不中断整个流 */ }
       }
 
@@ -148,10 +148,10 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
       }
       // 处理缓冲区中剩余的最后一个帧
       if (buffer.trim()) processFrame(buffer)
-      if (!receivedTerminalEvent) callbacks.onError?.('回答已中断，请重试')
+      if (!receivedTerminalEvent) callbacks.onError?.('回答连接已中断，请重新提问。')
     })
     .catch((err) => {
-      if (err.name !== 'AbortError') callbacks.onError?.(err.message || '网络错误')
+      if (err.name !== 'AbortError') callbacks.onError?.(normalizeStreamErrorMessage(err.message || '网络错误'))
     })
   return controller
 }
@@ -168,6 +168,23 @@ async function readStreamErrorMessage(response: Response) {
       return `请求失败 (${response.status})`
     }
   }
+}
+
+function normalizeStreamErrorMessage(message: string, status?: number) {
+  const raw = String(message || '').trim()
+  const lower = raw.toLowerCase()
+  if (status === 401 || lower.includes('unauthorized')) return '登录状态已失效，请重新登录后再提问。'
+  if (status === 429 || lower.includes('rate limit')) return '当前请求过于频繁，请稍后再试。'
+  if (status === 502 || status === 503 || lower.includes('502') || lower.includes('503')) {
+    return '模型服务暂时不可用，请稍后重试。'
+  }
+  if (status === 504 || lower.includes('timeout') || lower.includes('timed out') || lower.includes('超时')) {
+    return '模型服务响应超时，请缩短问题或稍后重试。'
+  }
+  if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network error')) {
+    return '网络连接异常，未能连接到问答服务。'
+  }
+  return raw || '回答生成失败，请稍后重试。'
 }
 
 // ===== 问答历史管理 =====

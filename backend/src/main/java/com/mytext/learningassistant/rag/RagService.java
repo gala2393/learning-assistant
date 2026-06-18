@@ -168,6 +168,12 @@ public class RagService {
     /** 普通单轮回答的前端展示与历史保存上限，避免超长输出压垮浏览器、SSE 末帧或历史接口。 */
     private static final int MAX_SINGLE_ANSWER_CHARS = 12_000;
 
+    /** 资料问答中低于该分数时，只能视为弱匹配，不能当作可靠资料依据。 */
+    private static final double MATERIAL_WEAK_EVIDENCE_SCORE = 0.62;
+
+    /** 资料问答至少要覆盖用户问题中的这些关键词，避免 rerank 第一名被误当成 100% 相关。 */
+    private static final double MATERIAL_MIN_TERM_COVERAGE = 0.34;
+
     /** 普通回答达到上限时附加的可继续提示。 */
     private static final String ANSWER_LIMIT_CONTINUE_NOTICE =
         "\n\n[本次回答已达到 12000 字上限。可以点击“继续生成”或输入“继续”，系统会接着生成。]";
@@ -438,9 +444,11 @@ public class RagService {
 
         // ===== 检索阶段：从资料中检索与问题最相关的片段 =====
         List<ScoredChunk> selectedChunks = selectContextChunks(userId, request, generalChat);
+        EvidenceStatus evidenceStatus = evidenceStatusFor(request, generalChat, selectedChunks);
 
         // ===== 上下文构建阶段：将检索到的片段组装为 LLM 可理解的上下文文本 =====
         List<String> excerpts = buildExcerpts(request, selectedChunks);
+        excerpts = withEvidenceStatusInstruction(excerpts, evidenceStatus);
         excerpts = withTemporaryMaterialExcerpts(request, excerpts);
 
         // ===== 图片收集阶段：收集用户上传的图片 + 资料中的嵌入图片 =====
@@ -472,6 +480,7 @@ public class RagService {
         String llmQuestion = thirdPartyLlmClient.isModelIdentityQuestion(request.question())
             ? request.question()
             : continuation == null ? questionWithContext : continuationQuestionWithHistory(questionWithContext, continuation);
+        llmQuestion = withEvidenceQuestionInstruction(llmQuestion, evidenceStatus);
         ChatRequest fallbackRequest = request;
         // 调用第三方 LLM 生成回答；超长文档每次只生成一段，用户输入"继续"后再续写下一段。
         LlmCompletion rawCompletion = answerWithLongDocumentSupport(
@@ -488,7 +497,7 @@ public class RagService {
             .orElseGet(() -> new LlmCompletion(
                 generalChat
                     ? buildGeneralFallbackAnswer(fallbackRequest.question())
-                    : buildCleanAnswer(fallbackRequest.question(), selectedChunks, fallbackRequest.answerStyle()),
+                    : buildCleanAnswer(fallbackRequest.question(), selectedChunks, fallbackRequest.answerStyle(), evidenceStatus),
                 "local-rag-demo"
             ));
         // 计算 Token 消耗量（优先使用模型返回的实际值，否则估算）
@@ -498,7 +507,7 @@ public class RagService {
         String answerForStorage = longDocumentAnswer ? rawCompletion.content() : limitAnswerText(rawCompletion.content());
         String decoratedContent = generalChat
             ? decorateGeneralAnswer(answerForStorage)
-            : longDocumentAnswer ? decorateLongDocumentAnswer(answerForStorage) : decorateAnswer(request, answerForStorage, selectedChunks);
+            : longDocumentAnswer ? decorateLongDocumentAnswer(answerForStorage) : decorateAnswer(request, answerForStorage, selectedChunks, evidenceStatus);
         AnswerContinuation continuationMetadata = answerContinuationMetadata(decoratedContent);
         LlmCompletion completion = new LlmCompletion(
             decoratedContent,
@@ -530,7 +539,7 @@ public class RagService {
         updateConversationMemory(userId, savedQuestion.getConversationId());
 
         // 保存本次回答引用的来源片段
-        List<RagQuestionSourceEntity> sourceEntities = saveSources(savedQuestion.getId(), selectedChunks);
+        List<RagQuestionSourceEntity> sourceEntities = saveSources(savedQuestion.getId(), selectedChunks, evidenceStatus);
         // 记录使用日志（用于 Token 消耗统计和审计）
         recordUsageLog(userId, "RAG_CHAT", savedQuestion.getId(), request, completion);
 
@@ -1058,7 +1067,9 @@ public class RagService {
         }
 
         List<ScoredChunk> selectedChunks = selectContextChunks(userId, request, generalChat);
+        EvidenceStatus evidenceStatus = evidenceStatusFor(request, generalChat, selectedChunks);
         List<String> excerpts = buildExcerpts(request, selectedChunks);
+        excerpts = withEvidenceStatusInstruction(excerpts, evidenceStatus);
         excerpts = withTemporaryMaterialExcerpts(request, excerpts);
 
         if (excerpts.isEmpty() && !generalChat && request.materialId() != null) {
@@ -1087,6 +1098,7 @@ public class RagService {
         String llmQuestion = thirdPartyLlmClient.isModelIdentityQuestion(request.question())
             ? request.question()
             : continuation == null ? questionWithContext : continuationQuestionWithHistory(questionWithContext, continuation);
+        llmQuestion = withEvidenceQuestionInstruction(llmQuestion, evidenceStatus);
 
         boolean customModel = thirdPartyLlmClient.hasActiveUserConfig(userId);
         String modelName = thirdPartyLlmClient.effectiveModelName(userId);
@@ -1126,7 +1138,7 @@ public class RagService {
             // LLM 流式调用失败时回退到本地生成，保证 SSE 至少能返回完整答案。
             answer = generalChat
                 ? buildGeneralFallbackAnswer(request.question())
-                : buildCleanAnswer(request.question(), selectedChunks, request.answerStyle());
+                : buildCleanAnswer(request.question(), selectedChunks, request.answerStyle(), evidenceStatus);
             modelName = "local-rag-demo";
             customModel = false;
         }
@@ -1138,11 +1150,11 @@ public class RagService {
         String answerForStorage = longDocumentAnswer ? answer : limitAnswerText(answer);
         String decoratedAnswer = generalChat
             ? decorateGeneralAnswer(answerForStorage)
-            : longDocumentAnswer ? decorateLongDocumentAnswer(answerForStorage) : decorateAnswer(request, answerForStorage, selectedChunks);
+            : longDocumentAnswer ? decorateLongDocumentAnswer(answerForStorage) : decorateAnswer(request, answerForStorage, selectedChunks, evidenceStatus);
         AnswerContinuation continuationMetadata = answerContinuationMetadata(decoratedAnswer);
 
         TokenUsage usage = estimateUsage(llmQuestion, answer);
-        RagQuestionEntity savedQuestion = saveStreamResult(userId, request, conversationId, decoratedAnswer, selectedChunks, modelName, customModel, usage);
+        RagQuestionEntity savedQuestion = saveStreamResult(userId, request, conversationId, decoratedAnswer, selectedChunks, modelName, customModel, usage, evidenceStatus);
         updateConversationMemory(userId, savedQuestion.getConversationId());
         recordUsageLog(userId, "RAG_CHAT_STREAM", savedQuestion.getId(), request, new LlmCompletion(
             decoratedAnswer,
@@ -1154,7 +1166,7 @@ public class RagService {
         ));
 
         List<RagSourceResponse> sources = selectedChunks.stream()
-            .map(this::toSourceResponse)
+            .map(chunk -> toSourceResponse(chunk, evidenceStatus))
             .toList();
 
         return new RagStreamResult(
@@ -1195,7 +1207,8 @@ public class RagService {
             List.of(),
             completion.modelName(),
             completion.customModel(),
-            usage
+            usage,
+            EvidenceStatus.notApplicable()
         );
         updateConversationMemory(userId, savedQuestion.getConversationId());
         recordUsageLog(userId, "RAG_CHAT_STREAM", savedQuestion.getId(), request, completion);
@@ -2870,7 +2883,8 @@ public class RagService {
         List<ScoredChunk> chunks,
         String modelName,
         boolean customModel,
-        TokenUsage usage
+        TokenUsage usage,
+        EvidenceStatus evidenceStatus
     ) {
         try {
             RagQuestionEntity question = new RagQuestionEntity();
@@ -2890,7 +2904,7 @@ public class RagService {
             question.setQuestionStatus(QuestionStatus.SUCCESS);
             RagQuestionEntity saved = ragQuestionRepository.save(question);
             saved = ensureConversationId(saved);
-            saveSources(saved.getId(), chunks);
+            saveSources(saved.getId(), chunks, evidenceStatus);
             return saved;
         } catch (BusinessException exception) {
             throw exception;
@@ -4864,7 +4878,7 @@ public class RagService {
      * 保存问答引用的来源片段信息。
      * 记录每个回答使用了哪些资料的哪些片段，方便前端展示来源引用。
      */
-    private List<RagQuestionSourceEntity> saveSources(long questionId, List<ScoredChunk> topChunks) {
+    private List<RagQuestionSourceEntity> saveSources(long questionId, List<ScoredChunk> topChunks, EvidenceStatus evidenceStatus) {
         List<RagQuestionSourceEntity> saved = new ArrayList<>();
         for (ScoredChunk chunk : topChunks) {
             RagQuestionSourceEntity entity = new RagQuestionSourceEntity();
@@ -4874,7 +4888,7 @@ public class RagService {
             entity.setSourceTitle(chunk.material().getTitle());
             entity.setPageNo(chunk.chunk().getPageNo());
             entity.setExcerpt(excerpt(chunk));
-            entity.setRankScore(chunk.score());
+            entity.setRankScore(displayScore(chunk, evidenceStatus));
             entity.setCreatedAt(LocalDateTime.now());
             saved.add(ragQuestionSourceRepository.save(entity));
         }
@@ -4893,6 +4907,10 @@ public class RagService {
     }
 
     private RagSourceResponse toSourceResponse(ScoredChunk chunk) {
+        return toSourceResponse(chunk, EvidenceStatus.notApplicable());
+    }
+
+    private RagSourceResponse toSourceResponse(ScoredChunk chunk, EvidenceStatus evidenceStatus) {
         MaterialChunkEntity materialChunk = chunk.chunk();
         LearningMaterialEntity material = chunk.material();
         return new RagSourceResponse(
@@ -4901,11 +4919,24 @@ public class RagService {
             material.getTitle(),
             materialChunk.getPageNo(),
             excerpt(chunk),
-            chunk.score()
+            displayScore(chunk, evidenceStatus)
         );
     }
 
-    private String buildCleanAnswer(String question, List<ScoredChunk> topChunks, String answerStyle) {
+    private double displayScore(ScoredChunk chunk, EvidenceStatus evidenceStatus) {
+        double score = Math.max(0.0, Math.min(1.0, chunk.score()));
+        if (!evidenceStatus.blocksMaterialAnswer()) {
+            return score;
+        }
+        double termCoverage = queryTermCoverage(retrievalText(chunk.chunk()), evidenceStatus.queryTerms());
+        double capped = Math.min(score, 0.30 + termCoverage * 0.28);
+        return Math.max(0.18, Math.min(0.58, capped));
+    }
+
+    private String buildCleanAnswer(String question, List<ScoredChunk> topChunks, String answerStyle, EvidenceStatus evidenceStatus) {
+        if (evidenceStatus.blocksMaterialAnswer()) {
+            return noEvidenceAnswer(question);
+        }
         if (topChunks.isEmpty()) {
             return "当前资料未覆盖这个问题。你可以补充对应章节、上传相关资料，或者把问题改得更贴近课程标题、章节名和关键词。";
         }
@@ -5008,7 +5039,7 @@ public class RagService {
      *   <li>正常回答：在末尾添加"资料依据"段落，列出引用的资料名称和页码</li>
      * </ul>
      */
-    private String decorateAnswer(ChatRequest request, String content, List<ScoredChunk> selectedChunks) {
+    private String decorateAnswer(ChatRequest request, String content, List<ScoredChunk> selectedChunks, EvidenceStatus evidenceStatus) {
         String question = request.question();
         String answerStyle = request.answerStyle();
         if (request.selectedText() != null && !request.selectedText().isBlank()) {
@@ -5046,14 +5077,74 @@ public class RagService {
         if (answer.contains("书本依据") || answer.contains("原文依据")) {
             return answer;
         }
+        if (evidenceStatus.blocksMaterialAnswer() && !isCasualQuestion(question)) {
+            return weakEvidenceAnswer(question, answer);
+        }
         String title = isHomeworkStyle(answerStyle) ? "原文依据" : "资料依据";
         return answer + "\n\n" + title + "：\n" + evidence;
+    }
+
+    private EvidenceStatus evidenceStatusFor(ChatRequest request, boolean generalChat, List<ScoredChunk> selectedChunks) {
+        if (generalChat || request == null || !isMaterialChat(request) || request.selectedText() != null && !request.selectedText().isBlank()) {
+            return EvidenceStatus.notApplicable();
+        }
+        double topScore = selectedChunks.stream()
+            .mapToDouble(ScoredChunk::score)
+            .max()
+            .orElse(0.0);
+        List<String> queryTerms = significantQueryTerms(request.question());
+        double topTermCoverage = selectedChunks.stream()
+            .mapToDouble(chunk -> queryTermCoverage(retrievalText(chunk.chunk()), queryTerms))
+            .max()
+            .orElse(0.0);
+        if (selectedChunks.isEmpty() || topScore < MATERIAL_WEAK_EVIDENCE_SCORE || topTermCoverage < MATERIAL_MIN_TERM_COVERAGE) {
+            return new EvidenceStatus(true, topScore, topTermCoverage, queryTerms);
+        }
+        return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
+    }
+
+    private List<String> withEvidenceStatusInstruction(List<String> excerpts, EvidenceStatus evidenceStatus) {
+        if (!evidenceStatus.blocksMaterialAnswer()) {
+            return excerpts;
+        }
+        List<String> guardedExcerpts = new ArrayList<>(excerpts.size() + 1);
+        guardedExcerpts.add("[资料检索状态]\n"
+            + "系统没有在当前资料中找到能够可靠支撑回答用户问题的片段。"
+            + "下面如有片段，也只是低匹配度的检索诊断结果，不能当作资料依据。"
+            + "请明确告知用户：当前资料里没有找到可靠依据，不能用通用知识冒充资料内容。");
+        guardedExcerpts.addAll(excerpts);
+        return guardedExcerpts;
+    }
+
+    private String withEvidenceQuestionInstruction(String question, EvidenceStatus evidenceStatus) {
+        if (!evidenceStatus.blocksMaterialAnswer()) {
+            return question;
+        }
+        return question + "\n\n[资料依据约束]\n"
+            + "当前资料检索最高匹配度约为 " + Math.round(evidenceStatus.topScore() * 100) + "%，低于可靠回答阈值。"
+            + "问题关键词在资料片段中的覆盖率约为 " + Math.round(evidenceStatus.termCoverage() * 100) + "%。"
+            + "请先明确说明：当前资料里没有找到可靠依据来回答这个问题。"
+            + "然后可以在“通用知识补充”小节给出简洁正确答案，但必须声明这部分不是来自当前资料，不能冒充资料依据。";
     }
 
     private String noEvidenceAnswer(String question) {
         return "当前资料里没有检索到足够依据来回答这个问题。\n\n"
             + "问题：" + (question == null ? "" : question.trim()) + "\n\n"
             + "可以补充更相关的章节、选中原文后提问，或换成资料中出现的关键词再试。";
+    }
+
+    private String weakEvidenceAnswer(String question, String answer) {
+        String cleanedAnswer = removeNoSourceNotice(cleanAnswerText(answer));
+        if (cleanedAnswer.isBlank()) {
+            return noEvidenceAnswer(question);
+        }
+        if (cleanedAnswer.contains("通用知识补充") || cleanedAnswer.contains("不是来自当前资料")) {
+            return cleanedAnswer;
+        }
+        return "当前资料里没有检索到足够依据来回答这个问题。\n\n"
+            + "问题：" + (question == null ? "" : question.trim()) + "\n\n"
+            + "通用知识补充（不是来自当前资料）：\n"
+            + cleanedAnswer;
     }
 
     private boolean isHomeworkStyle(String answerStyle) {
@@ -5951,6 +6042,18 @@ public class RagService {
     ) {
         private ScoredChunk(LearningMaterialEntity material, MaterialChunkEntity chunk, double score) {
             this(material, chunk, score, List.of());
+        }
+    }
+
+    /** 当前资料是否足以作为本轮回答依据的内部判定结果。 */
+    private record EvidenceStatus(
+        boolean blocksMaterialAnswer,
+        double topScore,
+        double termCoverage,
+        List<String> queryTerms
+    ) {
+        private static EvidenceStatus notApplicable() {
+            return new EvidenceStatus(false, 1.0, 1.0, List.of());
         }
     }
 }

@@ -272,7 +272,7 @@ export function ChatComposer({
 
   // === 渲染 ===
   return (
-    <div className={centered ? 'w-full' : 'bg-white px-3 py-2 dark:bg-[#171a21] md:px-4 md:py-2.5'}>
+    <div className={centered ? 'w-full' : 'bg-white px-3 pb-3 pt-2 dark:bg-[#171a21] md:px-4 md:py-2.5'}>
       <div className={centered ? 'mx-auto w-full max-w-[760px] space-y-2' : 'mx-auto max-w-3xl space-y-1'}>
 
         {/* ---- 已添加的图片预览区域 ---- */}
@@ -390,8 +390,8 @@ export function ChatComposer({
                 placeholder={mode === 'GENERAL' ? '描述你的问题，或粘贴图片后提问' : '基于当前资料提问，可附加图片...'}
                 className={
                   centered
-                    ? 'min-h-[50px] resize-none border-0 bg-transparent px-0 py-0 text-[15px] shadow-none outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0'
-                    : 'min-h-[42px] resize-none border-0 bg-transparent px-0 py-0 text-sm shadow-none outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0'
+                    ? 'min-h-[50px] resize-none border-0 bg-transparent px-0 py-0 text-base shadow-none outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 md:text-[15px]'
+                    : 'min-h-[42px] resize-none border-0 bg-transparent px-0 py-0 text-base shadow-none outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 md:text-sm'
                 }
                 rows={1}
               />

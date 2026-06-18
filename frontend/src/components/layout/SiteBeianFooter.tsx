@@ -6,6 +6,9 @@ import { Link } from 'react-router-dom'
  */
 const ICP_BEIAN_TEXT = import.meta.env.VITE_ICP_BEIAN_TEXT?.trim()
 const ICP_BEIAN_URL = import.meta.env.VITE_ICP_BEIAN_URL?.trim() || 'https://beian.miit.gov.cn/'
+const PUBLIC_SECURITY_BEIAN_TEXT = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_TEXT?.trim()
+const PUBLIC_SECURITY_BEIAN_URL = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_URL?.trim()
+const PUBLIC_SECURITY_BEIAN_ICON = import.meta.env.VITE_PUBLIC_SECURITY_BEIAN_ICON?.trim() || '/beian-police.png'
 
 export function SiteBeianFooter() {
   return (
@@ -23,6 +26,12 @@ export function SiteBeianFooter() {
         {ICP_BEIAN_TEXT ? (
           <a className="transition hover:text-slate-800 hover:underline" href={ICP_BEIAN_URL} target="_blank" rel="noreferrer">
             {ICP_BEIAN_TEXT}
+          </a>
+        ) : null}
+        {PUBLIC_SECURITY_BEIAN_TEXT && PUBLIC_SECURITY_BEIAN_URL ? (
+          <a className="inline-flex items-center gap-1 transition hover:text-slate-800 hover:underline" href={PUBLIC_SECURITY_BEIAN_URL} target="_blank" rel="noreferrer">
+            <img className="h-4 w-4 shrink-0" src={PUBLIC_SECURITY_BEIAN_ICON} alt="" aria-hidden="true" />
+            <span>{PUBLIC_SECURITY_BEIAN_TEXT}</span>
           </a>
         ) : null}
       </div>

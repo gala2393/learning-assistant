@@ -81,8 +81,8 @@ export function AppShell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   // 个人资料弹窗的开关状态
   const [profileOpen, setProfileOpen] = useState(false)
-  // 判断当前是否为聊天页面（聊天页面有不同的布局策略）
-  const isChat = location.pathname === '/workspace/chat'
+  // 聊天和阅读器都是高频交互页面，需要自己管理内部滚动，外层不能再加 padding 和滚动条。
+  const isImmersiveWorkspace = location.pathname === '/workspace/chat' || location.pathname === '/workspace/reader'
   // 移动端底部 Tab 栏只显示前 4 个工作区菜单项
   const mobileSections = WORKSPACE_SECTIONS.slice(0, 4)
 
@@ -117,7 +117,7 @@ export function AppShell() {
         {/* 顶部栏 */}
         <TopBar onOpenMobileMenu={() => setMobileMenuOpen(true)} />
         {/* 主内容：聊天页面不使用 padding 和滚动，其他页面使用 */}
-        <main className={isChat ? 'min-h-0 flex-1 overflow-hidden pb-16 md:pb-0' : 'min-h-0 flex-1 overflow-y-auto p-3 pb-20 md:p-6 md:pb-6'}>
+        <main className={isImmersiveWorkspace ? 'min-h-0 flex-1 overflow-hidden pb-16 md:pb-0' : 'min-h-0 flex-1 overflow-y-auto p-3 pb-20 md:p-6 md:pb-6'}>
           {/* 子路由内容渲染点 */}
           <Outlet />
         </main>

@@ -102,6 +102,7 @@ public class LlmController {
      * @param currentUserId 当前登录用户 ID（由拦截器注入）
      * @return 用户 LLM 配置响应，包含是否启用、当前激活配置、配置列表
      */
+    //查看AI是否可用
     @GetMapping("/user-config")
     public ApiResponse<UserLlmConfigResponse> userConfig(@RequestAttribute("currentUserId") long currentUserId) {
         return ApiResponse.ok(toResponse(currentUserId));
@@ -123,6 +124,8 @@ public class LlmController {
      * @param request       用户 LLM 配置请求（包含 baseUrl、apiKey、model 等）
      * @return 保存后的用户 LLM 配置响应
      */
+
+    //保存用户自己配置的AI配置
     @PutMapping("/user-config")
     @Transactional
     public ApiResponse<UserLlmConfigResponse> saveUserConfig(
@@ -184,6 +187,7 @@ public class LlmController {
      * @param request       用户 LLM 配置请求
      * @return 测试结果，包含是否成功、提示信息和实际模型名
      */
+    //测试AI连接
     @PostMapping("/user-config/test")
     public ApiResponse<UserLlmTestResponse> testUserConfig(
         @RequestAttribute("currentUserId") long currentUserId,

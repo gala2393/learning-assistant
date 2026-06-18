@@ -27,14 +27,20 @@ export function SourceCard({ source, rank, maxScore, onOpen }: SourceCardProps) 
   // 相关度分数：0~1 之间，转为百分比显示
   const rawScore = Number(source.score || 0)
   const scorePercent = Math.round(Math.max(0, Math.min(1, rawScore)) * 100)
+  const weakEvidence = rawScore < 0.62
+  const reliableEvidence = rawScore >= 0.75
+  const scoreLabel = weakEvidence ? `弱相关 ${scorePercent}%` : reliableEvidence ? `匹配 ${scorePercent}%` : `待核对 ${scorePercent}%`
   // 相对百分比：相对于最高分的占比，用于进度条宽度
-  const relativePercent = Math.round((rawScore / Math.max(maxScore || rawScore || 1, 0.001)) * 100)
+  const relativePercent = weakEvidence
+    ? scorePercent
+    : Math.round((rawScore / Math.max(maxScore || rawScore || 1, 0.001)) * 100)
   const clickable = !!onOpen
 
   return (
     <Card
       className={cn(
-        'overflow-hidden border-l-4 border-l-primary/60 bg-white/90 shadow-sm dark:border-slate-700 dark:bg-slate-900/70',
+        'overflow-hidden border-l-4 bg-white/90 shadow-sm dark:border-slate-700 dark:bg-slate-900/70',
+        weakEvidence ? 'border-l-amber-400/70' : reliableEvidence ? 'border-l-primary/60' : 'border-l-sky-400/70',
         clickable && 'cursor-pointer transition-colors hover:bg-muted/60 dark:hover:bg-slate-800/80',
         clickable && 'group',
       )}
@@ -71,8 +77,14 @@ export function SourceCard({ source, rank, maxScore, onOpen }: SourceCardProps) 
               </Badge>
             )}
             {/* 相关度百分比标签 */}
-            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-              {scorePercent}%
+            <Badge
+              variant={weakEvidence ? 'outline' : 'secondary'}
+              className={cn(
+                'text-[10px] px-1.5 py-0',
+                weakEvidence && 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200',
+              )}
+            >
+              {scoreLabel}
             </Badge>
             {/* 可点击时显示外部链接图标 */}
             {clickable && (
@@ -88,10 +100,18 @@ export function SourceCard({ source, rank, maxScore, onOpen }: SourceCardProps) 
         {/* 相关度渐变进度条 */}
         <div className="h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
           <div
-            className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-emerald-500 to-amber-400"
+            className={cn(
+              'h-full rounded-full',
+              weakEvidence ? 'bg-amber-300 dark:bg-amber-600' : 'bg-gradient-to-r from-cyan-500 via-emerald-500 to-amber-400',
+            )}
             style={{ width: `${Math.max(6, Math.min(100, relativePercent))}%` }}
           />
         </div>
+        {weakEvidence && (
+          <p className="text-xs leading-relaxed text-amber-700 dark:text-amber-200">
+            资料依据不足：该片段只是系统尝试匹配的弱相关结果。
+          </p>
+        )}
         {/* 摘要文本（截断到 120 字符） */}
         {source.excerpt && (
           <p className="text-xs text-muted-foreground leading-relaxed">

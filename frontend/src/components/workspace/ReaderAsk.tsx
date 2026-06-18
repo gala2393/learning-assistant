@@ -233,9 +233,19 @@ export function ReaderAsk({
       const idx = locateSourceChunkIndex(source, chunks || [], chunkIndexById)
       if (idx !== undefined) {
         onNavigateToChunk?.(idx, { pageNo: source.pageNo || null })
+        return
+      }
+      const pageNo = Number(source.pageNo)
+      if (Number.isFinite(pageNo) && pageNo > 0 && material?.id) {
+        const params = new URLSearchParams()
+        params.set('materialId', material.id)
+        if (source.chunkId) params.set('chunkId', String(source.chunkId))
+        params.set('pageNo', String(pageNo))
+        params.set('view', 'smart')
+        navigate(`/workspace/reader?${params.toString()}`, { replace: true })
       }
     },
-    [chunkIndexById, chunks, onNavigateToChunk],
+    [chunkIndexById, chunks, material?.id, navigate, onNavigateToChunk],
   )
 
   /** 将某段历史会话恢复到问答面板，并记录 conversationId 供后续追问续接。 */
@@ -343,13 +353,13 @@ export function ReaderAsk({
             {conversationId ? '已恢复资料会话' : '新对话'}
           </Badge>
           <div className="flex shrink-0 items-center gap-1">
-            <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={startNewConversation} disabled={!material || loading}>
+            <Button variant="outline" size="sm" className="h-8 px-2 text-[11px] md:h-7" onClick={startNewConversation} disabled={!material || loading}>
               <Plus className="mr-1 h-3 w-3" /> 新对话
             </Button>
             <Button
               variant="outline"
               size="sm"
-              className="h-7 px-2 text-[11px]"
+              className="h-8 px-2 text-[11px] md:h-7"
               onClick={() => setHistoryDialogOpen(true)}
               disabled={!material}
             >
@@ -404,7 +414,7 @@ export function ReaderAsk({
       )}
 
       {/* ---- 底部输入区域 ---- */}
-      <div className="shrink-0 space-y-2 border-t p-3">
+      <div className="shrink-0 space-y-2 border-t p-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] lg:pb-3">
         {/* 选中文本短提示条：完整文本仍保存在状态里提交给后端，这里只展示摘要和清除入口。 */}
         {selectedText && (
           <div className="flex items-center gap-2 rounded-md border border-cyan-100 bg-cyan-50/70 px-2 py-1.5 text-[11px] text-cyan-900 dark:border-cyan-900/50 dark:bg-cyan-950/30 dark:text-cyan-100">
@@ -432,7 +442,7 @@ export function ReaderAsk({
               ? '今日问答次数已用完'
               : (selectedText ? '围绕选中文本继续追问...' : '针对当前资料继续提问...')
             : '请先选择一份资料'}
-          className="min-h-[64px] resize-none text-sm"
+          className="max-h-28 min-h-[56px] resize-none text-base md:min-h-[64px] md:text-sm"
           disabled={!material || usageExhausted}
         />
         {/* 提交和清空按钮 */}

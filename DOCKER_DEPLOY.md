@@ -96,7 +96,30 @@ docker compose down
 
 不要在服务器上直接执行 `rm -rf frontend-dist && mv frontend-dist.new frontend-dist`。Nginx 容器通过 Docker bind mount 挂载这个目录，删除并重建目录会让运行中的容器继续指向旧目录，表现为首页 403、子路由 500。正确方式是保留目录，只替换里面的文件。
 
-## 4. Qdrant 对速度的影响
+## 4. 服务器 Nginx 合规与安全配置
+
+服务器 Nginx 配置模板见：`deploy/nginx-default.conf`。它包含：
+
+- HTTP 自动 301 跳转到 HTTPS。
+- `learnstudy.cloud` 和 `www.learnstudy.cloud` 同时可访问。
+- 静态首页和静态资源安全响应头：
+  - `Strict-Transport-Security`
+  - `X-Content-Type-Options`
+  - `Referrer-Policy`
+  - `X-Frame-Options`
+  - `Content-Security-Policy`
+- React Router history fallback。
+- `/api` 反向代理到后端。
+- 资料阅读器图片私有缓存。
+
+修改服务器 Nginx 配置后先测试再 reload：
+
+```bash
+docker exec learning-nginx nginx -t
+docker exec learning-nginx nginx -s reload
+```
+
+## 5. Qdrant 对速度的影响
 
 Qdrant 能加速的是“从大量资料片段中找相似片段”的阶段。资料数量越多、片段越多，收益越明显。
 

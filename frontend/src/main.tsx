@@ -8,6 +8,8 @@ import { router } from '@/routes'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import './index.css'
 
+document.getElementById('static-beian-footer')?.remove()
+
 /**
  * 前端应用入口文件 — 整个 React 应用从这里开始。
  *

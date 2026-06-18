@@ -77,6 +77,38 @@ const API_BASE = ((import.meta.env.VITE_API_BASE as string) || '/api').replace(/
 /** PDF.js Worker 必须显式指定，否则 Vite 构建后会找不到 worker 文件。 */
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
+/** 页面图片 ObjectURL 缓存上限；手机端翻大 PDF 时反复回到相邻页，不必重复下载同一张预览图。 */
+const MATERIAL_IMAGE_CACHE_LIMIT = 40
+
+/** 后端页面图片请求缓存，key 为 materialId + fileName。 */
+const materialImageUrlCache = new Map<string, string>()
+
+/** 正在请求中的页面图片 Promise，避免同一页被多个组件重复 fetch。 */
+const materialImageInflight = new Map<string, Promise<string>>()
+
+function rememberMaterialImageUrl(cacheKey: string, objectUrl: string) {
+  const old = materialImageUrlCache.get(cacheKey)
+  if (old && old !== objectUrl) URL.revokeObjectURL(old)
+  materialImageUrlCache.delete(cacheKey)
+  materialImageUrlCache.set(cacheKey, objectUrl)
+
+  while (materialImageUrlCache.size > MATERIAL_IMAGE_CACHE_LIMIT) {
+    const firstKey = materialImageUrlCache.keys().next().value
+    if (!firstKey) break
+    const firstUrl = materialImageUrlCache.get(firstKey)
+    if (firstUrl) URL.revokeObjectURL(firstUrl)
+    materialImageUrlCache.delete(firstKey)
+  }
+}
+
+function getCachedMaterialImageUrl(cacheKey: string) {
+  const cached = materialImageUrlCache.get(cacheKey)
+  if (!cached) return null
+  materialImageUrlCache.delete(cacheKey)
+  materialImageUrlCache.set(cacheKey, cached)
+  return cached
+}
+
 /** 连续阅读实时上下文：右侧问答只依赖用户当前停留的页/片段，不再依赖旧的阅读模式。 */
 export type ReaderReadingContext = {
   pageNo: number | null
@@ -118,6 +150,15 @@ function windowRange(centerIndex: number, total: number, radius: number) {
 function supportsPdfPreview(material: Material | null) {
   const type = String(material?.sourceType || '').toUpperCase()
   return ['PDF', 'DOC', 'DOCX', 'PPT', 'PPTX'].includes(type)
+}
+
+function prefersLightweightPagePreview() {
+  if (typeof window === 'undefined') return false
+  const ua = navigator.userAgent || ''
+  const isCoarsePointer = window.matchMedia?.('(pointer: coarse)').matches
+  const isNarrowScreen = window.matchMedia?.('(max-width: 767px)').matches
+  const isMobileUa = /Mobile|Android|iPhone|iPad|iPod|MicroMessenger/i.test(ua)
+  return Boolean(isCoarsePointer || isNarrowScreen || isMobileUa)
 }
 
 /** 根据真实资料类型展示阅读器模式，避免 Word/PPT 预览被误标为 PDF 阅读器。 */
@@ -196,14 +237,22 @@ function MaterialImage({
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    let revoked = false
-    let objectUrl: string | null = null
+    let cancelled = false
+    const cacheKey = `${materialId}:${fileName}`
     setSrc(null)
     setError(null)
 
-    // 带认证头的图片请求
+    const cachedUrl = getCachedMaterialImageUrl(cacheKey)
+    if (cachedUrl) {
+      setSrc(cachedUrl)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    // 带认证头的图片请求；请求结果会进入模块级 LRU 缓存，提升手机端大 PDF 翻页体验。
     const token = getAuthToken()
-    fetch(imageUrl(materialId, fileName), {
+    const loadPromise = materialImageInflight.get(cacheKey) || fetch(imageUrl(materialId, fileName), {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
       .then(async (res) => {
@@ -214,21 +263,30 @@ function MaterialImage({
         return res.blob()
       })
       .then((blob) => {
-        if (revoked) return
-        objectUrl = URL.createObjectURL(blob)
-        setSrc(objectUrl)
+        const objectUrl = URL.createObjectURL(blob)
+        rememberMaterialImageUrl(cacheKey, objectUrl)
+        materialImageInflight.delete(cacheKey)
+        return objectUrl
       })
-      .catch(() => {
-        if (!revoked) {
-          setError('图片加载失败')
-          onError?.()
-        }
+      .catch((error) => {
+        materialImageInflight.delete(cacheKey)
+        throw error
       })
 
-    // 清理函数：释放 ObjectURL 防止内存泄漏
+    materialImageInflight.set(cacheKey, loadPromise)
+    loadPromise
+      .then((objectUrl) => {
+        if (!cancelled) setSrc(objectUrl)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setError('图片加载失败')
+        onError?.()
+      })
+
+    // ObjectURL 交给模块级缓存统一释放，组件卸载时只取消本次状态更新。
     return () => {
-      revoked = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
+      cancelled = true
     }
   }, [materialId, fileName])
 
@@ -695,6 +753,8 @@ export function ReaderPaper({
   const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null)
   /** PDF.js 是否加载失败；失败后不再反复请求同一份预览 PDF。 */
   const [pdfPreviewFailed, setPdfPreviewFailed] = useState(false)
+  /** 移动端和微信内置浏览器优先使用后端页面图片，避免 PDF.js 在手机上加载整份大 PDF。 */
+  const [lightweightPreview, setLightweightPreview] = useState(() => prefersLightweightPagePreview())
   /** 底部页码/片段跳转输入值，跟随当前滚动上下文同步。 */
   const [jumpValue, setJumpValue] = useState('1')
   /** 用户正在编辑跳转输入时暂停滚动同步，避免输入内容被 IntersectionObserver 覆盖。 */
@@ -715,7 +775,7 @@ export function ReaderPaper({
   /** 是否使用页面图片预览模式（有页面图片 + 预览就绪 + 未失败） */
   const hasPagePreview = !!material?.id && pages.length > 0 && material.previewStatus === 'READY' && !pagePreviewFailed
   /** 是否优先使用 PDF.js 阅读器；它直接读取预览 PDF，不依赖后端 page-N.png 图片资产。 */
-  const usesPdfPreview = hasPagePreview && supportsPdfPreview(material) && !!pdfDocument && !pdfPreviewFailed
+  const usesPdfPreview = hasPagePreview && !lightweightPreview && supportsPdfPreview(material) && !!pdfDocument && !pdfPreviewFailed
   /** 是否按页面连续阅读：PDF/Word 等已转换出页面图片时，统一渲染所有页面。 */
   const usesPageCanvas = hasPagePreview
   /** 是否显示页面控制（缩放、页码标签等，仅页面预览模式时显示） */
@@ -735,8 +795,10 @@ export function ReaderPaper({
     return null
   }, [chunk.id, chunk.pageNo, chunks, pages])
   const validTargetPageNo = Number.isFinite(Number(targetPageNo)) && Number(targetPageNo) > 0 ? Number(targetPageNo) : null
-  // 当前页码：优先覆盖值 > 片段页码 > 外部目标页码 > 第一页
-  const currentPageNo = currentPageOverride || chunkPageNo || validTargetPageNo || pages[0]?.pageNo || 1
+  const targetScrollKey = `${material?.id || ''}:${validTargetPageNo || ''}:${chunk.id || ''}`
+  // 当前页码：优先用户手动覆盖，其次使用外部恢复页码，最后才回落到当前片段页码。
+  // 从其他模块切回阅读器时，组件会先用默认片段挂载；如果片段页码优先，会把已保存的第 54 页覆盖成第 1 页。
+  const currentPageNo = currentPageOverride || validTargetPageNo || chunkPageNo || pages[0]?.pageNo || 1
   const firstContentPage = pages.find((page) => page.chunkIds.length > 0) || pages[0]
   const currentPage = pages.find((page) => page.pageNo === currentPageNo)
     || firstContentPage
@@ -772,21 +834,23 @@ export function ReaderPaper({
 
   /** 切换片段时重置页码覆盖和预览失败状态 */
   useEffect(() => {
+    if (validTargetPageNo) return
     setCurrentPageOverride(null)
-  }, [material?.id, chunk.id])
+  }, [material?.id, chunk.id, validTargetPageNo])
 
   /** 资料切换时重置连续阅读定位状态，避免新资料沿用上一份资料的页码或预览失败标记。 */
   useEffect(() => {
     setCurrentPageOverride(null)
     setPagePreviewFailed(false)
     setPdfPreviewFailed(false)
+    setLightweightPreview(prefersLightweightPagePreview())
     pageRefs.current = {}
     chunkRefs.current = {}
   }, [material?.id, material?.sourceType])
 
   /** 加载预览 PDF：PDF.js 只负责显示，扫描件文字抽取仍由后端 OCR 产出 chunks。 */
   useEffect(() => {
-    if (!material?.id || !hasPagePreview || !supportsPdfPreview(material) || pdfPreviewFailed) {
+    if (!material?.id || lightweightPreview || !hasPagePreview || !supportsPdfPreview(material) || pdfPreviewFailed) {
       setPdfDocument(null)
       return
     }
@@ -822,7 +886,7 @@ export function ReaderPaper({
         return null
       })
     }
-  }, [hasPagePreview, material, pdfPreviewFailed])
+  }, [hasPagePreview, lightweightPreview, material, pdfPreviewFailed])
 
   useEffect(() => {
     if (jumpFocused) return
@@ -953,10 +1017,10 @@ export function ReaderPaper({
 
   /** 外部 URL 带 pageNo 进入阅读器时，只在初次目标变化时定位一次。 */
   useEffect(() => {
-    if (!targetPageNo || !usesPageCanvas) return
-    pendingScrollRef.current = { type: 'page', pageNo: targetPageNo }
-    setCurrentPageOverride(targetPageNo)
-  }, [material?.id, targetPageNo, usesPageCanvas])
+    if (!validTargetPageNo || !usesPageCanvas) return
+    pendingScrollRef.current = { type: 'page', pageNo: validTargetPageNo }
+    setCurrentPageOverride(validTargetPageNo)
+  }, [targetScrollKey, validTargetPageNo, usesPageCanvas])
 
   // 预加载相邻页面图片（提升翻页体验）
   useEffect(() => {
@@ -1163,18 +1227,18 @@ export function ReaderPaper({
   return (
     <div className="reader-paper flex-1 flex flex-col overflow-hidden">
       {/* ---- 顶部工具栏：单一连续阅读状态、缩放控制、原文件按钮、进度条 ---- */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2 md:gap-3 md:px-6 md:py-3">
-        <div className="flex min-w-[10rem] flex-1 items-center gap-2">
-          <h3 className="text-sm font-medium truncate">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-2 py-1.5 md:gap-3 md:px-6 md:py-3">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 md:min-w-[10rem] md:gap-2">
+          <h3 className="min-w-0 flex-[1_1_100%] truncate text-xs font-medium md:flex-1 md:text-sm">
             {material?.title || material?.originalName || '未选择资料'}
           </h3>
           {showPageControls && currentPage && (
-            <Badge variant="outline" className="text-xs">P{currentPage.pageNo}/{pages.length}</Badge>
+            <Badge variant="outline" className="text-[10px] md:text-xs">P{currentPage.pageNo}/{pages.length}</Badge>
           )}
           {!showPageControls && chunkPageNo && (
-            <Badge variant="outline" className="text-xs">P{chunkPageNo}</Badge>
+            <Badge variant="outline" className="text-[10px] md:text-xs">P{chunkPageNo}</Badge>
           )}
-          <Badge variant="secondary" className="text-xs">
+          <Badge variant="secondary" className="text-[10px] md:text-xs">
             {readerModeLabel(material, usesPageCanvas, usesPdfPreview)}
           </Badge>
           {material?.previewStatus === 'DEGRADED' && (
@@ -1182,7 +1246,7 @@ export function ReaderPaper({
           )}
         </div>
 
-        <div className="flex shrink-0 items-center gap-1.5 md:gap-2">
+        <div className="flex shrink-0 items-center gap-1 md:gap-2">
           {/* 缩放控制（仅页面预览模式） */}
           {showPageControls && (
             <div className="flex items-center rounded-md border bg-background">
@@ -1212,7 +1276,7 @@ export function ReaderPaper({
       {usesPageCanvas ? renderContinuousPages() : renderContinuousChunks()}
 
       {/* 底部跳转栏：只保留页码输入，避免片段式导航和窗口化滚动互相抢状态。 */}
-      <div className="flex items-center justify-center gap-2 border-t px-3 py-2 md:px-6 md:py-3">
+      <div className="flex items-center justify-center gap-2 border-t px-3 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 md:px-6 md:py-3">
         <form
           className="flex min-w-0 flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground"
           onSubmit={(event) => {
@@ -1228,12 +1292,12 @@ export function ReaderPaper({
             onBlur={() => {
               setJumpFocused(false)
             }}
-            className="h-8 w-16 rounded-md border bg-background px-2 text-center text-sm text-foreground outline-none focus:border-cyan-400"
+            className="h-8 w-16 rounded-md border bg-background px-2 text-center text-base text-foreground outline-none focus:border-cyan-400 md:text-sm"
             inputMode="numeric"
             aria-label={usesPageCanvas ? '跳转页码' : '跳转阅读页'}
           />
           <span>{`页 / 共 ${jumpCount} 页`}</span>
-          <Button variant="outline" size="sm" className="h-8 px-2 text-xs" type="submit">
+          <Button variant="outline" size="sm" className="h-8 px-3 text-xs" type="submit">
             跳转
           </Button>
         </form>

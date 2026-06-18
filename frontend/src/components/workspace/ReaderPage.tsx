@@ -274,7 +274,9 @@ export function ReaderPage() {
    */
   useEffect(() => {
     if (!selectedMaterialId || !currentChunk) return
-    const currentPageNo = pageNoForChunk(currentChunk, selectedChunkIndex, chunks, pages)
+    if (askCurrentPageNo && readingChunk) return
+    const currentPageNo = requestedPageNo
+      || pageNoForChunk(currentChunk, selectedChunkIndex, chunks, pages)
       || currentPage?.pageNo
       || null
     // 通过 URL 直接打开指定页时，chunks/pages 可能比 selectedChunkIndex 晚一步加载。
@@ -292,17 +294,36 @@ export function ReaderPage() {
     const nextParams = new URLSearchParams({ materialId: selectedMaterialId, chunkId: String(currentChunk.id) })
     if (currentPageNo && currentPageNo > 0) nextParams.set('pageNo', String(currentPageNo))
     setSearchParams(nextParams, { replace: true })
-  }, [chunkParam, chunks, currentChunk, currentPage, materialParam, pageParam, pages, requestedChunkIndex, requestedPageChunkIndex, requestedPageNo, selectedChunkIndex, selectedMaterialId, setSearchParams])
+  }, [askCurrentPageNo, chunkParam, chunks, currentChunk, currentPage, materialParam, pageParam, pages, readingChunk, requestedChunkIndex, requestedPageChunkIndex, requestedPageNo, selectedChunkIndex, selectedMaterialId, setSearchParams])
 
   /** 当前阅读上下文变化时写入本地快照，供下次无参数进入 Reader 时恢复。 */
   useEffect(() => {
     if (!selectedMaterialId) return
     writeReaderContextSnapshot({
       materialId: selectedMaterialId,
-      chunkId: currentChunk?.id == null ? chunkParam || null : String(currentChunk.id),
+      chunkId: readingChunk?.id == null ? chunkParam || null : String(readingChunk.id),
       pageNo: askCurrentPageNo || requestedPageNo || null,
     })
-  }, [askCurrentPageNo, chunkParam, currentChunk, requestedPageNo, selectedMaterialId])
+  }, [askCurrentPageNo, chunkParam, readingChunk, requestedPageNo, selectedMaterialId])
+
+  /**
+   * 将真实滚动位置轻量同步到 URL。
+   * 仅用 replace 更新，不制造历史记录；这样从其他模块切回、刷新页面、复制链接都能回到当前页。
+   */
+  useEffect(() => {
+    if (!selectedMaterialId || !readingChunk || !askCurrentPageNo) return
+    if (
+      materialParam === selectedMaterialId
+      && chunkParam === String(readingChunk.id)
+      && pageParam === String(askCurrentPageNo)
+    ) return
+
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.set('materialId', selectedMaterialId)
+    nextParams.set('chunkId', String(readingChunk.id))
+    nextParams.set('pageNo', String(askCurrentPageNo))
+    setSearchParams(nextParams, { replace: true })
+  }, [askCurrentPageNo, chunkParam, materialParam, pageParam, readingChunk, searchParams, selectedMaterialId, setSearchParams])
 
   // === 副作用：右侧面板宽度调整 ===
 
@@ -533,13 +554,14 @@ export function ReaderPage() {
       {/* ============================================ */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {/* 移动端顶部导航栏（显示资料名 + 目录/问答按钮） */}
-        <div className="flex items-center justify-between gap-2 border-b bg-background px-3 py-2 lg:hidden">
+        <div className="flex min-h-11 items-center justify-between gap-2 border-b bg-background px-2 py-1.5 lg:hidden">
           <Button variant="outline" size="sm" className="h-8 gap-1.5 px-2 text-xs" onClick={() => setMobilePanel('toc')}>
             <ListTree className="h-3.5 w-3.5" />
             目录
           </Button>
           <div className="min-w-0 flex-1 text-center">
             <p className="truncate text-xs font-medium">{selectedMaterial?.title || selectedMaterial?.originalName || '选择资料'}</p>
+            {askCurrentPageNo && <p className="text-[10px] text-muted-foreground">当前第 {askCurrentPageNo} 页</p>}
           </div>
           <Button variant="outline" size="sm" className="h-8 gap-1.5 px-2 text-xs" onClick={() => setMobilePanel('ask')}>
             <Bot className="h-3.5 w-3.5" />
@@ -557,7 +579,7 @@ export function ReaderPage() {
             onSelectChunk={handleSelectChunk}
             onReadingContextChange={handleReadingContextChange}
             onOpenFile={selectedMaterial ? handleOpenFile : undefined}
-            targetPageNo={currentChunkPageNo ?? currentPage?.pageNo ?? requestedPageNo ?? null}
+            targetPageNo={requestedPageNo ?? currentChunkPageNo ?? currentPage?.pageNo ?? null}
           />
         ) : selectedMaterialId && (chunksLoading || chunksFetching) ? (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -673,14 +695,20 @@ export function ReaderPage() {
         <div className="fixed inset-0 z-50 bg-black/35 lg:hidden" onClick={() => setMobilePanel(null)}>
           <div
             className={cn(
-              'absolute bottom-0 left-0 right-0 flex max-h-[82dvh] min-h-[45dvh] flex-col overflow-hidden rounded-t-2xl bg-background shadow-2xl',
+              'absolute bottom-0 left-0 right-0 flex max-h-[92dvh] min-h-[60dvh] flex-col overflow-hidden rounded-t-2xl bg-background shadow-2xl',
+              mobilePanel === 'ask' && 'h-[92dvh]',
               mobilePanel === 'toc' && 'top-auto',
             )}
             onClick={(event) => event.stopPropagation()}  // 防止点击面板内容时关闭
           >
             {/* 抽屉头部（标题 + 关闭按钮） */}
-            <div className="flex h-12 shrink-0 items-center justify-between border-b px-4">
-              <span className="text-sm font-semibold">{mobilePanel === 'toc' ? '资料目录' : '资料问答'}</span>
+            <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
+              <div className="min-w-0">
+                <span className="block truncate text-sm font-semibold">{mobilePanel === 'toc' ? '资料目录' : '资料问答'}</span>
+                {mobilePanel === 'ask' && askCurrentPageNo && (
+                  <span className="block truncate text-[10px] text-muted-foreground">当前第 {askCurrentPageNo} 页</span>
+                )}
+              </div>
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setMobilePanel(null)}>
                 <X className="h-4 w-4" />
               </Button>

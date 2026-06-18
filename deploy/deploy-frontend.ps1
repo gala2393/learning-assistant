@@ -6,7 +6,10 @@ param(
   [string]$RemoteAppDir = "/opt/learning-assistant",
   [string]$ApiBase = "/api",
   [string]$IcpTextBase64 = "6Ze9SUNQ5aSHMjAyNjAyMTkyMeWPtw==",
-  [string]$IcpUrl = "https://beian.miit.gov.cn/"
+  [string]$IcpUrl = "https://beian.miit.gov.cn/",
+  [string]$PublicSecurityBeianTextBase64 = "6Ze95YWs572R5a6J5aSHMzUwNTI0MDIwNjE4MDLlj7c=",
+  [string]$PublicSecurityBeianUrl = "https://beian.mps.gov.cn/#/query/webSearch?code=35052402061802",
+  [string]$PublicSecurityBeianIcon = "/beian-police.png"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +18,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $frontendDir = Join-Path $repoRoot "frontend"
 $archive = Join-Path $env:TEMP "learning-frontend-dist.tar.gz"
 $icpText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($IcpTextBase64))
+$publicSecurityBeianText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($PublicSecurityBeianTextBase64))
 
 if (-not (Test-Path $frontendDir)) {
   throw "frontend directory not found: $frontendDir"
@@ -29,6 +33,9 @@ try {
   $env:VITE_API_BASE = $ApiBase
   $env:VITE_ICP_BEIAN_TEXT = $icpText
   $env:VITE_ICP_BEIAN_URL = $IcpUrl
+  $env:VITE_PUBLIC_SECURITY_BEIAN_TEXT = $publicSecurityBeianText
+  $env:VITE_PUBLIC_SECURITY_BEIAN_URL = $PublicSecurityBeianUrl
+  $env:VITE_PUBLIC_SECURITY_BEIAN_ICON = $PublicSecurityBeianIcon
 
   npm run build
   if ($LASTEXITCODE -ne 0) {

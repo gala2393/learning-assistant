@@ -335,19 +335,35 @@ function AssistantContent({ text }: { text: string }) {
  * 展示 AI 回答引用的资料来源列表（RAG 检索结果）。
  * 包含统计信息（chunk 数量、最高分数、页数）和每个来源的 SourceCard。
  */
-function RetrievalTrace({ sources, onOpenSource }: { sources: RagSource[]; onOpenSource?: (s: RagSource) => void }) {
-  const maxScore = Math.max(...sources.map((s) => Number(s.score || 0)), 0)
+function RetrievalTrace({ sources, weakEvidence = false, onOpenSource }: { sources: RagSource[]; weakEvidence?: boolean; onOpenSource?: (s: RagSource) => void }) {
+  const displaySources = weakEvidence
+    ? sources.map((source) => ({ ...source, score: Math.min(Number(source.score || 0), 0.58) }))
+    : sources
+  const maxScore = Math.max(...displaySources.map((s) => Number(s.score || 0)), 0)
   const pageCount = new Set(sources.map((s) => s.pageNo).filter(Boolean)).size
+  const weakEvidenceVisible = weakEvidence || maxScore < 0.62
+  const scoreText = weakEvidenceVisible ? `最高匹配 ${Math.round(maxScore * 100)}%（弱相关）` : `最高匹配 ${Math.round(maxScore * 100)}%`
   return (
     <div className="mt-2 space-y-2 rounded-lg border ...">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge variant="outline" className="gap-1 text-[10px]"><Activity className="h-3 w-3" />Retrieval trace</Badge>
-        <span className="text-[11px] ...">{sources.length} chunks · top score {Math.round(maxScore * 100)}%</span>
-        {pageCount > 0 && <span className="text-[11px] ..."><Layers3 className="h-3 w-3" />{pageCount} pages</span>}
+        <Badge variant="outline" className="gap-1 text-[10px]"><Activity className="h-3 w-3" />检索诊断</Badge>
+        <span className="text-[11px] ...">{sources.length} 个片段 · {scoreText}</span>
+        {pageCount > 0 && <span className="text-[11px] ..."><Layers3 className="h-3 w-3" />{pageCount} 页</span>}
       </div>
-      <div className="space-y-2">{sources.map((s, i) => <SourceCard key={`${s.materialId}-${s.chunkId}-${i}`} source={s} rank={i + 1} maxScore={maxScore} onOpen={onOpenSource} />)}</div>
+      {weakEvidenceVisible && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-100">
+          未找到可靠资料依据，下方片段只是系统尝试匹配的弱相关结果，不能说明资料中已经覆盖了这个问题。
+        </div>
+      )}
+      <div className="space-y-2">{displaySources.map((s, i) => <SourceCard key={`${s.materialId}-${s.chunkId}-${i}`} source={s} rank={i + 1} maxScore={maxScore} onOpen={onOpenSource} />)}</div>
     </div>
   )
+}
+
+function messageHasWeakEvidenceNotice(text: string) {
+  return text.includes('当前资料里没有检索到足够依据')
+    || text.includes('不是来自当前资料')
+    || text.includes('未找到可靠依据')
 }
 
 /** 判断回答文本里是否包含后端追加的续写提示。 */
@@ -476,7 +492,7 @@ export function ChatThread({ messages, onOpenSource, onContinueGeneration }: Cha
     <>
       <div className="relative h-full min-h-0">
         <ScrollArea viewportRef={viewportRef} className="h-full min-h-0 w-full overflow-hidden px-2 md:px-4">
-        <div className="mx-auto max-w-5xl space-y-5 py-4 md:space-y-7 md:py-6">
+        <div className="mx-auto max-w-5xl space-y-5 py-3 md:space-y-7 md:py-6">
           {/* 遍历所有消息 */}
           {messages.map((msg, index) => {
             const canContinueGeneration = msg.role === 'assistant'
@@ -556,7 +572,13 @@ export function ChatThread({ messages, onOpenSource, onContinueGeneration }: Cha
                             </button>
                           )}
                           {/* 检索来源引用（RAG 结果） */}
-                          {msg.sources && msg.sources.length > 0 && <RetrievalTrace sources={msg.sources} onOpenSource={onOpenSource} />}
+                          {msg.sources && msg.sources.length > 0 && (
+                            <RetrievalTrace
+                              sources={msg.sources}
+                              weakEvidence={messageHasWeakEvidenceNotice(msg.text)}
+                              onOpenSource={onOpenSource}
+                            />
+                          )}
                         </>
                     }
                   </div>
