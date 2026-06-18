@@ -124,6 +124,38 @@ class RagStructuredMaterialQaTest {
     }
 
     @Test
+    void bodyQuestionKeepsRealBodyEvidenceAheadOfContentsLocator() throws Exception {
+        String token = registerAndLogin("rag-body-source-" + UUID.randomUUID());
+        Long materialId = uploadTextMaterial(
+            token,
+            "Body Source Material",
+            """
+            Contents
+            Chapter 1 Overview
+            Chapter 2 SQL Query
+            Chapter 3 Index Optimization
+
+            Chapter 1 Overview
+            INTRO_MARKER This part only introduces database basics.
+
+            Chapter 2 SQL Query
+            BODY_SQL_JOIN_MARKER JOIN connects rows from multiple tables by matching keys and conditions.
+            BODY_SQL_WHERE_MARKER WHERE filters rows before the final result is returned.
+
+            Chapter 3 Index Optimization
+            INDEX_MARKER BTree indexes improve lookup speed.
+            """
+        );
+        Long indexChunkId = findChunkIdContaining(getChunks(token, materialId), "INDEX_MARKER");
+
+        JsonNode answer = chat(token, "What does Chapter 2 say about JOIN?", materialId, indexChunkId);
+
+        assertAnswerContains(answer, "BODY_SQL_JOIN_MARKER");
+        assertSourceContains(answer, "BODY_SQL_JOIN_MARKER");
+        Assertions.assertFalse(answer.at("/sources/0/excerpt").asText().contains("Contents"), answer.toPrettyString());
+    }
+
+    @Test
     void sourceScoreReturnedToUiIsNormalized() throws Exception {
         String token = registerAndLogin("rag-score-" + UUID.randomUUID());
         Long materialId = uploadTextMaterial(

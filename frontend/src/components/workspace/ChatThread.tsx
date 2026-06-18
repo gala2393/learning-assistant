@@ -336,18 +336,19 @@ function AssistantContent({ text }: { text: string }) {
  * 包含统计信息（chunk 数量、最高分数、页数）和每个来源的 SourceCard。
  */
 function RetrievalTrace({ sources, weakEvidence = false, onOpenSource }: { sources: RagSource[]; weakEvidence?: boolean; onOpenSource?: (s: RagSource) => void }) {
+  const uniqueSources = dedupeRagSources(sources)
   const displaySources = weakEvidence
-    ? sources.map((source) => ({ ...source, score: Math.min(Number(source.score || 0), 0.58) }))
-    : sources
+    ? uniqueSources.map((source) => ({ ...source, score: Math.min(Number(source.score || 0), 0.58) }))
+    : uniqueSources
   const maxScore = Math.max(...displaySources.map((s) => Number(s.score || 0)), 0)
-  const pageCount = new Set(sources.map((s) => s.pageNo).filter(Boolean)).size
+  const pageCount = new Set(displaySources.map((s) => s.pageNo).filter(Boolean)).size
   const weakEvidenceVisible = weakEvidence || maxScore < 0.62
   const scoreText = weakEvidenceVisible ? `最高匹配 ${Math.round(maxScore * 100)}%（弱相关）` : `最高匹配 ${Math.round(maxScore * 100)}%`
   return (
     <div className="mt-2 space-y-2 rounded-lg border ...">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant="outline" className="gap-1 text-[10px]"><Activity className="h-3 w-3" />检索诊断</Badge>
-        <span className="text-[11px] ...">{sources.length} 个片段 · {scoreText}</span>
+        <span className="text-[11px] ...">{displaySources.length} 个片段 · {scoreText}</span>
         {pageCount > 0 && <span className="text-[11px] ..."><Layers3 className="h-3 w-3" />{pageCount} 页</span>}
       </div>
       {weakEvidenceVisible && (
@@ -358,6 +359,17 @@ function RetrievalTrace({ sources, weakEvidence = false, onOpenSource }: { sourc
       <div className="space-y-2">{displaySources.map((s, i) => <SourceCard key={`${s.materialId}-${s.chunkId}-${i}`} source={s} rank={i + 1} maxScore={maxScore} onOpen={onOpenSource} />)}</div>
     </div>
   )
+}
+
+function dedupeRagSources(sources: RagSource[]) {
+  const seen = new Set<string>()
+  return sources.filter((source) => {
+    const excerpt = String(source.excerpt || '').replace(/\s+/g, '').slice(0, 120)
+    const key = `${source.materialId || ''}:${source.pageNo || ''}:${excerpt || source.chunkId || ''}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function messageHasWeakEvidenceNotice(text: string) {

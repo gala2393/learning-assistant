@@ -7,13 +7,12 @@
  *
  * 【主要功能】
  * 1. 针对当前资料片段提问：AI 基于 RAG 检索回答
- * 2. 选中文本追问：在文档中选中 5-500 字符的文字后，可围绕选中内容提问
- * 3. 流式回答（SSE）：实时逐字展示 AI 回复，支持暂停输出
- * 4. 推荐问题：首次加载时 AI 根据当前片段生成推荐问题
- * 5. 检索来源查看：回答完成后可查看引用的资料片段，点击跳转
- * 6. 使用额度：显示今日剩余问答次数
- * 7. "在聊天中继续"按钮：跳转到独立聊天页面继续对话
- * 8. 清空对话：清除所有消息和选中文本
+ * 2. 流式回答（SSE）：实时逐字展示 AI 回复，支持暂停输出
+ * 3. 推荐问题：首次加载时 AI 根据当前片段生成推荐问题
+ * 4. 检索来源查看：回答完成后可查看引用的资料片段，点击跳转
+ * 5. 使用额度：显示今日剩余问答次数
+ * 6. "在聊天中继续"按钮：跳转到独立聊天页面继续对话
+ * 7. 清空对话：清除所有消息和来源
  *
  * 【SSE 流式回答流程】
  * 1. 用户输入问题 -> 创建用户消息 + AI 占位消息（thinking 状态）
@@ -32,7 +31,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { getHistory, suggestQuestions, useLatestMaterialHistory, useMaterialHistory, useRagUsage } from '@/api/rag'
 import { ChatThread } from './ChatThread'
-import { Send, Bot, ArrowRight, MousePointer, Sparkles, Trash2, History, Plus, MessagesSquare, Loader2, RefreshCw, Pause } from 'lucide-react'
+import { Send, Bot, ArrowRight, Sparkles, Trash2, History, Plus, MessagesSquare, Loader2, RefreshCw, Pause } from 'lucide-react'
 import { actionButtonBase, actionButtonIdle, actionButtonReady } from '@/lib/action-button-styles'
 import { cn, truncate } from '@/lib/utils'
 import { useAuth } from '@/context/AuthContext'
@@ -49,7 +48,6 @@ import {
   startReaderAskStream,
   subscribeReaderAsk,
   updateReaderAskQuestion,
-  updateReaderAskSelection,
 } from '@/lib/reader-ask-session'
 import type { HistoryItem, Material, MaterialChunk, RagSource } from '@/types'
 
@@ -80,11 +78,10 @@ interface ReaderAskProps {
 /**
  * buildContextLabel -- 构建上下文标签文字
  * 用于在问答面板顶部显示当前上下文信息
- * 例如："已选中文本 · 当前页 P3"
+ * 例如："当前页 P3"
  */
-function buildContextLabel(selectedText?: string | null, currentPageNo?: number | null) {
+function buildContextLabel(currentPageNo?: number | null) {
   const labels: string[] = []
-  if (selectedText?.trim()) labels.push('已选中文本')
   if (typeof currentPageNo === 'number' && currentPageNo > 0) labels.push(`当前页 P${currentPageNo}`)
   return labels.join(' · ')
 }
@@ -105,8 +102,6 @@ export function ReaderAsk({
   // === Refs ===
   /** 输入框引用（用于聚焦控制） */
   const questionRef = useRef<HTMLTextAreaElement>(null)
-  /** 用户选中文本的引用版本（不触发渲染，提交时使用） */
-  const selectionRef = useRef<string | null>(null)
 
   /**
    * 边读边问核心状态来自模块级 store。
@@ -121,7 +116,6 @@ export function ReaderAsk({
   const {
     question,
     loading,
-    selectedText,
     messages,
     sourcesByMessageId,
     errorByMessageId,
@@ -166,10 +160,10 @@ export function ReaderAsk({
   /** 生成中时主按钮切换为暂停输出，保留当前已经收到的回答。 */
   const canPauseOutput = loading
 
-  /** 上下文标签（"已选中文本 · 当前页 P3"） */
+  /** 上下文标签（"当前页 P3"） */
   const contextLabel = useMemo(
-    () => buildContextLabel(selectedText, currentPageNo),
-    [selectedText, currentPageNo],
+    () => buildContextLabel(currentPageNo),
+    [currentPageNo],
   )
   /** 片段 ID -> 片段索引的映射（用于点击来源时跳转） */
   const chunkIndexById = useMemo(() => buildChunkIndexById(chunks || []), [chunks])
@@ -180,7 +174,6 @@ export function ReaderAsk({
   useEffect(() => {
     if (!material?.id) return
     ensureReaderAskMaterial(material?.id || null)
-    selectionRef.current = null
     setLoadingHistoryId(null)
   }, [material?.id])
 
@@ -236,28 +229,21 @@ export function ReaderAsk({
         return
       }
       const pageNo = Number(source.pageNo)
-      if (Number.isFinite(pageNo) && pageNo > 0 && material?.id) {
-        const params = new URLSearchParams()
-        params.set('materialId', material.id)
-        if (source.chunkId) params.set('chunkId', String(source.chunkId))
-        params.set('pageNo', String(pageNo))
-        params.set('view', 'smart')
-        navigate(`/workspace/reader?${params.toString()}`, { replace: true })
+      if (Number.isFinite(pageNo) && pageNo > 0) {
+        onNavigateToChunk?.(locatePageChunkIndex(pageNo, chunks || []), { pageNo, view: 'smart' })
       }
     },
-    [chunkIndexById, chunks, material?.id, navigate, onNavigateToChunk],
+    [chunkIndexById, chunks, onNavigateToChunk],
   )
 
   /** 将某段历史会话恢复到问答面板，并记录 conversationId 供后续追问续接。 */
   function restoreHistory(history: HistoryItem) {
     restoreReaderAskHistory(history, material?.id || null)
-    selectionRef.current = null
   }
 
   /** 开启当前资料的新问答会话，不再沿用最近历史的 conversationId。 */
   const startNewConversation = () => {
     startNewReaderAskConversation(material?.id || null)
-    selectionRef.current = null
   }
 
   /**
@@ -296,7 +282,7 @@ export function ReaderAsk({
    *    - onError: 显示错误信息
    * 7. 完成后刷新使用额度缓存
    */
-  const submitQuestion = useCallback((rawQuestion: string, selection?: string | null) => {
+  const submitQuestion = useCallback((rawQuestion: string) => {
     if (!requireLogin()) return
     const q = rawQuestion.trim().slice(0, READER_ASK_INPUT_MAX_CHARS)
     if (!q || loading || !material) return
@@ -306,16 +292,12 @@ export function ReaderAsk({
       chunkId: chunk?.id,
       currentPageNo,
       currentPageChunkIds,
-      selectedText: selection,
     })
   }, [chunk?.id, currentPageChunkIds, currentPageNo, loading, material, requireLogin])
 
-  /** 提交问题（组合选中文本一起发送） */
+  /** 提交问题 */
   const handleSubmit = () => {
-    const selection = selectionRef.current ?? selectedText
-    submitQuestion(question, selection)
-    selectionRef.current = null
-    updateReaderAskSelection(null)
+    submitQuestion(question)
   }
 
   /** 键盘快捷键：Enter 提交（Shift+Enter 换行） */
@@ -403,7 +385,7 @@ export function ReaderAsk({
                 <button
                   key={i}
                   className="block w-full rounded bg-muted/50 p-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  onClick={() => submitQuestion(q, selectedText)}
+                  onClick={() => submitQuestion(q)}
                 >
                   {q}
                 </button>
@@ -415,22 +397,6 @@ export function ReaderAsk({
 
       {/* ---- 底部输入区域 ---- */}
       <div className="shrink-0 space-y-2 border-t p-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] lg:pb-3">
-        {/* 选中文本短提示条：完整文本仍保存在状态里提交给后端，这里只展示摘要和清除入口。 */}
-        {selectedText && (
-          <div className="flex items-center gap-2 rounded-md border border-cyan-100 bg-cyan-50/70 px-2 py-1.5 text-[11px] text-cyan-900 dark:border-cyan-900/50 dark:bg-cyan-950/30 dark:text-cyan-100">
-            <MousePointer className="h-3.5 w-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate">{truncate(selectedText, 96)}</span>
-            <button
-              className="shrink-0 text-[10px] text-cyan-700 hover:text-cyan-950 dark:text-cyan-200 dark:hover:text-white"
-              onClick={() => {
-                selectionRef.current = null
-                updateReaderAskSelection(null)
-              }}
-            >
-              清除
-            </button>
-          </div>
-        )}
         <Textarea
           ref={questionRef}
           value={question}
@@ -440,7 +406,7 @@ export function ReaderAsk({
           placeholder={material
             ? usageExhausted
               ? '今日问答次数已用完'
-              : (selectedText ? '围绕选中文本继续追问...' : '针对当前资料继续提问...')
+              : '针对当前资料继续提问...'
             : '请先选择一份资料'}
           className="max-h-28 min-h-[56px] resize-none text-base md:min-h-[64px] md:text-sm"
           disabled={!material || usageExhausted}
@@ -463,12 +429,12 @@ export function ReaderAsk({
               </>
             )}
           </Button>
-          {/* 清空按钮：清除所有消息、来源、选中文本 */}
+          {/* 清空按钮：清除所有消息和来源 */}
           <Button
             variant="outline"
             size="sm"
             onClick={startNewConversation}
-            disabled={messages.length === 0 && !selectedText}
+            disabled={messages.length === 0}
           >
             <Trash2 className="mr-1 h-3.5 w-3.5" /> 新对话
           </Button>
@@ -580,6 +546,11 @@ function locateSourceChunkIndex(source: RagSource, chunks: MaterialChunk[], chun
 
   const byExcerpt = chunks.findIndex((chunk) => sourceMatchesChunkText(source, chunk))
   return byExcerpt >= 0 ? byExcerpt : undefined
+}
+
+function locatePageChunkIndex(pageNo: number, chunks: MaterialChunk[]) {
+  const samePageIndex = chunks.findIndex((chunk) => Number(chunk.pageNo) === pageNo)
+  return samePageIndex >= 0 ? samePageIndex : 0
 }
 
 /** 用来源摘录匹配片段正文，处理空白、换行和 OCR 文本差异。 */

@@ -121,7 +121,6 @@ export function startReaderAskStream(params: {
   chunkId?: string
   currentPageNo?: number | null
   currentPageChunkIds?: Array<string | number>
-  selectedText?: string | null
 }) {
   const q = clampReaderAskQuestion(params.question)
   if (!q || state.loading) return
@@ -162,7 +161,6 @@ export function startReaderAskStream(params: {
       chunkId: params.chunkId,
       currentPageNo: params.currentPageNo || undefined,
       currentPageChunkIds: params.currentPageChunkIds?.length ? params.currentPageChunkIds : undefined,
-      selectedText: params.selectedText || undefined,
       answerStyle: 'HOMEWORK',
       history,
       conversationId: conversationIdBefore,

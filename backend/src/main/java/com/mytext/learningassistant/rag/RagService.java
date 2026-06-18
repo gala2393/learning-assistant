@@ -1190,9 +1190,7 @@ public class RagService {
             customModel
         ));
 
-        List<RagSourceResponse> sources = selectedChunks.stream()
-            .map(chunk -> toSourceResponse(chunk, evidenceStatus))
-            .toList();
+        List<RagSourceResponse> sources = toSourceResponses(selectedChunks, evidenceStatus);
 
         return new RagStreamResult(
             savedQuestion.getId(),
@@ -1682,25 +1680,28 @@ public class RagService {
      * @return 排序后的相关片段列表（ScoredChunk 包含片段和相关性分数）
      */
     private List<ScoredChunk> selectContextChunks(long userId, ChatRequest request, boolean generalChat) {
-        if (generalChat || (request.selectedText() != null && !request.selectedText().isBlank())) {
+        if (generalChat) {
             return List.of();
         }
         String retrievalQuestion = rewriteQuestionForRetrieval(request.question(), request.history());
         List<ScoredChunk> structureChunks = findStructureAwareChunks(userId, request, retrievalQuestion);
         if (!structureChunks.isEmpty()) {
-            return structureChunks;
+            if (isTableOfContentsQuestion(request.question())) {
+                return structureChunks;
+            }
+            return enrichBodyEvidenceChunks(userId, request, retrievalQuestion, structureChunks);
         }
         List<ScoredChunk> currentPageChunks = findCurrentPageChunks(userId, request);
         List<ScoredChunk> locatorChunks = findMaterialLocatorChunks(userId, request);
         if (!locatorChunks.isEmpty()) {
-            if (currentPageChunks.isEmpty()) {
-                return locatorChunks;
-            }
             List<ScoredChunk> selected = new ArrayList<>();
             Set<Long> seenChunkIds = new HashSet<>();
             appendUniqueChunks(selected, seenChunkIds, locatorChunks);
             appendUniqueChunks(selected, seenChunkIds, currentPageChunks);
-            return limitContextChunks(selected);
+            appendUniqueChunks(selected, seenChunkIds, findKeywordChunks(userId, retrievalQuestion, request.materialId()));
+            appendUniqueChunks(selected, seenChunkIds, findFallbackKeywordChunks(userId, retrievalQuestion, request.materialId()));
+            appendUniqueChunks(selected, seenChunkIds, selectVectorOrKeywordChunks(userId, retrievalQuestion, request.materialId()));
+            return limitContextChunks(rankBodyEvidenceChunks(request.question(), selected));
         }
         if (!currentPageChunks.isEmpty() && isCurrentReadingExtractionQuestion(request.question())) {
             List<ScoredChunk> selected = new ArrayList<>();
@@ -1764,6 +1765,25 @@ public class RagService {
             selectVectorOrKeywordChunks(userId, retrievalQuestion, currentChunks.get(0).material().getId())
         );
         return limitContextChunks(selected);
+    }
+
+    /**
+     * 结构定位只能说明“答案大概在哪一章/哪一处”，不能直接等同于正文依据。
+     * 非目录问题命中目录或章节标题后，继续补充关键词和向量检索结果，并让正文证据优先进入上下文和来源列表。
+     */
+    private List<ScoredChunk> enrichBodyEvidenceChunks(
+        long userId,
+        ChatRequest request,
+        String retrievalQuestion,
+        List<ScoredChunk> structureChunks
+    ) {
+        List<ScoredChunk> selected = new ArrayList<>();
+        Set<Long> seenChunkIds = new HashSet<>();
+        appendUniqueChunks(selected, seenChunkIds, structureChunks);
+        appendUniqueChunks(selected, seenChunkIds, findKeywordChunks(userId, retrievalQuestion, request.materialId()));
+        appendUniqueChunks(selected, seenChunkIds, findFallbackKeywordChunks(userId, retrievalQuestion, request.materialId()));
+        appendUniqueChunks(selected, seenChunkIds, selectVectorOrKeywordChunks(userId, retrievalQuestion, request.materialId()));
+        return limitContextChunks(rankBodyEvidenceChunks(request.question(), selected));
     }
 
     /**
@@ -2248,7 +2268,7 @@ public class RagService {
         }
         String chapterNo = extractChapterNo(request.question());
         if (chapterNo != null) {
-            List<ScoredChunk> chapterChunks = chapterChunks(userId, request.materialId(), chapterNo);
+            List<ScoredChunk> chapterChunks = chapterChunks(userId, request.materialId(), chapterNo, retrievalQuestion);
             if (!chapterChunks.isEmpty()) {
                 return chapterChunks;
             }
@@ -2290,7 +2310,7 @@ public class RagService {
             .toList();
     }
 
-    private List<ScoredChunk> chapterChunks(long userId, Long materialId, String rawChapterNo) {
+    private List<ScoredChunk> chapterChunks(long userId, Long materialId, String rawChapterNo, String retrievalQuestion) {
         LearningMaterialEntity material = learningMaterialRepository.findByIdAndOwnerId(materialId, userId)
             .orElse(null);
         if (material == null || !isMaterialReadyForRetrieval(material)) {
@@ -2342,9 +2362,14 @@ public class RagService {
                 .filter(chunk -> normalizeForTermMatch(retrievalText(chunk)).contains(normalizedQuestionChapter))
                 .toList();
         }
+        List<String> highlightTerms = new ArrayList<>();
+        highlightTerms.add("\u7b2c" + chapterNo + "\u7ae0");
+        highlightTerms.add("chapter " + chapterNo);
+        highlightTerms.addAll(significantQueryTerms(retrievalQuestion));
+        List<String> distinctHighlightTerms = highlightTerms.stream().filter(term -> term != null && !term.isBlank()).distinct().toList();
         return matched.stream()
             .limit(10)
-            .map(chunk -> new ScoredChunk(material, chunk, 0.88, List.of("\u7b2c" + chapterNo + "\u7ae0", "chapter " + chapterNo)))
+            .map(chunk -> new ScoredChunk(material, chunk, 0.88, distinctHighlightTerms))
             .toList();
     }
 
@@ -2376,20 +2401,27 @@ public class RagService {
         }
         String text = source.getChunkText();
         Matcher headingMatcher = primaryChapterHeadingPattern().matcher(text);
-        int start = -1;
-        int end = text.length();
+        List<int[]> chapterRanges = new ArrayList<>();
         while (headingMatcher.find()) {
             String headingChapterNo = normalizeChapterNo(headingMatcher.group(1) == null ? headingMatcher.group(2) : headingMatcher.group(1));
             if (chapterNo.equals(headingChapterNo)) {
-                start = headingMatcher.start();
-                if (headingMatcher.find()) {
-                    end = headingMatcher.start();
-                }
-                break;
+                chapterRanges.add(new int[] { headingMatcher.start(), headingMatcher.end() });
             }
         }
-        if (start < 0) {
+        if (chapterRanges.isEmpty()) {
             return null;
+        }
+        int start = chapterRanges.get(0)[0];
+        int end = nextChapterStart(text, start);
+        for (int[] range : chapterRanges) {
+            int candidateStart = range[0];
+            int candidateEnd = nextChapterStart(text, candidateStart);
+            String candidateText = text.substring(candidateStart, Math.max(candidateStart, candidateEnd)).trim();
+            if (hasChapterBodyAfterHeading(candidateText)) {
+                start = candidateStart;
+                end = candidateEnd;
+                break;
+            }
         }
         String clippedText = text.substring(start, Math.max(start, end)).trim();
         if (clippedText.isBlank()) {
@@ -2399,6 +2431,24 @@ public class RagService {
         clipped.setChunkText(clippedText);
         clipped.setSectionTitle(firstNonBlank(source.getSectionTitle(), firstContentLine(clippedText)));
         return clipped;
+    }
+
+    private int nextChapterStart(String text, int currentStart) {
+        Matcher matcher = primaryChapterHeadingPattern().matcher(text);
+        while (matcher.find()) {
+            if (matcher.start() > currentStart) {
+                return matcher.start();
+            }
+        }
+        return text.length();
+    }
+
+    private boolean hasChapterBodyAfterHeading(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String[] lines = text.split("\\R+", 2);
+        return lines.length > 1 && cleanExcerptText(lines[1]).length() >= 24;
     }
 
     private MaterialChunkEntity copyChunkForRetrieval(MaterialChunkEntity source) {
@@ -5298,7 +5348,7 @@ public class RagService {
      */
     private List<RagQuestionSourceEntity> saveSources(long questionId, List<ScoredChunk> topChunks, EvidenceStatus evidenceStatus) {
         List<RagQuestionSourceEntity> saved = new ArrayList<>();
-        for (ScoredChunk chunk : topChunks) {
+        for (ScoredChunk chunk : deduplicateSourceChunks(topChunks)) {
             RagQuestionSourceEntity entity = new RagQuestionSourceEntity();
             entity.setQuestionId(questionId);
             entity.setMaterialId(chunk.material().getId());
@@ -5322,6 +5372,36 @@ public class RagService {
             source.getExcerpt(),
             source.getRankScore()
         );
+    }
+
+    private List<RagSourceResponse> toSourceResponses(List<ScoredChunk> chunks, EvidenceStatus evidenceStatus) {
+        return deduplicateSourceChunks(chunks).stream()
+            .map(chunk -> toSourceResponse(chunk, evidenceStatus))
+            .toList();
+    }
+
+    private List<ScoredChunk> deduplicateSourceChunks(List<ScoredChunk> chunks) {
+        List<ScoredChunk> deduplicated = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (ScoredChunk chunk : chunks) {
+            String key = sourceDedupKey(chunk);
+            if (seen.add(key)) {
+                deduplicated.add(chunk);
+            }
+        }
+        return deduplicated;
+    }
+
+    private String sourceDedupKey(ScoredChunk chunk) {
+        String excerptKey = normalizeForTermMatch(excerpt(chunk));
+        if (excerptKey.length() > 80) {
+            excerptKey = excerptKey.substring(0, 80);
+        }
+        return chunk.material().getId()
+            + ":"
+            + Optional.ofNullable(chunk.chunk().getPageNo()).map(String::valueOf).orElse("unknown")
+            + ":"
+            + excerptKey;
     }
 
     private RagSourceResponse toSourceResponse(ScoredChunk chunk) {
@@ -5438,6 +5518,9 @@ public class RagService {
         String cleaned = IMAGE_MARKER_PATTERN.matcher(text).replaceAll("");
         cleaned = IMAGE_OCR_PATTERN.matcher(cleaned).replaceAll("图片OCR：");
         String normalized = cleaned.trim().replaceAll("\\s+", " ");
+        if (isUnreadableExcerpt(normalized)) {
+            return "该页文本识别质量较低，请打开原文查看。";
+        }
         if (normalized.length() <= 500) {
             return normalized;
         }
@@ -5920,6 +6003,36 @@ public class RagService {
      * 限制上下文片段的总字符数，防止超出 LLM 的上下文窗口。
      * 最多选取 topK 个片段，且总字符数不超过 MAX_CONTEXT_CHARS（10000字符）。
      */
+    private List<ScoredChunk> rankBodyEvidenceChunks(String question, List<ScoredChunk> chunks) {
+        if (chunks.isEmpty() || isTableOfContentsQuestion(question)) {
+            return chunks;
+        }
+        List<String> queryTerms = significantQueryTerms(question);
+        return chunks.stream()
+            .sorted(Comparator
+                .comparingDouble((ScoredChunk chunk) -> bodyEvidenceSortScore(chunk, queryTerms))
+                .reversed()
+                .thenComparing(chunk -> Optional.ofNullable(chunk.chunk().getChunkIndex()).orElse(Integer.MAX_VALUE)))
+            .toList();
+    }
+
+    private double bodyEvidenceSortScore(ScoredChunk chunk, List<String> queryTerms) {
+        double score = Math.max(0.0, Math.min(1.0, chunk.score()));
+        String text = retrievalText(chunk.chunk());
+        if (looksLikeContentsChunk(text)) {
+            score -= 0.18;
+        } else {
+            score += 0.16;
+        }
+        if (!queryTerms.isEmpty()) {
+            score += queryTermCoverage(text, queryTerms) * 0.24;
+        }
+        if (looksLikeChapterHeading(firstContentLine(chunk.chunk().getChunkText()))) {
+            score -= 0.06;
+        }
+        return score;
+    }
+
     private List<ScoredChunk> limitContextChunks(List<ScoredChunk> selected) {
         List<ScoredChunk> limited = new ArrayList<>();
         int totalChars = 0;
@@ -6039,6 +6152,9 @@ public class RagService {
             return "";
         }
         String normalized = cleanExcerptText(chunk.chunk().getChunkText());
+        if (isUnreadableExcerpt(normalized)) {
+            return "该页文本识别质量较低，请打开原文查看。";
+        }
         if (normalized.length() <= 160) {
             return normalized;
         }
@@ -6092,6 +6208,26 @@ public class RagService {
         String cleaned = IMAGE_MARKER_PATTERN.matcher(text == null ? "" : text).replaceAll("");
         cleaned = IMAGE_OCR_PATTERN.matcher(cleaned).replaceAll("");
         return cleaned.trim().replaceAll("\\s+", " ");
+    }
+
+    private boolean isUnreadableExcerpt(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        long replacementChars = text.chars().filter(ch -> ch == '\uFFFD').count();
+        if (replacementChars >= 3) {
+            return true;
+        }
+        long mojibakeChars = text.chars()
+            .filter(ch -> ch == '�' || ch == '锛' || ch == '€')
+            .count();
+        if (mojibakeChars >= 6) {
+            return true;
+        }
+        long readableChars = text.chars()
+            .filter(ch -> Character.isLetterOrDigit(ch) || Character.UnicodeScript.of(ch) == Character.UnicodeScript.HAN)
+            .count();
+        return text.length() >= 40 && readableChars * 1.0 / text.length() < 0.25;
     }
 
     /**

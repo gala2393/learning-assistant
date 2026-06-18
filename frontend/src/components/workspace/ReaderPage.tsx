@@ -11,7 +11,6 @@
  *   - 统一连续阅读：有页面预览时按页渲染 PDF 预览，无页面预览时按阅读页渲染文本片段
  *   - 底部：只保留稳定的页码/阅读页输入跳转
  * - 右侧（可拖拽调整页面占比，默认 30%）：AI 问答面板（ReaderAsk）
- *   - 支持选中文本提问
  *   - 支持流式回答（SSE）
  *   - 可折叠
  *
@@ -31,14 +30,9 @@
  *    - 后端将 PDF 转为页面图片（page images）
  *    - 前端通过 MaterialImage 组件加载（需要 JWT 认证）
  *    - 支持缩放（70%~180%）
- *    - 页面下方同时展示解析文本，保证 PDF/Word 也能划选文字提问
+ *    - 页面下方同时展示解析文本，保证 PDF/Word 可读
  *
- * 3. 选中文本提问：
- *    - 在文档中选中 5-500 字符的文字
- *    - 自动填入右侧问答面板的选中文本区域
- *    - 可围绕选中内容向 AI 追问
- *
- * 4. 右侧面板宽度调整：
+ * 3. 右侧面板宽度调整：
  *    - 拖拽中间分隔条可调整右侧问答栏页面占比
  *    - 占比保存到 localStorage，下次打开时恢复
  *    - 仅保留 5%~95% 的有效比例保护，不再使用固定像素上下限
@@ -71,7 +65,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
-import { getReaderAskSnapshot, updateReaderAskSelection } from '@/lib/reader-ask-session'
+import { getReaderAskSnapshot } from '@/lib/reader-ask-session'
 import type { MaterialChunk, MaterialPage } from '@/types'
 
 /** 右侧问答栏默认占页面宽度比例；默认紧凑，减少对阅读区的挤占。 */
@@ -83,9 +77,6 @@ const ASK_RATIO_PRESETS = [
   { label: '均衡', value: 0.4 },
   { label: '宽问答', value: 0.5 },
 ]
-const READER_SELECTION_MIN_LENGTH = 5
-const READER_SELECTION_MAX_LENGTH = 2000
-
 interface ReaderContextSnapshot {
   materialId: string | null
   chunkId: string | null
@@ -114,31 +105,6 @@ function readReaderContextSnapshot(): ReaderContextSnapshot {
 function writeReaderContextSnapshot(snapshot: ReaderContextSnapshot) {
   if (typeof window === 'undefined' || !snapshot.materialId) return
   window.localStorage.setItem(READER_CONTEXT_STORAGE_KEY, JSON.stringify(snapshot))
-}
-
-function closestReaderPaper(node: Node | null): Element | null {
-  if (!node) return null
-  const element = node instanceof Element ? node : node.parentElement
-  return element?.closest('.reader-paper') ?? null
-}
-
-function isReaderSelection(selection: Selection) {
-  if (selection.rangeCount === 0 || selection.isCollapsed) return false
-  const anchorRoot = closestReaderPaper(selection.anchorNode)
-  const focusRoot = closestReaderPaper(selection.focusNode)
-  if (!anchorRoot || !focusRoot || anchorRoot !== focusRoot) return false
-
-  const range = selection.getRangeAt(0)
-  const commonRoot = closestReaderPaper(range.commonAncestorContainer)
-  return commonRoot === anchorRoot
-}
-
-function normalizeReaderSelectedText(text: string) {
-  return text
-    .replace(/\u00a0/g, ' ')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
 }
 
 export function ReaderPage() {
@@ -393,45 +359,7 @@ export function ReaderPage() {
     setReadingPageNo(null)
     setReadingPageChunkIds([])
     setReadingChunkIndex(0)
-    updateReaderAskSelection(null)
   }, [selectedMaterialId])
-
-  /**
-   * 捕获阅读区划词：PDF.js 原生文字层、MinerU/OCR 后端文字层、普通文本片段都会进入这里。
-   * 监听放在 ReaderPage 而不是右侧问答栏，保证问答栏收起或移动端抽屉未打开时也能保存选区。
-   */
-  useEffect(() => {
-    let captureTimer: number | null = null
-    const captureReaderSelection = () => {
-      if (captureTimer !== null) window.clearTimeout(captureTimer)
-      captureTimer = window.setTimeout(() => {
-        captureTimer = null
-        const selection = window.getSelection()
-        if (!selection || !isReaderSelection(selection)) return
-        const text = normalizeReaderSelectedText(selection.toString())
-        if (
-          text.length >= READER_SELECTION_MIN_LENGTH
-          && text.length <= READER_SELECTION_MAX_LENGTH
-        ) {
-          updateReaderAskSelection(text)
-        }
-      }, 80)
-    }
-
-    document.addEventListener('selectionchange', captureReaderSelection)
-    document.addEventListener('mouseup', captureReaderSelection)
-    document.addEventListener('pointerup', captureReaderSelection)
-    document.addEventListener('touchend', captureReaderSelection)
-    document.addEventListener('keyup', captureReaderSelection)
-    return () => {
-      if (captureTimer !== null) window.clearTimeout(captureTimer)
-      document.removeEventListener('selectionchange', captureReaderSelection)
-      document.removeEventListener('mouseup', captureReaderSelection)
-      document.removeEventListener('pointerup', captureReaderSelection)
-      document.removeEventListener('touchend', captureReaderSelection)
-      document.removeEventListener('keyup', captureReaderSelection)
-    }
-  }, [])
 
   // === 交互处理 ===
 
