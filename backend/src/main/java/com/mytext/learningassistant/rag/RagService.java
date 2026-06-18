@@ -208,6 +208,23 @@ public class RagService {
     private static final Pattern LOCAL_CONTEXT_QUESTION_PATTERN = Pattern.compile(
         "(?i)(this|current|page|chapter|section|paragraph|chunk|slide|这里|这页|这一页|本页|当前页|这个页面|这章|这一章|本章|当前章节|这一节|本节|当前内容|这段|这一段|这部分|这里面|讲什么|说什么|主要内容|总结一下|概括)"
     );
+
+    /**
+     * 当前阅读页提取类问题。
+     * 这类问题通常不是在做全局资料检索，而是在要求读取当前页/当前片段的可见文字，例如目录页、截图页、扫描页。
+     */
+    private static final Pattern CURRENT_READING_EXTRACTION_QUESTION_PATTERN = Pattern.compile(
+        "(?i)(catalog|contents|outline|list|extract|recognize|ocr|"
+            + "\\u76ee\\u5f55|\\u6e05\\u5355|\\u5217\\u8868|\\u5217\\u51fa|\\u5b8c\\u6574|"
+            + "\\u6458\\u5f55|\\u63d0\\u53d6|\\u8bc6\\u522b|\\u8bfb\\u53d6|\\u539f\\u6587|"
+            + "\\u6587\\u5b57|\\u9875\\u9762\\u5185\\u5bb9|\\u56fe\\u7247\\u5185\\u5bb9)"
+    );
+
+    /** 整份资料结构提取类问题，例如目录、章节清单、内容大纲。 */
+    private static final Pattern MATERIAL_STRUCTURE_EXTRACTION_QUESTION_PATTERN = Pattern.compile(
+        "(?i)(catalog|contents|outline|table\\s+of\\s+contents|"
+            + "\\u76ee\\u5f55|\\u7ae0\\u8282|\\u5927\\u7eb2|\\u7ed3\\u6784|\\u6e05\\u5355)"
+    );
     /**
      * "资料概览问题"的正则匹配模式。
      * 用于判断用户是否在问"这是什么书"、"介绍一下"、"概括"等关于整份资料的问题。
@@ -1661,11 +1678,33 @@ public class RagService {
             return List.of();
         }
         String retrievalQuestion = rewriteQuestionForRetrieval(request.question(), request.history());
+        List<ScoredChunk> currentPageChunks = findCurrentPageChunks(userId, request);
+        List<ScoredChunk> locatorChunks = findMaterialLocatorChunks(userId, request);
+        if (!locatorChunks.isEmpty()) {
+            if (currentPageChunks.isEmpty()) {
+                return locatorChunks;
+            }
+            List<ScoredChunk> selected = new ArrayList<>();
+            Set<Long> seenChunkIds = new HashSet<>();
+            appendUniqueChunks(selected, seenChunkIds, locatorChunks);
+            appendUniqueChunks(selected, seenChunkIds, currentPageChunks);
+            return limitContextChunks(selected);
+        }
+        if (!currentPageChunks.isEmpty() && isCurrentReadingExtractionQuestion(request.question())) {
+            List<ScoredChunk> selected = new ArrayList<>();
+            Set<Long> seenChunkIds = new HashSet<>();
+            appendUniqueChunks(selected, seenChunkIds, currentPageChunks);
+            appendUniqueChunks(selected, seenChunkIds, selectVectorOrKeywordChunks(userId, retrievalQuestion, request.materialId()));
+            return limitContextChunks(selected);
+        }
         List<ScoredChunk> keywordChunks = findKeywordChunks(userId, retrievalQuestion, request.materialId());
         if (!keywordChunks.isEmpty()) {
             return keywordChunks;
         }
-        List<ScoredChunk> currentPageChunks = findCurrentPageChunks(userId, request);
+        List<ScoredChunk> fallbackKeywordChunks = findFallbackKeywordChunks(userId, retrievalQuestion, request.materialId());
+        if (!fallbackKeywordChunks.isEmpty()) {
+            return fallbackKeywordChunks;
+        }
         if (request.chunkId() == null) {
             if (!currentPageChunks.isEmpty()) {
                 if (isLocalContextQuestion(request.question())) {
@@ -2196,6 +2235,48 @@ public class RagService {
         return findKeywordChunks(userId, query, materialId);
     }
 
+    private List<ScoredChunk> findMaterialLocatorChunks(long userId, ChatRequest request) {
+        if (request == null || request.materialId() == null || !isMaterialChat(request)) {
+            return List.of();
+        }
+        KeywordQuery query = materialLocatorQuery(request.question());
+        if (query == null) {
+            return List.of();
+        }
+        return findKeywordChunks(userId, query, request.materialId()).stream()
+            .limit(8)
+            .toList();
+    }
+
+    private KeywordQuery materialLocatorQuery(String question) {
+        if (question == null || question.isBlank()) {
+            return null;
+        }
+        String trimmed = question.trim();
+        Matcher chapter = Pattern.compile("(?i)(?:chapter\\s*\\d+|section\\s*\\d+|第\\s*[一二三四五六七八九十百千万零〇两0-9]+\\s*[章节篇页])").matcher(trimmed);
+        if (chapter.find()) {
+            return new KeywordQuery(List.of(chapter.group()), KeywordIntent.OCCURRENCE);
+        }
+        if (isMaterialStructureExtractionQuestion(trimmed)) {
+            return new KeywordQuery(List.of("目录"), KeywordIntent.OCCURRENCE);
+        }
+        return null;
+    }
+
+    private List<ScoredChunk> findFallbackKeywordChunks(long userId, String question, Long materialId) {
+        if (materialId == null) {
+            return List.of();
+        }
+        List<String> terms = significantQueryTerms(question);
+        if (terms.isEmpty()) {
+            return List.of();
+        }
+        KeywordQuery query = new KeywordQuery(terms.stream().limit(3).toList(), KeywordIntent.OCCURRENCE);
+        return findKeywordChunks(userId, query, materialId).stream()
+            .limit(8)
+            .toList();
+    }
+
     /**
      * 关键词检索：在指定资料的片段中精确匹配关键词。
      * <p>
@@ -2581,7 +2662,22 @@ public class RagService {
         if (question == null || question.isBlank()) {
             return false;
         }
-        return LOCAL_CONTEXT_QUESTION_PATTERN.matcher(question).find();
+        return LOCAL_CONTEXT_QUESTION_PATTERN.matcher(question).find()
+            || isCurrentReadingExtractionQuestion(question);
+    }
+
+    private boolean isCurrentReadingExtractionQuestion(String question) {
+        if (question == null || question.isBlank()) {
+            return false;
+        }
+        return CURRENT_READING_EXTRACTION_QUESTION_PATTERN.matcher(question).find();
+    }
+
+    private boolean isMaterialStructureExtractionQuestion(String question) {
+        if (question == null || question.isBlank()) {
+            return false;
+        }
+        return MATERIAL_STRUCTURE_EXTRACTION_QUESTION_PATTERN.matcher(question).find();
     }
 
     /**
@@ -5097,10 +5193,71 @@ public class RagService {
             .mapToDouble(chunk -> queryTermCoverage(retrievalText(chunk.chunk()), queryTerms))
             .max()
             .orElse(0.0);
+        if (!selectedChunks.isEmpty() && hasKeywordEvidence(selectedChunks, queryTerms)) {
+            return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
+        }
+        if (isMaterialLocatorQuestion(request.question()) && !selectedChunks.isEmpty()) {
+            return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
+        }
+        if (hasCurrentReadingContext(request)
+            && isCurrentReadingExtractionQuestion(request.question())
+            && containsCurrentReadingChunk(request, selectedChunks)) {
+            return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
+        }
         if (selectedChunks.isEmpty() || topScore < MATERIAL_WEAK_EVIDENCE_SCORE || topTermCoverage < MATERIAL_MIN_TERM_COVERAGE) {
             return new EvidenceStatus(true, topScore, topTermCoverage, queryTerms);
         }
         return new EvidenceStatus(false, topScore, topTermCoverage, queryTerms);
+    }
+
+    private boolean hasKeywordEvidence(List<ScoredChunk> selectedChunks, List<String> queryTerms) {
+        if (selectedChunks == null || selectedChunks.isEmpty()) {
+            return false;
+        }
+        return selectedChunks.stream().anyMatch(chunk -> {
+            List<String> highlightTerms = chunk.highlightTerms() == null ? List.of() : chunk.highlightTerms();
+            if (!highlightTerms.isEmpty()) {
+                return true;
+            }
+            return queryTermCoverage(retrievalText(chunk.chunk()), queryTerms) > 0.0;
+        });
+    }
+
+    private boolean isMaterialLocatorQuestion(String question) {
+        return materialLocatorQuery(question) != null;
+    }
+
+    private boolean hasCurrentReadingContext(ChatRequest request) {
+        return request != null
+            && request.materialId() != null
+            && (request.chunkId() != null
+                || request.currentPageNo() != null
+                || request.currentPageChunkIds() != null && !request.currentPageChunkIds().isEmpty());
+    }
+
+    private boolean containsCurrentReadingChunk(ChatRequest request, List<ScoredChunk> selectedChunks) {
+        if (request == null || selectedChunks == null || selectedChunks.isEmpty()) {
+            return false;
+        }
+        Set<Long> currentPageChunkIds = request.currentPageChunkIds() == null
+            ? Set.of()
+            : request.currentPageChunkIds().stream()
+                .filter(id -> id != null)
+                .collect(Collectors.toSet());
+        return selectedChunks.stream().anyMatch(chunk -> {
+            MaterialChunkEntity materialChunk = chunk.chunk();
+            if (materialChunk == null) {
+                return false;
+            }
+            Long chunkId = materialChunk.getId();
+            if (request.chunkId() != null && request.chunkId().equals(chunkId)) {
+                return true;
+            }
+            if (chunkId != null && currentPageChunkIds.contains(chunkId)) {
+                return true;
+            }
+            return request.currentPageNo() != null && request.currentPageNo().equals(materialChunk.getPageNo());
+        });
     }
 
     private List<String> withEvidenceStatusInstruction(List<String> excerpts, EvidenceStatus evidenceStatus) {
