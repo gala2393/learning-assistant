@@ -48,3 +48,7 @@ learnstudy.cloud_nginx*/
 *ssl*/
 
 .vercel
+
+# 个人验收/答辩草稿不属于项目运行与交付内容。
+backend/复现.md
+毕设答辩指南.md
