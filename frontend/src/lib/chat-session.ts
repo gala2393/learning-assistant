@@ -2,7 +2,7 @@ import { chatStream, getHistory } from '@/api/rag'
 import { queryClient } from '@/lib/query-client'
 import { sanitizeAiText } from '@/lib/utils'
 import type { ChatMessage } from '@/components/workspace/ChatThread'
-import type { ChatImagePayload, HistoryItem, RagSource, TemporaryMaterial } from '@/types'
+import type { ChatImagePayload, HistoryItem, RagSource, RetrievalDebugEntry, TemporaryMaterial } from '@/types'
 
 /**
  * 聊天会话状态管理 — 使用 External Store 模式（类似 Redux 的轻量替代方案）。
@@ -183,13 +183,14 @@ export function applyHistorySession(item: HistoryItem) {
       id: `${message.id}-${message.role}-${index}`, role: message.role, text: message.text,
       images: message.role === 'user' ? message.images || [] : undefined,
       temporaryMaterial: message.role === 'user' ? message.temporaryMaterial || null : null,
+      retrievalDebug: index === item.messages!.length - 1 && message.role === 'assistant' ? item.retrievalDebug : undefined,
       sources: index === item.messages!.length - 1 && message.role === 'assistant' ? item.sources : undefined,
     }))
     : []
   const restoredMessages: ChatMessage[] = archived && archived.messages.length > detailMessages.length
     ? archived.messages : detailMessages.length ? detailMessages
     : [{ id: item.id + '-user', role: 'user', text: item.question },
-       { id: item.id + '-assistant', role: 'assistant', text: item.answer, sources: item.sources }]
+       { id: item.id + '-assistant', role: 'assistant', text: item.answer, sources: item.sources, retrievalDebug: item.retrievalDebug }]
   const restoredHistory = restoredMessages
     .filter((m) => !m.error && m.text.trim())
     .map((m) => ({ role: m.role, content: m.text }))
@@ -269,6 +270,7 @@ export function startChatSessionStream(params: {
   let answer = ''           // 累积的 AI 回答
   let firstChunk = true     // 第一个 chunk 到达时关闭"思考中"动画
   let sources: RagSource[] = []
+  let retrievalDebug: RetrievalDebugEntry[] = []
 
   activeRunId = runId
   activeAssistantId = assistantId
@@ -325,6 +327,12 @@ export function startChatSessionStream(params: {
         state = { ...state, messages: state.messages.map((m) => (m.id === assistantId ? { ...m, sources } : m)) }
         persistSnapshot(); notify()
       },
+      onRetrievalDebug: (items) => {
+        if (activeRunId !== runId) return
+        retrievalDebug = items
+        state = { ...state, messages: state.messages.map((m) => (m.id === assistantId ? { ...m, retrievalDebug } : m)) }
+        persistSnapshot(); notify()
+      },
       // 完成回调：流结束，更新对话 ID 和历史
       onDone: (result) => {
         if (activeRunId !== runId) return
@@ -354,6 +362,7 @@ export function startChatSessionStream(params: {
                 thinking: false,
                 text: cleanAnswer,
                 sources,
+                retrievalDebug,
                 continuable: Boolean(result.continuable),
                 continuationHint: result.continuationHint || null,
               } : m),

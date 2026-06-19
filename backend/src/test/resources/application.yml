@@ -38,6 +38,7 @@ app:
   material-processing:
     # 集成测试会在上传后立即读取片段和发起问答；开启后仅在测试环境提交事务后同步跑一轮后台队列。
     inline-after-upload: true
+    scheduler-enabled: false
   security:
     outbound:
       # 测试环境允许访问内网地址（如 localhost 嵌入服务）

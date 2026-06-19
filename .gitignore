@@ -3,6 +3,13 @@ backend/.env
 backend/*.log
 backend/target/
 backend/.m2/
+backend/.m2-run/
+.m2/
+*.class
+*.jar
+*.war
+*.ear
+*.tsbuildinfo
 backend/data/
 backend/tools/
 

@@ -147,8 +147,10 @@ public class RagStreamController {
                     }
                 );
 
-                // 流式完成：推送引用来源和完成信号
+                // 流式完成：推送引用来源、检索调试信息和完成信号。
+                // retrieval_debug 是新增诊断事件，旧前端即使不监听也不会影响 sources/done。
                 sendEvent(outputStream, "sources", Map.of("sources", result.sources()));
+                sendEvent(outputStream, "retrieval_debug", Map.of("items", result.retrievalDebug()));
                 sendEvent(outputStream, "done", donePayload(result));
             } catch (LlmStreamCancelledException ignored) {
                 // 客户端主动断开时不再尝试写 error/done；前端会保留已收到内容并显示“已暂停输出”。

@@ -796,7 +796,7 @@ export function ReaderPaper({
     return null
   }, [chunk.id, chunk.pageNo, chunks, pages])
   const validTargetPageNo = Number.isFinite(Number(targetPageNo)) && Number(targetPageNo) > 0 ? Number(targetPageNo) : null
-  const targetScrollKey = `${material?.id || ''}:${validTargetPageNo || ''}:${chunk.id || ''}`
+  const targetScrollKey = `${material?.id || ''}:${validTargetPageNo || ''}`
   // 当前页码：优先用户手动覆盖，其次使用外部恢复页码，最后才回落到当前片段页码。
   // 从其他模块切回阅读器时，组件会先用默认片段挂载；如果片段页码优先，会把已保存的第 54 页覆盖成第 1 页。
   const currentPageNo = currentPageOverride || validTargetPageNo || chunkPageNo || pages[0]?.pageNo || 1
@@ -825,6 +825,7 @@ export function ReaderPaper({
     : windowRange(activeChunkIndex, chunks.length, CHUNK_RENDER_WINDOW)
   const visibleChunks = chunks.slice(chunkRenderRange.start, chunkRenderRange.end)
   const isChunkWindowed = chunks.length > FULL_RENDER_CHUNK_LIMIT
+  const pendingScrollKeyRef = useRef<string | null>(null)
   const textPageCount = Math.max(1, Math.ceil(chunks.length / TEXT_PAGE_CHUNK_SIZE))
   const jumpCount = usesPageCanvas ? pages.length : textPageCount
   const currentJumpPosition = usesPageCanvas
@@ -957,6 +958,7 @@ export function ReaderPaper({
           if (!page) return
           const indexes = pageChunkIndexesByNo.get(page.pageNo) || []
           const firstIndex = indexes[0] ?? 0
+          if (pendingScrollKeyRef.current) return
           setCurrentPageOverride(page.pageNo)
           if (!jumpFocused) {
             setJumpValue(String(page.pageNo))
@@ -1002,15 +1004,21 @@ export function ReaderPaper({
       if (pendingTarget.type === 'page') {
         const target = pageRefs.current[pendingTarget.pageNo]
         if (target) {
-          target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+          target.scrollIntoView({ block: 'start', behavior: 'auto' })
           pendingScrollRef.current = null
+          window.setTimeout(() => {
+            pendingScrollKeyRef.current = null
+          }, 600)
         }
         return
       }
       const target = chunkRefs.current[pendingTarget.chunkId]
       if (target) {
-        target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+        target.scrollIntoView({ block: 'start', behavior: 'auto' })
         pendingScrollRef.current = null
+        window.setTimeout(() => {
+          pendingScrollKeyRef.current = null
+        }, 600)
       }
     })
     return () => window.cancelAnimationFrame(raf)
@@ -1019,6 +1027,8 @@ export function ReaderPaper({
   /** 外部 URL 带 pageNo 进入阅读器时，只在初次目标变化时定位一次。 */
   useEffect(() => {
     if (!validTargetPageNo || !usesPageCanvas) return
+    if (pendingScrollKeyRef.current === targetScrollKey) return
+    pendingScrollKeyRef.current = targetScrollKey
     pendingScrollRef.current = { type: 'page', pageNo: validTargetPageNo }
     setCurrentPageOverride(validTargetPageNo)
   }, [targetScrollKey, validTargetPageNo, usesPageCanvas])
@@ -1226,7 +1236,7 @@ export function ReaderPaper({
 
   // === 主渲染 ===
   return (
-    <div className="reader-paper flex-1 flex flex-col overflow-hidden">
+    <div data-testid="reader-paper" className="reader-paper flex-1 flex flex-col overflow-hidden">
       {/* ---- 顶部工具栏：单一连续阅读状态、缩放控制、原文件按钮、进度条 ---- */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-2 py-1.5 md:gap-3 md:px-6 md:py-3">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 md:min-w-[10rem] md:gap-2">
@@ -1234,10 +1244,10 @@ export function ReaderPaper({
             {material?.title || material?.originalName || '未选择资料'}
           </h3>
           {showPageControls && currentPage && (
-            <Badge variant="outline" className="text-[10px] md:text-xs">P{currentPage.pageNo}/{pages.length}</Badge>
+            <Badge data-testid="reader-current-page" variant="outline" className="text-[10px] md:text-xs">P{currentPage.pageNo}/{pages.length}</Badge>
           )}
           {!showPageControls && chunkPageNo && (
-            <Badge variant="outline" className="text-[10px] md:text-xs">P{chunkPageNo}</Badge>
+            <Badge data-testid="reader-current-page" variant="outline" className="text-[10px] md:text-xs">P{chunkPageNo}</Badge>
           )}
           <Badge variant="secondary" className="text-[10px] md:text-xs">
             {readerModeLabel(material, usesPageCanvas, usesPdfPreview)}
@@ -1287,6 +1297,7 @@ export function ReaderPaper({
         >
           <span>跳转到第</span>
           <input
+            data-testid="reader-jump-input"
             value={jumpValue}
             onChange={(event) => setJumpValue(event.target.value.replace(/[^\d]/g, ''))}
             onFocus={() => setJumpFocused(true)}

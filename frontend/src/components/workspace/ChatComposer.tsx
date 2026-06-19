@@ -363,6 +363,7 @@ export function ChatComposer({
                 accept="image/*,.pdf,.doc,.docx,.pptx,.txt,.md,.html,.htm"
                 multiple
                 className="hidden"
+                data-testid="chat-attachment-input"
                 onChange={(e) => {
                   handleAttachmentFiles(e.target.files)
                   e.currentTarget.value = ''  // 重置 input 以便重复选择同一文件
@@ -387,6 +388,7 @@ export function ChatComposer({
               <Textarea ref={textareaRef} value={value} onChange={(e) => onChange(e.target.value.slice(0, MAX_CHAT_INPUT_CHARS))}
                 onKeyDown={handleKeyDown} onPaste={handlePaste}
                 maxLength={MAX_CHAT_INPUT_CHARS}
+                data-testid="chat-input"
                 placeholder={mode === 'GENERAL' ? '描述你的问题，或粘贴图片后提问' : '基于当前资料提问，可附加图片...'}
                 className={
                   centered
@@ -442,6 +444,7 @@ export function ChatComposer({
                     className={`h-9 w-9 rounded-full ${actionButtonBase} ${canSend || canPauseOutput ? actionButtonReady : actionButtonIdle}`}
                     onClick={canPauseOutput ? onPauseOutput : onSubmit}
                     disabled={canPauseOutput ? false : !canSend}
+                    data-testid="chat-submit-button"
                     aria-label={canPauseOutput ? '暂停输出' : '发送消息'}
                     title={canPauseOutput ? '暂停输出' : '发送消息'}
                   >

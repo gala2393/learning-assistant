@@ -217,7 +217,7 @@ app:
     # LLM 不可用时是否回退到本地规则扩展
     local-fallback: ${QUERY_EXPANSION_LOCAL_FALLBACK:true}
     # HyDE（假设性文档嵌入）：先让 LLM 生成假设性答案，再用答案的嵌入进行检索
-    hyde-enabled: ${QUERY_EXPANSION_HYDE_ENABLED:true}
+    hyde-enabled: ${QUERY_EXPANSION_HYDE_ENABLED:false}
     # HyDE 结果在最终排序中的权重
     hyde-weight: ${QUERY_EXPANSION_HYDE_WEIGHT:0.72}
   rag-evaluation-scheduler:

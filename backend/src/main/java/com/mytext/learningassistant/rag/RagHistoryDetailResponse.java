@@ -32,6 +32,7 @@ public record RagHistoryDetailResponse(
     String createdAt,
     List<RagHistoryMessageResponse> messages,
     List<RagSourceResponse> sources,
+    List<RetrievalDebugEntry> retrievalDebug,
     Long favoriteId,
     boolean favorite,
     boolean pinned

@@ -31,11 +31,15 @@ export function ChatAttachmentCards({ files, onOpen, onRemove }: ChatAttachmentC
   const hiddenFiles = files.slice(INLINE_ATTACHMENT_LIMIT)
 
   return (
-    <div className="mb-2 flex min-w-0 items-center gap-2 overflow-hidden">
+    <div
+      className="mb-2 flex min-w-0 items-center gap-2 overflow-hidden"
+      data-testid="chat-temporary-attachments"
+    >
       {visibleFiles.map((file, index) => (
         <div
           key={`${file.name}-${file.size || 0}-${index}`}
           className="group relative h-[58px] min-w-0 max-w-[190px] flex-1 rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700 dark:hover:bg-slate-800"
+          data-testid={`chat-temporary-attachment-${index}`}
           title={file.name}
         >
           <button

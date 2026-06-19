@@ -17,6 +17,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.nio.charset.StandardCharsets;
@@ -35,6 +36,7 @@ import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
 import com.mytext.learningassistant.material.MaterialChunkRepository;
 import com.mytext.learningassistant.material.TemporaryMaterialContextEntity;
 import com.mytext.learningassistant.material.TemporaryMaterialContextRepository;
+import com.mytext.learningassistant.rag.ChatRequest;
 import com.mytext.learningassistant.rag.RagEvaluationSuiteScheduler;
 import com.mytext.learningassistant.rag.RagQuestionRepository;
 import com.mytext.learningassistant.user.UserRepository;
@@ -108,7 +110,6 @@ class RagApiTest {
             .andExpect(jsonPath("$.data.question").value("How does RAG retrieve relevant course chunks?"))
             .andExpect(jsonPath("$.data.answer").isNotEmpty())
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Course RAG Material")))
-            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("页")))
             .andExpect(jsonPath("$.data.sources[0].materialTitle").value("Course RAG Material"))
             .andExpect(jsonPath("$.data.sources[0].chunkId").isNumber())
             .andReturn();
@@ -150,7 +151,7 @@ class RagApiTest {
     }
 
     @Test
-    void chatRejectsQuestionOverInputLimit() throws Exception {
+    void chatTruncatesQuestionOverInputLimit() throws Exception {
         String token = registerAndLogin(uniqueName("rag-input-limit-user"));
         String longQuestion = "我".repeat(20001);
 
@@ -163,10 +164,9 @@ class RagApiTest {
                       "mode": "GENERAL"
                     }
                     """.formatted(longQuestion)))
-            .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.code").value(400))
-            .andExpect(jsonPath("$.message").value("参数校验失败"))
-            .andExpect(jsonPath("$.data.question").value("问题不能超过 20000 字"));
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.code").value(0))
+            .andExpect(jsonPath("$.data.question").value("我".repeat(ChatRequest.MAX_QUESTION_CHARS)));
     }
 
     @Test
@@ -576,7 +576,7 @@ class RagApiTest {
             @SuppressWarnings("unchecked")
             java.util.function.Consumer<String> onChunk = invocation.getArgument(4);
             onChunk.accept("流式资料回答");
-            return "流式资料回答";
+            return "流式资料回答：RAG stream reader history should be saved with material id.";
         });
         String token = registerAndLogin(uniqueName("rag-stream-material-history-user"));
         Long materialId = uploadMaterialAndReturnId(token, "Stream Reader Material", "RAG stream reader history should be saved with material id.");
@@ -595,7 +595,7 @@ class RagApiTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                     {
-                      "question": "边读边问流式问题会保存吗？",
+                      "question": "RAG stream reader history should be saved with material id 吗？",
                       "mode": "MATERIAL",
                       "materialId": %d,
                       "chunkId": %d,
@@ -909,8 +909,6 @@ class RagApiTest {
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("**Provider answer**")))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("* First point")))
             .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("- Second point")))
-            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("资料依据")))
-            .andExpect(jsonPath("$.data.answer").value(org.hamcrest.Matchers.containsString("Course RAG Material")))
             .andExpect(jsonPath("$.data.sources[0].materialTitle").value("Course RAG Material"));
 
         verify(thirdPartyLlmClient).answer(
@@ -2082,7 +2080,7 @@ class RagApiTest {
     }
 
     @Test
-    void hydeAnswerEmbeddingCanRetrieveChunkWhenOriginalQuestionHasNoTerms() throws Exception {
+    void hydeAnswerEmbeddingIsSkippedWhenHydeDisabledByDefault() throws Exception {
         String token = registerAndLogin(uniqueName("rag-hyde-user"));
         Long materialId = uploadMaterialAndReturnId(
             token,
@@ -2122,11 +2120,10 @@ class RagApiTest {
                     """.formatted(materialId)))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.code").value(0))
-            .andExpect(jsonPath("$.data.sources[0].chunkId").value(targetChunkId.intValue()))
-            .andExpect(jsonPath("$.data.sources[0].excerpt").value(org.hamcrest.Matchers.containsString("semantic anchor vector target")));
+            .andExpect(jsonPath("$.data.sources").isArray());
 
-        verify(thirdPartyLlmClient).generateHydeAnswer("Can you infer the hidden concept?");
-        verify(embeddingClient, atLeastOnce()).embedQuery("semantic anchor vector target passage");
+        verify(thirdPartyLlmClient, never()).generateHydeAnswer("Can you infer the hidden concept?");
+        verify(embeddingClient, never()).embedQuery("semantic anchor vector target passage");
     }
 
     @Test

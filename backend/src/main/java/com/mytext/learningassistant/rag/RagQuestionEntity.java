@@ -88,6 +88,9 @@ public class RagQuestionEntity {
     @Column(name = "answer_text", columnDefinition = "TEXT", nullable = false)
     private String answerText;
 
+    @Column(name = "retrieval_debug_json", columnDefinition = "LONGTEXT")
+    private String retrievalDebugJson;
+
     /** 使用的模型名称 */
     @Column(name = "model_name", nullable = false, length = 64)
     private String modelName;
@@ -206,6 +209,14 @@ public class RagQuestionEntity {
 
     public void setTitle(String title) {
         this.title = title;
+    }
+
+    public String getRetrievalDebugJson() {
+        return retrievalDebugJson;
+    }
+
+    public void setRetrievalDebugJson(String retrievalDebugJson) {
+        this.retrievalDebugJson = retrievalDebugJson;
     }
 
     public boolean isPinned() {

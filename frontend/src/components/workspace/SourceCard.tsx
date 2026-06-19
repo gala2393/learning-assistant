@@ -1,54 +1,53 @@
-/**
- * SourceCard - RAG 来源卡片组件
- *
- * 功能说明：
- * - 在 AI 问答结果中展示一个检索来源（来自哪份资料、哪一页）
- * - 显示相关度分数（带渐变进度条）
- * - 可点击跳转到对应资料片段
- *
- * 交互说明：
- * - 当提供 onOpen 回调时，卡片可点击（支持键盘 Enter/Space 操作）
- * - 左侧蓝色边框标记来源优先级
- */
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { cn, truncate } from '@/lib/utils'
 import { BookOpen, ExternalLink } from 'lucide-react'
-import type { RagSource } from '@/types'
+import type { RagSource, RetrievalDebugEntry } from '@/types'
 
 interface SourceCardProps {
-  source: RagSource     // 检索来源数据（包含资料标题、页码、摘要、相关度分数等）
-  rank?: number         // 排名序号（显示在左侧圆形徽章中）
-  maxScore?: number     // 当前批次中的最高分（用于计算相对百分比进度条宽度）
-  onOpen?: (source: RagSource) => void  // 点击打开来源的回调
+  source: RagSource
+  debugEntry?: RetrievalDebugEntry
+  rank?: number
+  maxScore?: number
+  onOpen?: (source: RagSource) => void
 }
 
-export function SourceCard({ source, rank, maxScore, onOpen }: SourceCardProps) {
-  // 相关度分数：0~1 之间，转为百分比显示
+/**
+ * 单条来源卡片。
+ *
+ * 在保留原有跳转行为的前提下，补一层最小解释信息：
+ * - 召回路径
+ * - 最终分
+ * - 入选原因 / 降权原因
+ *
+ * 这样用户在点开来源之前，就能看到“为什么是这个片段”。
+ */
+export function SourceCard({ source, debugEntry, rank, maxScore, onOpen }: SourceCardProps) {
   const rawScore = Number(source.score || 0)
   const scorePercent = Math.round(Math.max(0, Math.min(1, rawScore)) * 100)
-  const weakEvidence = rawScore < 0.62
-  const reliableEvidence = rawScore >= 0.75
-  const scoreLabel = weakEvidence ? `弱相关 ${scorePercent}%` : reliableEvidence ? `匹配 ${scorePercent}%` : `待核对 ${scorePercent}%`
-  // 相对百分比：相对于最高分的占比，用于进度条宽度
-  const relativePercent = weakEvidence
-    ? scorePercent
-    : Math.round((rawScore / Math.max(maxScore || rawScore || 1, 0.001)) * 100)
+  const scoreLabel = `匹配 ${scorePercent}%`
+  const relativePercent = Math.round((rawScore / Math.max(maxScore || rawScore || 1, 0.001)) * 100)
   const clickable = !!onOpen
+  const sourceCardTestId = `source-card-${String(source.chunkId || rank || 'unknown')}`
+  const routes = (debugEntry?.routes || []).filter(Boolean).slice(0, 3)
+  const finalScore = Number(debugEntry?.finalScore ?? Number.NaN)
+  const finalScorePercent = Number.isFinite(finalScore)
+    ? Math.round(Math.max(0, Math.min(1, finalScore)) * 100)
+    : null
+  const selectedReason = cleanReason(debugEntry?.selectedReason || debugEntry?.reason)
+  const penaltyReason = cleanReason(debugEntry?.penaltyReason)
 
   return (
     <Card
+      data-testid={sourceCardTestId}
       className={cn(
         'overflow-hidden border-l-4 bg-white/90 shadow-sm dark:border-slate-700 dark:bg-slate-900/70',
-        weakEvidence ? 'border-l-amber-400/70' : reliableEvidence ? 'border-l-primary/60' : 'border-l-sky-400/70',
-        clickable && 'cursor-pointer transition-colors hover:bg-muted/60 dark:hover:bg-slate-800/80',
-        clickable && 'group',
+        'border-l-primary/60',
+        clickable && 'group cursor-pointer transition-colors hover:bg-muted/60 dark:hover:bg-slate-800/80',
       )}
-      // 无障碍：可点击时设置 role="button" 和 tabIndex
       role={clickable ? 'button' : undefined}
       tabIndex={clickable ? 0 : undefined}
       onClick={() => onOpen?.(source)}
-      // 键盘可访问性：Enter 和 Space 键触发
       onKeyDown={(event) => {
         if (!clickable) return
         if (event.key === 'Enter' || event.key === ' ') {
@@ -57,10 +56,9 @@ export function SourceCard({ source, rank, maxScore, onOpen }: SourceCardProps) 
         }
       }}
     >
-      <CardContent className="py-3 px-4 space-y-1.5">
+      <CardContent className="space-y-2 px-4 py-3">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-medium truncate flex items-center gap-1.5">
-            {/* 排名序号徽章 */}
+          <span className="flex items-center gap-1.5 truncate text-sm font-medium">
             {rank && (
               <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-slate-900 px-1 text-[10px] font-bold text-white dark:bg-white dark:text-slate-900">
                 {rank}
@@ -69,24 +67,15 @@ export function SourceCard({ source, rank, maxScore, onOpen }: SourceCardProps) 
             <BookOpen className="h-3.5 w-3.5 shrink-0" />
             {source.materialTitle}
           </span>
-          <div className="flex items-center gap-1.5 shrink-0">
-            {/* 页码标签（如果有的话） */}
+          <div className="flex shrink-0 items-center gap-1.5">
             {source.pageNo > 0 && (
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
                 第 {source.pageNo} 页
               </Badge>
             )}
-            {/* 相关度百分比标签 */}
-            <Badge
-              variant={weakEvidence ? 'outline' : 'secondary'}
-              className={cn(
-                'text-[10px] px-1.5 py-0',
-                weakEvidence && 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200',
-              )}
-            >
+            <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
               {scoreLabel}
             </Badge>
-            {/* 可点击时显示外部链接图标 */}
             {clickable && (
               <span
                 className="rounded p-1 text-muted-foreground transition group-hover:bg-muted group-hover:text-foreground"
@@ -97,28 +86,46 @@ export function SourceCard({ source, rank, maxScore, onOpen }: SourceCardProps) 
             )}
           </div>
         </div>
-        {/* 相关度渐变进度条 */}
+
         <div className="h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
           <div
-            className={cn(
-              'h-full rounded-full',
-              weakEvidence ? 'bg-amber-300 dark:bg-amber-600' : 'bg-gradient-to-r from-cyan-500 via-emerald-500 to-amber-400',
-            )}
+            className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-emerald-500 to-amber-400"
             style={{ width: `${Math.max(6, Math.min(100, relativePercent))}%` }}
           />
         </div>
-        {weakEvidence && (
-          <p className="text-xs leading-relaxed text-amber-700 dark:text-amber-200">
-            资料依据不足：该片段只是系统尝试匹配的弱相关结果。
-          </p>
+
+        {!!routes.length && (
+          <div className="flex flex-wrap gap-1">
+            {routes.map((route) => (
+              <Badge key={`${source.chunkId}-${route}`} variant="outline" className="px-1.5 py-0 text-[10px]">
+                {route}
+              </Badge>
+            ))}
+            {finalScorePercent !== null && (
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                最终分 {finalScorePercent}%
+              </Badge>
+            )}
+          </div>
         )}
-        {/* 摘要文本（截断到 120 字符） */}
+
         {source.excerpt && (
-          <p className="text-xs text-muted-foreground leading-relaxed">
+          <p className="text-xs leading-relaxed text-muted-foreground">
             {truncate(source.excerpt, 120)}
           </p>
+        )}
+
+        {(selectedReason || penaltyReason) && (
+          <div className="space-y-1 text-[11px] leading-relaxed text-muted-foreground">
+            {selectedReason && <p>入选原因：{selectedReason}</p>}
+            {penaltyReason && <p>降权说明：{penaltyReason}</p>}
+          </div>
         )}
       </CardContent>
     </Card>
   )
+}
+
+function cleanReason(value?: string | null) {
+  return String(value || '').replace(/\s+/g, ' ').trim() || null
 }

@@ -15,6 +15,7 @@ import java.util.List;
  * @param createdAt      创建时间（格式化后的字符串）
  * @param continuable    当前回答是否可以通过“继续”接着生成
  * @param continuationHint 可继续生成时展示给前端的提示语
+ * @param retrievalDebug 检索调试链路，解释候选片段来自哪一路以及为什么入选
  */
 public record RagChatResponse(
     Long questionId,
@@ -24,6 +25,19 @@ public record RagChatResponse(
     List<RagSourceResponse> sources,
     String createdAt,
     boolean continuable,
-    String continuationHint
+    String continuationHint,
+    List<RetrievalDebugEntry> retrievalDebug
 ) {
+    public RagChatResponse(
+        Long questionId,
+        Long conversationId,
+        String question,
+        String answer,
+        List<RagSourceResponse> sources,
+        String createdAt,
+        boolean continuable,
+        String continuationHint
+    ) {
+        this(questionId, conversationId, question, answer, sources, createdAt, continuable, continuationHint, List.of());
+    }
 }

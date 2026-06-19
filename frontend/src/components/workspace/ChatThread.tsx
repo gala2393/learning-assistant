@@ -7,7 +7,7 @@ import { SourceCard } from './SourceCard'
 import { Activity, AlertCircle, ArrowDown, ArrowRight, Check, Copy, FileText, Layers3 } from 'lucide-react'
 import { useAuth } from '@/context/AuthContext'
 import { UserAvatar } from '@/components/layout/UserAvatar'
-import type { RagSource, TemporaryMaterial } from '@/types'
+import type { RagSource, RetrievalDebugEntry, TemporaryMaterial } from '@/types'
 import { ImagePreviewDialog, type PreviewImage } from './ImagePreviewDialog'
 import { TemporaryMaterialPreviewDialog } from './TemporaryMaterialPreviewDialog'
 
@@ -55,6 +55,7 @@ export interface ChatMessage {
   thinking?: boolean
   error?: string
   sources?: RagSource[]
+  retrievalDebug?: RetrievalDebugEntry[]
   images?: Array<{ dataUrl: string; mediaType: string }>
   temporaryMaterial?: TemporaryMaterial | null
   continuable?: boolean
@@ -196,6 +197,7 @@ function parseAssistantBlocks(text: string): AssistantBlock[] {
         const itemLine = lines[index].trim()
         if (ordered && /^\d+[.、]\s+/.test(itemLine)) { items.push(itemLine.replace(/^\d+[.、]\s+/, '')); index += 1; continue }
         if (!ordered && /^[-•]\s+/.test(itemLine)) { items.push(itemLine.replace(/^[-•]\s+/, '')); index += 1; continue }
+        if (!itemLine) { index += 1; continue }
         break
       }
       blocks.push({ type: 'list', ordered, items }); continue
@@ -308,8 +310,13 @@ function AssistantContent({ text }: { text: string }) {
         }
         if (block.type === 'list') {
           const Tag = block.ordered ? 'ol' : 'ul'
-          return <Tag key={bi} className={cn('space-y-2 pl-6', block.ordered ? 'list-decimal' : 'list-disc')}>
-            {block.items.map((item, i) => <li key={i} className="pl-1"><InlineFormattedText text={item} /></li>)}
+          return <Tag key={bi} className={cn('space-y-2', block.ordered ? 'pl-0' : 'list-disc pl-6')}>
+            {block.items.map((item, i) => (
+              <li key={i} className={block.ordered ? 'flex gap-2 pl-0' : 'pl-1'}>
+                {block.ordered && <span className="min-w-6 shrink-0 text-right font-semibold">{i + 1}.</span>}
+                <span className="min-w-0"><InlineFormattedText text={item} /></span>
+              </li>
+            ))}
           </Tag>
         }
         if (block.type === 'table') {
@@ -335,15 +342,19 @@ function AssistantContent({ text }: { text: string }) {
  * 展示 AI 回答引用的资料来源列表（RAG 检索结果）。
  * 包含统计信息（chunk 数量、最高分数、页数）和每个来源的 SourceCard。
  */
-function RetrievalTrace({ sources, weakEvidence = false, onOpenSource }: { sources: RagSource[]; weakEvidence?: boolean; onOpenSource?: (s: RagSource) => void }) {
-  const uniqueSources = dedupeRagSources(sources)
-  const displaySources = weakEvidence
-    ? uniqueSources.map((source) => ({ ...source, score: Math.min(Number(source.score || 0), 0.58) }))
-    : uniqueSources
+function RetrievalTrace({
+  sources,
+  retrievalDebug,
+  onOpenSource,
+}: {
+  sources: RagSource[]
+  retrievalDebug?: RetrievalDebugEntry[]
+  onOpenSource?: (s: RagSource) => void
+}) {
+  const displaySources = dedupeRagSources(sources).slice(0, 5)
   const maxScore = Math.max(...displaySources.map((s) => Number(s.score || 0)), 0)
   const pageCount = new Set(displaySources.map((s) => s.pageNo).filter(Boolean)).size
-  const weakEvidenceVisible = weakEvidence || maxScore < 0.62
-  const scoreText = weakEvidenceVisible ? `最高匹配 ${Math.round(maxScore * 100)}%（弱相关）` : `最高匹配 ${Math.round(maxScore * 100)}%`
+  const scoreText = `最高匹配 ${Math.round(maxScore * 100)}%`
   return (
     <div className="mt-2 space-y-2 rounded-lg border ...">
       <div className="flex flex-wrap items-center gap-2">
@@ -351,31 +362,48 @@ function RetrievalTrace({ sources, weakEvidence = false, onOpenSource }: { sourc
         <span className="text-[11px] ...">{displaySources.length} 个片段 · {scoreText}</span>
         {pageCount > 0 && <span className="text-[11px] ..."><Layers3 className="h-3 w-3" />{pageCount} 页</span>}
       </div>
-      {weakEvidenceVisible && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-100">
-          未找到可靠资料依据，下方片段只是系统尝试匹配的弱相关结果，不能说明资料中已经覆盖了这个问题。
-        </div>
-      )}
-      <div className="space-y-2">{displaySources.map((s, i) => <SourceCard key={`${s.materialId}-${s.chunkId}-${i}`} source={s} rank={i + 1} maxScore={maxScore} onOpen={onOpenSource} />)}</div>
+      <div className="space-y-2">{displaySources.map((s, i) => <SourceCard key={`${s.materialId}-${s.chunkId}-${i}`} source={s} rank={i + 1} maxScore={maxScore} debugEntry={findDebugEntryForSource(s, retrievalDebug)} onOpen={onOpenSource} />)}</div>
     </div>
   )
 }
 
 function dedupeRagSources(sources: RagSource[]) {
-  const seen = new Set<string>()
+  const seenChunkIds = new Set<string>()
+  const seenContentKeys = new Set<string>()
   return sources.filter((source) => {
     const excerpt = String(source.excerpt || '').replace(/\s+/g, '').slice(0, 120)
-    const key = `${source.materialId || ''}:${source.pageNo || ''}:${excerpt || source.chunkId || ''}`
-    if (seen.has(key)) return false
-    seen.add(key)
+    const chunkIdKey = String(source.chunkId || '')
+    if (chunkIdKey && seenChunkIds.has(chunkIdKey)) return false
+    const contentKey = `${source.materialId || ''}:${source.pageNo || ''}:${excerpt || chunkIdKey}`
+    if (seenContentKeys.has(contentKey)) return false
+    if (chunkIdKey) seenChunkIds.add(chunkIdKey)
+    seenContentKeys.add(contentKey)
     return true
   })
 }
 
-function messageHasWeakEvidenceNotice(text: string) {
-  return text.includes('当前资料里没有检索到足够依据')
-    || text.includes('不是来自当前资料')
-    || text.includes('未找到可靠依据')
+function findDebugEntryForSource(source: RagSource, retrievalDebug?: RetrievalDebugEntry[]) {
+  if (!retrievalDebug?.length) return undefined
+  const targetChunkId = String(source.chunkId || '')
+  const exact = retrievalDebug.find((entry) => String(entry.chunkId || '') === targetChunkId)
+  if (exact) return exact
+  const sourceExcerpt = compactSourceExcerpt(source.excerpt)
+  if (sourceExcerpt) {
+    const excerptMatched = retrievalDebug.find((entry) =>
+      String(entry.materialId || '') === String(source.materialId || '')
+      && compactSourceExcerpt(entry.excerpt).includes(sourceExcerpt),
+    )
+    if (excerptMatched) return excerptMatched
+  }
+  const materialId = String(source.materialId || '')
+  const pageNo = Number(source.pageNo || 0)
+  return retrievalDebug.find((entry) =>
+    String(entry.materialId || '') === materialId && Number(entry.pageNo || 0) === pageNo,
+  )
+}
+
+function compactSourceExcerpt(value?: string | null) {
+  return String(value || '').replace(/\s+/g, '').slice(0, 120)
 }
 
 /** 判断回答文本里是否包含后端追加的续写提示。 */
@@ -587,7 +615,7 @@ export function ChatThread({ messages, onOpenSource, onContinueGeneration }: Cha
                           {msg.sources && msg.sources.length > 0 && (
                             <RetrievalTrace
                               sources={msg.sources}
-                              weakEvidence={messageHasWeakEvidenceNotice(msg.text)}
+                              retrievalDebug={msg.retrievalDebug}
                               onOpenSource={onOpenSource}
                             />
                           )}

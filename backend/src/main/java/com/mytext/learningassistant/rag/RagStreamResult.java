@@ -14,6 +14,7 @@ import java.util.List;
  * @param sources        引用的学习资料来源列表，每个来源包含资料名称、页码、摘录等
  * @param continuable    当前回答是否可以通过“继续”接着生成
  * @param continuationHint 可继续生成时展示给前端的提示语
+ * @param retrievalDebug 检索调试链路，解释流式回答选择来源的过程
  */
 public record RagStreamResult(
     Long questionId,
@@ -21,6 +22,17 @@ public record RagStreamResult(
     String answer,
     List<RagSourceResponse> sources,
     boolean continuable,
-    String continuationHint
+    String continuationHint,
+    List<RetrievalDebugEntry> retrievalDebug
 ) {
+    public RagStreamResult(
+        Long questionId,
+        Long conversationId,
+        String answer,
+        List<RagSourceResponse> sources,
+        boolean continuable,
+        String continuationHint
+    ) {
+        this(questionId, conversationId, answer, sources, continuable, continuationHint, List.of());
+    }
 }

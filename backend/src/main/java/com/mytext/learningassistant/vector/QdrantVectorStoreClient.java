@@ -18,6 +18,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mytext.learningassistant.material.LearningMaterialEntity;
 import com.mytext.learningassistant.material.MaterialChunkEntity;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * 基于 Qdrant 向量数据库的存储客户端实现。
  *
@@ -33,6 +36,8 @@ import com.mytext.learningassistant.material.MaterialChunkEntity;
  * chunkIndex、title、summary、keywords 等元数据，用于检索结果的回溯和过滤。</p>
  */
 public class QdrantVectorStoreClient implements VectorStoreClient {
+
+    private static final Logger log = LoggerFactory.getLogger(QdrantVectorStoreClient.class);
 
     /** 向量存储配置属性（Qdrant 地址、集合名、超时等） */
     private final VectorStoreProperties properties;
@@ -130,9 +135,18 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
             // 批量写入 Qdrant，wait=true 表示等待写入完成
             // 使用 upsert 的确定性 pointId，重复解析同一 chunk 会覆盖旧点而不是制造重复向量。
             Map<String, Object> body = Map.of("points", points);
-            sendJson("PUT", collectionUri("/points?wait=true"), body);
-        } catch (Exception ignored) {
-            // 写入失败静默处理，不影响主流程
+            HttpResponse<String> response = sendJson("PUT", collectionUri("/points?wait=true"), body);
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.warn(
+                    "Qdrant upsert failed: collection={}, userId={}, materialId={}, status={}, body={}",
+                    properties.collection(), userId, material.getId(), response.statusCode(), abbreviate(response.body())
+                );
+            }
+        } catch (Exception exception) {
+            log.warn(
+                "Qdrant upsert error: collection={}, userId={}, materialId={}",
+                properties.collection(), userId, material.getId(), exception
+            );
         }
     }
 
@@ -150,8 +164,18 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
         try {
             // 通过过滤器匹配 userId + materialId，删除对应的全部 Point
             Map<String, Object> body = Map.of("filter", filter(userId, materialId));
-            sendJson("POST", collectionUri("/points/delete?wait=true"), body);
-        } catch (Exception ignored) {
+            HttpResponse<String> response = sendJson("POST", collectionUri("/points/delete?wait=true"), body);
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.warn(
+                    "Qdrant delete failed: collection={}, userId={}, materialId={}, status={}, body={}",
+                    properties.collection(), userId, materialId, response.statusCode(), abbreviate(response.body())
+                );
+            }
+        } catch (Exception exception) {
+            log.warn(
+                "Qdrant delete error: collection={}, userId={}, materialId={}",
+                properties.collection(), userId, materialId, exception
+            );
         }
     }
 
@@ -187,6 +211,10 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
             // 发送搜索请求
             HttpResponse<String> response = sendJson("POST", collectionUri("/points/search"), body);
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                log.warn(
+                    "Qdrant search failed: collection={}, userId={}, materialId={}, status={}, body={}",
+                    properties.collection(), userId, materialId, response.statusCode(), abbreviate(response.body())
+                );
                 return List.of();
             }
             // 解析搜索结果
@@ -207,7 +235,11 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
                 }
             }
             return results;
-        } catch (Exception ignored) {
+        } catch (Exception exception) {
+            log.warn(
+                "Qdrant search error: collection={}, userId={}, materialId={}",
+                properties.collection(), userId, materialId, exception
+            );
             return List.of();
         }
     }
@@ -230,6 +262,13 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
         // 本地缓存只能减少重复检查；真实存在性仍以 Qdrant 响应为准。
         HttpResponse<String> existing = send("GET", collectionUri(""), null);
         if (existing.statusCode() >= 200 && existing.statusCode() < 300) {
+            Integer existingSize = existingVectorSize(existing.body());
+            if (existingSize != null && existingSize != vectorSize) {
+                throw new IllegalStateException(
+                    "Qdrant collection vector size mismatch: collection=" + properties.collection()
+                        + ", expected=" + vectorSize + ", actual=" + existingSize
+                );
+            }
             ensuredDimensions.add(vectorSize);
             return;
         }
@@ -349,5 +388,31 @@ public class QdrantVectorStoreClient implements VectorStoreClient {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
         }
         return URI.create(baseUrl + "/collections/" + properties.collection() + suffix);
+    }
+
+    private Integer existingVectorSize(String body) {
+        try {
+            JsonNode vectors = objectMapper.readTree(body).path("result").path("config").path("params").path("vectors");
+            if (vectors.path("size").isInt()) {
+                return vectors.path("size").asInt();
+            }
+            if (vectors.isObject()) {
+                for (JsonNode value : vectors) {
+                    if (value.path("size").isInt()) {
+                        return value.path("size").asInt();
+                    }
+                }
+            }
+            return null;
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private String abbreviate(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.length() <= 500 ? value : value.substring(0, 500) + "...";
     }
 }

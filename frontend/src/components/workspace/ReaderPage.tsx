@@ -111,6 +111,7 @@ export function ReaderPage() {
   // === URL 参数 ===
   const [searchParams, setSearchParams] = useSearchParams()
   const savedReaderContextRef = useRef(readReaderContextSnapshot())
+  const sourceJumpLockUntilRef = useRef(0)
 
   // === 数据获取 ===
   /** 所有资料列表 */
@@ -168,14 +169,51 @@ export function ReaderPage() {
   const requestedPageChunkIndex = requestedPageNo
     ? chunkIndexForPageNo(requestedPageNo, chunks, pages)
     : -1
-
+  const savedReaderContext = savedReaderContextRef.current
+  const resolvedChunkIndex = requestedChunkIndex >= 0
+    ? requestedChunkIndex
+    : requestedPageChunkIndex >= 0
+      ? requestedPageChunkIndex
+      : selectedChunkIndex
+  /**
+   * 资料深链、来源跳转和阅读器恢复都会先写 URL，再等 chunks/pages 落到目标片段。
+   * 这个阶段不能把默认第 1 段的位置写回本地快照，否则会把真实阅读位置覆盖掉。
+   */
+  const waitingRequestedLocation = materialParam === selectedMaterialId && (
+    chunkParam
+      ? requestedChunkIndex < 0 || String(chunks[resolvedChunkIndex]?.id || '') !== chunkParam
+      : Boolean(
+          requestedPageNo
+          && (
+            requestedPageChunkIndex < 0
+            || (
+              chunks[requestedPageChunkIndex]
+              && String(chunks[resolvedChunkIndex]?.id || '') !== String(chunks[requestedPageChunkIndex]?.id || '')
+            )
+          )
+        )
+  )
+  const waitingSavedLocationRestore = !materialParam
+    && savedReaderContext.materialId === selectedMaterialId
+    && Boolean(savedReaderContext.chunkId || savedReaderContext.pageNo)
+    && (
+      savedReaderContext.chunkId
+        ? String(chunks[selectedChunkIndex]?.id || '') !== savedReaderContext.chunkId
+        : Boolean(
+            savedReaderContext.pageNo
+            && (
+              chunkIndexForPageNo(savedReaderContext.pageNo, chunks, pages) < 0
+              || String(chunks[selectedChunkIndex]?.id || '') !== String(chunks[chunkIndexForPageNo(savedReaderContext.pageNo, chunks, pages)]?.id || '')
+            )
+          )
+    )
   // === 派生值 ===
   /** 当前选中的资料对象 */
   const selectedMaterial = materials.find((m) => m.id === selectedMaterialId) || null
   /** 当前选中的片段对象 */
-  const currentChunk = chunks[selectedChunkIndex] || null
+  const currentChunk = chunks[resolvedChunkIndex] || null
   const firstContentPage = pages.find((page) => page.chunkIds.length > 0) || pages[0]
-  const currentChunkPageNo = pageNoForChunk(currentChunk, selectedChunkIndex, chunks, pages)
+  const currentChunkPageNo = pageNoForChunk(currentChunk, resolvedChunkIndex, chunks, pages)
   /**
    * 当前页面对象
    * 优先按片段的 pageNo 匹配，其次按 chunkId 包含关系匹配，最后取第一页
@@ -184,6 +222,15 @@ export function ReaderPage() {
     || (requestedPageNo ? pages.find((page) => page.pageNo === requestedPageNo && page.chunkIds.length > 0) : null)
     || firstContentPage
   const readingChunk = chunks[readingChunkIndex] || currentChunk
+  /**
+   * ReaderPaper 在恢复目标页前，可能会先上报顶部第 1 页为可见页。
+   * 这个阶段如果把滚动位置立即回写到 URL 或本地快照，会把目标页覆盖回第一页。
+   * 因此这里先等视口真正到达 URL 请求的位置，再开放回写。
+   */
+  const waitingViewportRestore = materialParam === selectedMaterialId && (
+    (chunkParam && String(readingChunk?.id || '') !== chunkParam)
+    || (Boolean(requestedPageNo) && readingPageNo !== requestedPageNo)
+  )
   const askCurrentPageNo = readingPageNo ?? currentPage?.pageNo ?? currentChunk?.pageNo ?? null
   const askCurrentPageChunkIds = readingPageChunkIds.length ? readingPageChunkIds : currentPage?.chunkIds || []
 
@@ -203,6 +250,16 @@ export function ReaderPage() {
     }
     setSearchParams(nextParams, { replace: true })
   }, [materialParam, selectedMaterialId, setSearchParams])
+
+  useEffect(() => {
+    if (!selectedMaterialId || !materialParam) return
+    if (!chunkParam && !requestedPageNo) return
+    writeReaderContextSnapshot({
+      materialId: selectedMaterialId,
+      chunkId: chunkParam,
+      pageNo: requestedPageNo,
+    })
+  }, [chunkParam, materialParam, requestedPageNo, selectedMaterialId])
 
   /**
    * 监听 URL 中的 materialId 变化
@@ -239,15 +296,37 @@ export function ReaderPage() {
    * 使用 replace 模式避免产生浏览器历史记录
    */
   useEffect(() => {
+    if (materialParam || chunkParam || requestedPageNo || !selectedMaterialId || !chunks.length) return
+    if (savedReaderContext.materialId !== selectedMaterialId) return
+
+    if (savedReaderContext.chunkId) {
+      const savedChunkIndex = chunks.findIndex((chunk) => String(chunk.id) === savedReaderContext.chunkId)
+      if (savedChunkIndex >= 0 && savedChunkIndex !== selectedChunkIndex) {
+        setSelectedChunkIndex(savedChunkIndex)
+      }
+      return
+    }
+
+    if (!savedReaderContext.pageNo) return
+    const savedPageChunkIndex = chunkIndexForPageNo(savedReaderContext.pageNo, chunks, pages)
+    if (savedPageChunkIndex >= 0 && savedPageChunkIndex !== selectedChunkIndex) {
+      setSelectedChunkIndex(savedPageChunkIndex)
+    }
+  }, [chunkParam, chunks, materialParam, pages, requestedPageNo, savedReaderContext, selectedChunkIndex, selectedMaterialId])
+
+  useEffect(() => {
     if (!selectedMaterialId || !currentChunk) return
     if (askCurrentPageNo && readingChunk) return
+    if (waitingSavedLocationRestore) return
+    // Keep the externally requested page/chunk stable for a short window after a source jump.
+    if (Date.now() < sourceJumpLockUntilRef.current) return
     const currentPageNo = requestedPageNo
-      || pageNoForChunk(currentChunk, selectedChunkIndex, chunks, pages)
+      || pageNoForChunk(currentChunk, resolvedChunkIndex, chunks, pages)
       || currentPage?.pageNo
       || null
     // 通过 URL 直接打开指定页时，chunks/pages 可能比 selectedChunkIndex 晚一步加载。
     // 如果此时立刻把默认第 1 片段写回 URL，会把用户请求的 pageNo 覆盖掉，导致第 2 页等深链永远跳不进去。
-    if (!chunkParam && requestedPageNo && requestedPageChunkIndex >= 0 && requestedPageChunkIndex !== selectedChunkIndex) return
+    if (!chunkParam && requestedPageNo && requestedPageChunkIndex >= 0 && requestedPageChunkIndex !== resolvedChunkIndex) return
     // 避免不必要的 URL 更新（如果参数已经一致则跳过）
     if (materialParam && materialParam !== selectedMaterialId) return
     if (chunkParam && chunkParam !== String(currentChunk.id) && requestedChunkIndex >= 0) return
@@ -260,17 +339,25 @@ export function ReaderPage() {
     const nextParams = new URLSearchParams({ materialId: selectedMaterialId, chunkId: String(currentChunk.id) })
     if (currentPageNo && currentPageNo > 0) nextParams.set('pageNo', String(currentPageNo))
     setSearchParams(nextParams, { replace: true })
-  }, [askCurrentPageNo, chunkParam, chunks, currentChunk, currentPage, materialParam, pageParam, pages, readingChunk, requestedChunkIndex, requestedPageChunkIndex, requestedPageNo, selectedChunkIndex, selectedMaterialId, setSearchParams])
+  }, [askCurrentPageNo, chunkParam, chunks, currentChunk, currentPage, materialParam, pageParam, pages, readingChunk, requestedChunkIndex, requestedPageChunkIndex, requestedPageNo, resolvedChunkIndex, selectedMaterialId, setSearchParams, waitingSavedLocationRestore])
 
   /** 当前阅读上下文变化时写入本地快照，供下次无参数进入 Reader 时恢复。 */
   useEffect(() => {
     if (!selectedMaterialId) return
+    if (waitingRequestedLocation) return
+    if (waitingSavedLocationRestore) return
+    if (waitingViewportRestore) return
+    /**
+     * 深链、来源跳转和跨模块返回时，URL 里的 chunkId/pageNo 已经代表用户真正想停留的位置。
+     * readingChunk 和 askCurrentPageNo 可能还在等待滚动观察器或片段同步补齐，
+     * 这里优先落盘 URL 目标值，避免把瞬时的第 1 段覆盖进阅读快照。
+     */
     writeReaderContextSnapshot({
       materialId: selectedMaterialId,
-      chunkId: readingChunk?.id == null ? chunkParam || null : String(readingChunk.id),
-      pageNo: askCurrentPageNo || requestedPageNo || null,
+      chunkId: chunkParam || (readingChunk?.id == null ? null : String(readingChunk.id)),
+      pageNo: requestedPageNo || askCurrentPageNo || null,
     })
-  }, [askCurrentPageNo, chunkParam, readingChunk, requestedPageNo, selectedMaterialId])
+  }, [askCurrentPageNo, chunkParam, readingChunk, requestedPageNo, selectedMaterialId, waitingRequestedLocation, waitingSavedLocationRestore, waitingViewportRestore])
 
   /**
    * 将真实滚动位置轻量同步到 URL。
@@ -278,6 +365,9 @@ export function ReaderPage() {
    */
   useEffect(() => {
     if (!selectedMaterialId || !readingChunk || !askCurrentPageNo) return
+    if (Date.now() < sourceJumpLockUntilRef.current) return
+    if (waitingRequestedLocation || waitingSavedLocationRestore || waitingViewportRestore) return
+    if ((chunkParam || requestedPageNo) && readingPageNo == null && String(readingChunk.id) !== String(currentChunk?.id || '')) return
     if (
       materialParam === selectedMaterialId
       && chunkParam === String(readingChunk.id)
@@ -289,7 +379,22 @@ export function ReaderPage() {
     nextParams.set('chunkId', String(readingChunk.id))
     nextParams.set('pageNo', String(askCurrentPageNo))
     setSearchParams(nextParams, { replace: true })
-  }, [askCurrentPageNo, chunkParam, materialParam, pageParam, readingChunk, searchParams, selectedMaterialId, setSearchParams])
+  }, [
+    askCurrentPageNo,
+    chunkParam,
+    materialParam,
+    pageParam,
+    readingPageNo,
+    readingChunk,
+    searchParams,
+    selectedMaterialId,
+    setSearchParams,
+    currentChunk,
+    requestedPageNo,
+    waitingRequestedLocation,
+    waitingSavedLocationRestore,
+    waitingViewportRestore,
+  ])
 
   // === 副作用：右侧面板宽度调整 ===
 
@@ -364,6 +469,16 @@ export function ReaderPage() {
   // === 交互处理 ===
 
   /** 选择资料：更新选中 ID，重置片段索引为 0，关闭移动端面板 */
+  /**
+   * 选中片段切换后，先把连续阅读上下文对齐到同一片段。
+   * 否则在可见区观察器回传前，恢复快照会短暂拿到错误的第 1 段。
+   */
+  useEffect(() => {
+    if (!chunks.length) return
+    const nextIndex = Math.max(0, Math.min(chunks.length - 1, resolvedChunkIndex))
+    setReadingChunkIndex((current) => current === nextIndex ? current : nextIndex)
+  }, [chunks.length, resolvedChunkIndex])
+
   const handleSelectMaterial = (id: string) => {
     setSelectedMaterialId(id)
     setSelectedChunkIndex(0)
@@ -381,12 +496,15 @@ export function ReaderPage() {
     setNavigatorOpen(false)
     const targetChunk = chunks[safeIndex]
     if (selectedMaterialId && targetChunk) {
-      // 用户主动点目录时使用 push，保留可后退的阅读路径。
+      // 来源跳转属于当前阅读位置同步，使用 replace 避免触发历史和状态反复回放。
       const nextParams = new URLSearchParams({ materialId: selectedMaterialId, chunkId: String(targetChunk.id) })
       const nextPageNo = options?.pageNo || pageNoForChunk(targetChunk, safeIndex, chunks, pages)
       if (nextPageNo && nextPageNo > 0) nextParams.set('pageNo', String(nextPageNo))
       if (options?.view) nextParams.set('view', options.view)
-      setSearchParams(nextParams, { replace: false })
+      if (options?.pageNo || options?.view) {
+        sourceJumpLockUntilRef.current = Date.now() + 900
+      }
+      setSearchParams(nextParams, { replace: Boolean(options?.pageNo || options?.view) })
     }
   }
 
@@ -419,6 +537,7 @@ export function ReaderPage() {
   // === 渲染 ===
   return (
     <motion.div
+      data-testid="reader-page"
       className="flex h-full min-h-0 flex-col overflow-hidden lg:flex-row"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -468,7 +587,7 @@ export function ReaderPage() {
               materials={materials}
               chunks={chunks}
               selectedMaterialId={selectedMaterialId}
-              selectedChunkIndex={selectedChunkIndex}
+              selectedChunkIndex={resolvedChunkIndex}
               onSelectMaterial={handleSelectMaterial}
               onSelectChunk={handleSelectChunk}
               className="border-0"
@@ -647,7 +766,7 @@ export function ReaderPage() {
                 materials={materials}
                 chunks={chunks}
                 selectedMaterialId={selectedMaterialId}
-                selectedChunkIndex={selectedChunkIndex}
+                selectedChunkIndex={resolvedChunkIndex}
                 onSelectMaterial={handleSelectMaterial}
                 onSelectChunk={handleSelectChunk}
               />

@@ -29,8 +29,8 @@ public class QueryExpansionProperties {
     /** 当 LLM 无法生成扩展查询时，是否使用本地规则生成，默认开启 */
     private boolean localFallback = true;
 
-    /** 是否启用 HyDE（假设性文档嵌入）检索策略，默认开启 */
-    private boolean hydeEnabled = true;
+    /** 是否启用 HyDE（假设性文档嵌入）检索策略，默认关闭，避免每次问答额外触发一次 LLM 检索前调用 */
+    private boolean hydeEnabled = false;
 
     /** HyDE 生成的假设性文档在最终混合检索中的权重，默认 0.72 */
     private double hydeWeight = 0.72;

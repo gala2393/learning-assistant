@@ -144,15 +144,13 @@
 
     <build>
         <plugins>
-            <!-- Maven 编译器插件：指定 JDK 21，启用 fork 模式和内存映射优化 -->
+            <!-- Maven 编译器插件：指定 JDK 21，并关闭 ZIP 内存映射以减少 Windows 文件锁定问题。 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.11.0</version>
                 <configuration>
                     <encoding>UTF-8</encoding>
-                    <fork>true</fork>
-                    <executable>${java.home}/bin/javac</executable>
                     <compilerArgs>
                         <!-- 禁用 ZIP 内存映射以避免 Windows 上的文件锁定问题 -->
                         <arg>-J-Dsun.zip.disableMemoryMapping=true</arg>

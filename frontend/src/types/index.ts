@@ -254,7 +254,24 @@ export interface RagSource {
   score: number           // 相关度分数（0~1）
 }
 
-/** RAG 问答使用额度 */
+/** RAG ??????????????????????????????????????????????*/
+export interface RetrievalDebugEntry {
+  materialId: string | number | null
+  chunkId: string | number | null
+  materialTitle?: string | null
+  pageNo?: number | null
+  chunkIndex?: number | null
+  excerpt?: string | null
+  routes: string[]
+  rawScore?: number | null
+  rerankScore?: number | null
+  finalScore?: number | null
+  selected: boolean
+  reason?: string | null
+  selectedReason?: string | null
+  penaltyReason?: string | null
+}
+
 export interface RagUsage {
   dailyLimit: number          // 每日限额
   usedToday: number           // 今日已用
@@ -287,6 +304,7 @@ export interface HistoryItem {
       continuationHint?: string | null
     }>
   sources?: RagSource[]                     // 检索来源列表
+  retrievalDebug?: RetrievalDebugEntry[]    // 检索调试链路
 }
 
 /** 收藏项 */

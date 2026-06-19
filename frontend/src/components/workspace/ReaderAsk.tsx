@@ -539,13 +539,15 @@ function locateSourceChunkIndex(source: RagSource, chunks: MaterialChunk[], chun
     const samePage = chunks
       .map((chunk, index) => ({ chunk, index }))
       .filter(({ chunk }) => Number(chunk.pageNo) === pageNo)
-    const byExcerpt = samePage.find(({ chunk }) => sourceMatchesChunkText(source, chunk))
-    if (byExcerpt) return byExcerpt.index
+    const byExcerpt = bestSourceChunkMatch(source, samePage)
+    if (byExcerpt !== undefined) return byExcerpt
     if (samePage[0]) return samePage[0].index
   }
 
-  const byExcerpt = chunks.findIndex((chunk) => sourceMatchesChunkText(source, chunk))
-  return byExcerpt >= 0 ? byExcerpt : undefined
+  return bestSourceChunkMatch(
+    source,
+    chunks.map((chunk, index) => ({ chunk, index })),
+  )
 }
 
 function locatePageChunkIndex(pageNo: number, chunks: MaterialChunk[]) {
@@ -555,13 +557,57 @@ function locatePageChunkIndex(pageNo: number, chunks: MaterialChunk[]) {
 
 /** 用来源摘录匹配片段正文，处理空白、换行和 OCR 文本差异。 */
 function sourceMatchesChunkText(source: RagSource, chunk: MaterialChunk) {
+  return sourceChunkMatchScore(source, chunk) > 0
+}
+
+function bestSourceChunkMatch(
+  source: RagSource,
+  candidates: Array<{ chunk: MaterialChunk; index: number }>,
+) {
+  let bestIndex: number | undefined
+  let bestScore = 0
+  for (const candidate of candidates) {
+    const score = sourceChunkMatchScore(source, candidate.chunk)
+    if (score > bestScore) {
+      bestScore = score
+      bestIndex = candidate.index
+    }
+  }
+  return bestIndex
+}
+
+function sourceChunkMatchScore(source: RagSource, chunk: MaterialChunk) {
   const excerpt = compactSourceText(source.excerpt || '')
-  if (excerpt.length < 16) return false
+  if (excerpt.length < 16) return 0
   const text = compactSourceText([chunk.chunkText, chunk.excerpt, chunk.summary].filter(Boolean).join('\n'))
-  if (!text) return false
-  return text.includes(excerpt.slice(0, Math.min(120, excerpt.length)))
+  if (!text) return 0
+
+  const fullExcerpt = excerpt.slice(0, Math.min(180, excerpt.length))
+  if (text.includes(fullExcerpt)) return 1
+
+  const mediumExcerpt = excerpt.slice(0, Math.min(120, excerpt.length))
+  if (mediumExcerpt.length >= 24 && text.includes(mediumExcerpt)) return 0.88
+
+  const shortExcerpt = excerpt.slice(0, Math.min(72, excerpt.length))
+  if (shortExcerpt.length >= 20 && text.includes(shortExcerpt)) return 0.72
+
+  const overlap = prefixOverlapLength(text, excerpt)
+  if (overlap >= 32) {
+    return Math.min(0.68, overlap / Math.max(64, excerpt.length))
+  }
+  return 0
 }
 
 function compactSourceText(value: string) {
   return value.replace(/\s+/g, '').toLowerCase()
+}
+
+function prefixOverlapLength(text: string, excerpt: string) {
+  const maxWindow = Math.min(excerpt.length, 96)
+  for (let size = maxWindow; size >= 16; size -= 4) {
+    if (text.includes(excerpt.slice(0, size))) {
+      return size
+    }
+  }
+  return 0
 }

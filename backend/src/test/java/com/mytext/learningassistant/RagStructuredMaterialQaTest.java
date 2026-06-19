@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mytext.learningassistant.embedding.EmbeddingClient;
+import com.mytext.learningassistant.llm.LlmCompletion;
 import com.mytext.learningassistant.llm.ThirdPartyLlmClient;
 import com.mytext.learningassistant.material.MaterialProcessingJobService;
 
@@ -152,6 +153,44 @@ class RagStructuredMaterialQaTest {
 
         assertAnswerContains(answer, "BODY_SQL_JOIN_MARKER");
         assertSourceContains(answer, "BODY_SQL_JOIN_MARKER");
+        assertSelectedSourceHasRetrievalRoute(answer);
+        Assertions.assertFalse(answer.at("/sources/0/excerpt").asText().contains("Contents"), answer.toPrettyString());
+    }
+
+    @Test
+    void generatedAnswerGroundsSourcesToActuallyUsedBodyChunk() throws Exception {
+        when(thirdPartyLlmClient.answer(anyString(), anyList(), anyList(), anyBoolean()))
+            .thenReturn(Optional.of(new LlmCompletion(
+                "Chapter 2 explains that BODY_SQL_JOIN_MARKER JOIN connects rows from multiple tables.",
+                "mock-model"
+            )));
+        String token = registerAndLogin("rag-grounding-" + UUID.randomUUID());
+        Long materialId = uploadTextMaterial(
+            token,
+            "Answer Grounding Material",
+            """
+            Contents
+            Chapter 1 Overview
+            Chapter 2 SQL Query
+            Chapter 3 Index Optimization
+
+            Chapter 1 Overview
+            INTRO_MARKER This part only introduces database basics.
+
+            Chapter 2 SQL Query
+            BODY_SQL_JOIN_MARKER JOIN connects rows from multiple tables by matching keys and conditions.
+
+            Chapter 3 Index Optimization
+            INDEX_MARKER BTree indexes improve lookup speed.
+            """
+        );
+        Long indexChunkId = findChunkIdContaining(getChunks(token, materialId), "INDEX_MARKER");
+
+        JsonNode answer = chat(token, "What does Chapter 2 say about JOIN?", materialId, indexChunkId);
+
+        assertAnswerContains(answer, "BODY_SQL_JOIN_MARKER");
+        assertSourceContains(answer, "BODY_SQL_JOIN_MARKER");
+        assertSelectedSourceHasRetrievalRoute(answer);
         Assertions.assertFalse(answer.at("/sources/0/excerpt").asText().contains("Contents"), answer.toPrettyString());
     }
 
@@ -211,6 +250,188 @@ class RagStructuredMaterialQaTest {
 
         assertAnswerContains(answer, "JOIN_KEYWORD_MARKER");
         assertSourceContains(answer, "JOIN_KEYWORD_MARKER");
+    }
+
+    @Test
+    void structureQuestionReturnsAllFivePartsFromStudentHandbook() throws Exception {
+        String token = registerAndLogin("rag-five-parts-" + UUID.randomUUID());
+        Long materialId = uploadTextMaterial(
+            token,
+            "学生手册",
+            """
+            目录
+            第一部分 入学与注册
+            第二部分 课程学习
+            第三部分 考试与成绩
+            第四部分 奖助与处分
+            第五部分 毕业与离校
+
+            第一部分 入学与注册
+            PART_ONE_MARKER 学生需要按时完成报到、注册和学籍确认。
+
+            第二部分 课程学习
+            PART_TWO_MARKER 学生应按照培养方案完成课程学习和实践环节。
+
+            第三部分 考试与成绩
+            PART_THREE_MARKER 学校按考试纪律、成绩评定和复核流程管理成绩。
+
+            第四部分 奖助与处分
+            PART_FOUR_MARKER 奖学金、助学金、违纪处分和申诉都在这一部分说明。
+
+            第五部分 毕业与离校
+            PART_FIVE_MARKER 毕业资格、离校手续、档案转递和证书领取都在这一部分说明。
+            """
+        );
+        Long laterChunkId = findChunkIdContaining(getChunks(token, materialId), "PART_FIVE_MARKER");
+
+        JsonNode answer = chat(token, "这份学生手册有哪些部分？", materialId, laterChunkId);
+
+        assertAnswerContains(answer, "第一部分");
+        assertAnswerContains(answer, "第二部分");
+        assertAnswerContains(answer, "第三部分");
+        assertAnswerContains(answer, "第四部分");
+        assertAnswerContains(answer, "第五部分");
+    }
+
+    @Test
+    void wideStructureQuestionCanUseMoreContextButStillReturnsAtMostFiveSources() throws Exception {
+        String token = registerAndLogin("rag-wide-structure-" + UUID.randomUUID());
+        Long materialId = uploadTextMaterial(
+            token,
+            "Wide Structure Handbook",
+            """
+            目录
+            第一部分 入学
+            第二部分 课程
+            第三部分 考试
+            第四部分 助学
+            第五部分 毕业
+            第六部分 实习
+            第七部分 就业
+
+            第一部分 入学
+            PART_ONE_MARKER 入学报到、注册和学籍确认在本部分说明。
+            第二部分 课程
+            PART_TWO_MARKER 课程学习、学分完成和选课规则在本部分说明。
+            第三部分 考试
+            PART_THREE_MARKER 考试纪律、成绩复核和补缓考安排在本部分说明。
+            第四部分 助学
+            PART_FOUR_MARKER 奖学金、助学金和资助申请在本部分说明。
+            第五部分 毕业
+            PART_FIVE_MARKER 毕业资格、论文要求和离校手续在本部分说明。
+            第六部分 实习
+            PART_SIX_MARKER 实习安排、指导教师和实习考核在本部分说明。
+            第七部分 就业
+            PART_SEVEN_MARKER 就业指导、校招信息和毕业去向登记在本部分说明。
+            """
+        );
+        Long laterChunkId = findChunkIdContaining(getChunks(token, materialId), "PART_SEVEN_MARKER");
+
+        JsonNode answer = chat(token, "这份手册有哪些部分？", materialId, laterChunkId);
+
+        assertAnswerContains(answer, "第一部分");
+        assertAnswerContains(answer, "第二部分");
+        assertAnswerContains(answer, "第三部分");
+        assertAnswerContains(answer, "第四部分");
+        assertAnswerContains(answer, "第五部分");
+        assertAnswerContains(answer, "第六部分");
+        assertAnswerContains(answer, "第七部分");
+        assertSourceCountAtMost(answer, 5);
+        assertDistinctSourceChunks(answer);
+    }
+
+    @Test
+    void partQuestionUsesRequestedPartInsteadOfOnlyChapterHeadings() throws Exception {
+        String token = registerAndLogin("rag-part-" + UUID.randomUUID());
+        Long materialId = uploadTextMaterial(
+            token,
+            "学生手册分部分资料",
+            """
+            第一部分 入学与注册
+            PART_ONE_MARKER 学生需要按时完成报到、注册和学籍确认。
+
+            第二部分 课程学习
+            PART_TWO_MARKER 学生应按照培养方案完成课程学习和实践环节。
+
+            第五部分 毕业与离校
+            PART_FIVE_MARKER 毕业资格、离校手续、档案转递和证书领取都在这一部分说明。
+            """
+        );
+        Long firstChunkId = findChunkIdContaining(getChunks(token, materialId), "PART_ONE_MARKER");
+
+        JsonNode answer = chat(token, "第五部分主要讲什么？", materialId, firstChunkId);
+
+        assertAnswerContains(answer, "PART_FIVE_MARKER");
+        assertSourceContains(answer, "PART_FIVE_MARKER");
+        assertAnswerContains(answer, "第五部分");
+        assertAnswerNotContains(answer, "未知页");
+    }
+
+    @Test
+    void mixedStructureAndDetailQuestionStillRetrievesRequestedBodySection() throws Exception {
+        String token = registerAndLogin("rag-mixed-structure-" + UUID.randomUUID());
+        Long materialId = uploadTextMaterial(
+            token,
+            "Mixed Structure Handbook",
+            """
+            Contents
+            Part 1 Enrollment
+            Part 2 Courses
+            Part 3 Exams
+            Part 4 Financial Aid
+            Part 5 Graduation
+
+            Part 1 Enrollment
+            PART_ONE_MARKER Enrollment, registration, and student status confirmation are explained here.
+
+            Part 2 Courses
+            PART_TWO_MARKER Course selection, credit requirements, and practical training are explained here.
+
+            Part 3 Exams
+            PART_THREE_MARKER Exam rules, grading, and review procedures are explained here.
+
+            Part 4 Financial Aid
+            PART_FOUR_MARKER Scholarships, grants, discipline, and appeals are explained here.
+
+            Part 5 Graduation
+            PART_FIVE_MARKER Graduation requirements, leaving-school procedures, archive transfer, and certificate pickup are explained here.
+            """
+        );
+        Long laterChunkId = findChunkIdContaining(getChunks(token, materialId), "PART_FIVE_MARKER");
+
+        JsonNode answer = chat(token, "List all parts in this handbook and explain what Part 5 covers, including archive transfer and certificate pickup.", materialId, laterChunkId);
+
+        assertAnswerContains(answer, "Part 5");
+        assertAnswerContains(answer, "archive transfer");
+        assertAnswerContains(answer, "certificate pickup");
+        assertSourceContains(answer, "PART_FIVE_MARKER");
+        assertSelectedSourceHasRetrievalRoute(answer);
+    }
+
+    @Test
+    void detailQuestionPrefersBodyChunkOverSectionHeadingAtApiLevel() throws Exception {
+        String token = registerAndLogin("rag-heading-vs-body-" + UUID.randomUUID());
+        Long materialId = uploadTextMaterial(
+            token,
+            "Heading Versus Body Material",
+            """
+            Part 1 Enrollment
+            PART_ONE_MARKER Enrollment, registration, and student status confirmation are explained here.
+
+            Part 5 Graduation
+
+            Part 5 Graduation
+            PART_FIVE_DETAIL_MARKER Graduation requirements, archive transfer, and certificate pickup are explained here.
+            """
+        );
+        Long currentChunkId = findChunkIdContaining(getChunks(token, materialId), "PART_ONE_MARKER");
+
+        JsonNode answer = chat(token, "What does Part 5 cover, including archive transfer and certificate pickup?", materialId, currentChunkId);
+
+        assertAnswerContains(answer, "PART_FIVE_DETAIL_MARKER");
+        assertSourceContains(answer, "PART_FIVE_DETAIL_MARKER");
+        Assertions.assertFalse(answer.at("/sources/0/excerpt").asText().equals("Part 5 Graduation"), answer.toPrettyString());
+        assertSelectedSourceHasRetrievalRoute(answer);
     }
 
     private JsonNode chat(String token, String question, Long materialId, Long currentChunkId) throws Exception {
@@ -326,5 +547,27 @@ class RagStructuredMaterialQaTest {
 
     private void assertSourceContains(JsonNode data, String expected) {
         Assertions.assertTrue(data.at("/sources/0/excerpt").asText().contains(expected), data.toPrettyString());
+    }
+
+    private void assertSelectedSourceHasRetrievalRoute(JsonNode data) {
+        JsonNode routes = data.at("/retrievalDebug/0/routes");
+        Assertions.assertTrue(routes.isArray() && routes.size() > 0, data.toPrettyString());
+        Assertions.assertFalse(data.at("/retrievalDebug/0/selectedReason").asText().isBlank(), data.toPrettyString());
+    }
+
+    private void assertSourceCountAtMost(JsonNode data, int expectedMax) {
+        JsonNode sources = data.path("sources");
+        Assertions.assertTrue(sources.isArray(), data.toPrettyString());
+        Assertions.assertTrue(sources.size() <= expectedMax, data.toPrettyString());
+    }
+
+    private void assertDistinctSourceChunks(JsonNode data) {
+        JsonNode sources = data.path("sources");
+        Assertions.assertTrue(sources.isArray(), data.toPrettyString());
+        java.util.Set<Long> chunkIds = new java.util.LinkedHashSet<>();
+        for (JsonNode source : sources) {
+            chunkIds.add(source.path("chunkId").asLong());
+        }
+        Assertions.assertEquals(chunkIds.size(), sources.size(), data.toPrettyString());
     }
 }

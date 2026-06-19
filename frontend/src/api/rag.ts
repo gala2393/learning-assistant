@@ -8,7 +8,7 @@ import type {
   ChatPayload, HistoryItem, RagEvaluationSuiteDetail, RagEvaluationSuitePayload,
   RagEvaluationSuiteResult, RagEvaluationSuiteRun, RagEvaluationSuiteSavePayload,
   RagEvaluationSuiteSummary, StreamChatPayload, SummaryResult, RagSource, RagUsage,
-  SummaryType,
+  SummaryType, RetrievalDebugEntry,
 } from '@/types'
 
 /**
@@ -45,6 +45,7 @@ export async function getRagUsage(): Promise<RagUsage> {
  */
 export interface StreamCallbacks {
   onSources?: (sources: RagSource[]) => void    // 收到检索到的资料来源
+  onRetrievalDebug?: (items: RetrievalDebugEntry[]) => void // 收到检索调试链路
   onChunk?: (delta: string) => void              // 收到 AI 回答的文本增量
   onStatus?: (status: { stage?: string; message?: string }) => void  // 状态变化（检索中/思考中）
   onDone?: (result: {
@@ -125,6 +126,7 @@ export function chatStream(payload: StreamChatPayload, callbacks: StreamCallback
         try {
           const data = JSON.parse(dataLines.join('\n'))
           if (currentEvent === 'sources') callbacks.onSources?.(data.sources || [])
+          else if (currentEvent === 'retrieval_debug') callbacks.onRetrievalDebug?.(data.items || [])
           else if (currentEvent === 'chunk') callbacks.onChunk?.(data.delta || '')
           else if (currentEvent === 'status') callbacks.onStatus?.(data)
           else if (currentEvent === 'done') { receivedTerminalEvent = true; callbacks.onDone?.(data) }

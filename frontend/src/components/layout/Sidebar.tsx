@@ -87,6 +87,35 @@ const iconMap: Record<string, React.ElementType> = {
   'scroll-text': ScrollText,
 }
 
+const READER_CONTEXT_STORAGE_KEY = 'learning-assistant.reader.current-context'
+const READER_LAST_ROUTE_STORAGE_KEY = 'learning-assistant.reader.last-route'
+
+function restoreReaderPath(path: string) {
+  if (typeof window === 'undefined' || path !== '/workspace/reader') return path
+  try {
+    const lastRoute = window.localStorage.getItem(READER_LAST_ROUTE_STORAGE_KEY)
+    if (lastRoute && lastRoute.startsWith('/workspace/reader')) {
+      return lastRoute
+    }
+    const raw = window.localStorage.getItem(READER_CONTEXT_STORAGE_KEY)
+    if (!raw) return path
+    const parsed = JSON.parse(raw) as { materialId?: string | null; chunkId?: string | null; pageNo?: number | null }
+    if (!parsed.materialId) return path
+    const params = new URLSearchParams({ materialId: String(parsed.materialId) })
+    if (parsed.chunkId) params.set('chunkId', String(parsed.chunkId))
+    if (typeof parsed.pageNo === 'number' && parsed.pageNo > 0) params.set('pageNo', String(parsed.pageNo))
+    return `${path}?${params.toString()}`
+  } catch {
+    window.localStorage.removeItem(READER_CONTEXT_STORAGE_KEY)
+    return path
+  }
+}
+
+function rememberReaderRoute(pathname: string, search: string) {
+  if (typeof window === 'undefined' || pathname !== '/workspace/reader') return
+  window.localStorage.setItem(READER_LAST_ROUTE_STORAGE_KEY, `${pathname}${search || ''}`)
+}
+
 export function Sidebar() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -342,7 +371,10 @@ export function Sidebar() {
             return (
               <li key={section.path}>
                 <button
-                  onClick={() => navigate(section.path)}
+                  onClick={() => {
+                    rememberReaderRoute(location.pathname, location.search)
+                    navigate(restoreReaderPath(section.path))
+                  }}
                   className={cn(
                     'flex w-full items-center rounded-lg text-sm font-medium transition-colors',
                     collapsed ? 'h-10 justify-center px-0' : 'gap-3 px-3 py-2.5',
