@@ -331,10 +331,10 @@ export function ChatComposer({
         )}
         {/* ---- 资料问答绑定提示：贴近输入框，用户提问前能看见当前上下文。 ---- */}
         {mode === 'MATERIAL' && boundMaterialLabel && (
-          <div className="flex max-w-full items-center gap-2 rounded-full border border-cyan-100 bg-cyan-50/70 px-3 py-1.5 text-xs text-cyan-900 shadow-sm dark:border-cyan-900/50 dark:bg-cyan-950/25 dark:text-cyan-100">
+          <div className="flex max-w-full items-center gap-2 rounded-full border border-[#dfe7f2] bg-[#f4f7fb] px-3 py-1.5 text-xs text-[#5d6b82] shadow-[0_4px_16px_rgba(15,23,42,0.03)] dark:border-cyan-900/50 dark:bg-cyan-950/25 dark:text-cyan-100">
             <BookOpen className="h-3.5 w-3.5 shrink-0" />
             <span className="shrink-0 font-medium">已绑定</span>
-            <span className="min-w-0 truncate text-cyan-800/90 dark:text-cyan-100/90" title={boundMaterialLabel}>
+            <span className="min-w-0 truncate text-[#6b7890] dark:text-cyan-100/90" title={boundMaterialLabel}>
               {boundMaterialLabel}
             </span>
           </div>
@@ -344,8 +344,8 @@ export function ChatComposer({
         <div
           className={
             centered
-              ? 'min-h-[112px] rounded-[22px] border border-slate-200 bg-white px-4 py-3 shadow-[0_16px_40px_rgba(15,23,42,0.08)] dark:border-slate-700 dark:bg-slate-900'
-              : 'rounded-[22px] border border-slate-200 bg-white px-4 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900'
+              ? 'min-h-[112px] rounded-[22px] border border-[#e5e9ef] bg-white px-4 py-3 shadow-[0_18px_48px_rgba(15,23,42,0.06)] dark:border-slate-700 dark:bg-slate-900'
+              : 'rounded-[22px] border border-[#e5e9ef] bg-white px-4 py-3 shadow-[0_6px_20px_rgba(15,23,42,0.04)] dark:border-slate-800 dark:bg-slate-900'
           }
         >
           {disabled ? (
@@ -403,7 +403,7 @@ export function ChatComposer({
                 <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
                   {/* 模型切换按钮（显示当前模型名） */}
                   {onOpenModelSettings && (
-                    <Button type="button" variant="ghost" className="h-8 shrink-0 rounded-full bg-slate-50 px-2.5 text-xs text-slate-700 hover:bg-slate-100 dark:bg-slate-800/60 dark:text-slate-200 dark:hover:bg-slate-800" onClick={onOpenModelSettings} title="切换大模型">
+                    <Button type="button" variant="ghost" className="h-8 shrink-0 rounded-full bg-[#f5f7fa] px-2.5 text-xs text-slate-700 hover:bg-[#edf1f5] dark:bg-slate-800/60 dark:text-slate-200 dark:hover:bg-slate-800" onClick={onOpenModelSettings} title="切换大模型">
                       <Bot className="mr-1.5 h-3.5 w-3.5" />
                       <span className="max-w-[88px] truncate">{customModelEnabled ? (modelLabel || '自定义模型') : 'gpt5.5模型'}</span>
                     </Button>
@@ -413,7 +413,7 @@ export function ChatComposer({
                     <button
                       key={`${prompt}-${index}`}
                       type="button"
-                      className="hidden h-8 max-w-[168px] shrink truncate rounded-full px-2.5 text-xs font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200 sm:inline-block"
+                      className="hidden h-8 max-w-[168px] shrink truncate rounded-full px-2.5 text-xs font-medium text-slate-500 transition hover:bg-[#f5f7fa] hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200 sm:inline-block"
                       onClick={() => !disabled && onChange(prompt.slice(0, MAX_CHAT_INPUT_CHARS))}
                       title={prompt}
                     >
@@ -427,7 +427,7 @@ export function ChatComposer({
                     type="button"
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8 rounded-full text-slate-500 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                    className="h-8 w-8 rounded-full text-slate-500 hover:bg-[#edf1f5] dark:text-slate-300 dark:hover:bg-slate-800"
                     onClick={() => attachmentInputRef.current?.click()}
                     disabled={temporaryMaterialUploading}
                     title={attachmentTooltip}
@@ -510,7 +510,7 @@ function TemporaryMaterialPreview({
     ? 'bg-red-50 text-red-500 dark:bg-red-950/35 dark:text-red-300'
     : 'bg-blue-50 text-blue-600 dark:bg-blue-950/35 dark:text-blue-300'
   return (
-    <div className="inline-flex w-full max-w-[320px] items-center gap-2.5 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-left shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:w-[320px]">
+    <div className="inline-flex w-full max-w-[320px] items-center gap-2.5 rounded-2xl border border-[#e5e9ef] bg-white px-3 py-2 text-left shadow-[0_6px_20px_rgba(15,23,42,0.04)] dark:border-slate-800 dark:bg-slate-900 sm:w-[320px]">
       <button
         type="button"
         className="flex min-w-0 flex-1 items-center gap-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-blue-400"

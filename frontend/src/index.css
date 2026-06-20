@@ -4,26 +4,26 @@
 
 @layer base {
   :root {
-    --background: 210 33% 97%;
-    --foreground: 208 26% 17%;
+    --background: 220 20% 98%;
+    --foreground: 220 10% 15%;
     --card: 0 0% 100%;
-    --card-foreground: 208 26% 17%;
+    --card-foreground: 220 10% 15%;
     --popover: 0 0% 100%;
-    --popover-foreground: 208 26% 17%;
-    --primary: 194 82% 39%;
+    --popover-foreground: 220 10% 15%;
+    --primary: 215 24% 38%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 20% 96%;
-    --secondary-foreground: 208 26% 17%;
-    --muted: 210 20% 96%;
-    --muted-foreground: 212 14% 46%;
-    --accent: 210 20% 96%;
-    --accent-foreground: 208 26% 17%;
+    --secondary: 220 16% 96%;
+    --secondary-foreground: 220 10% 15%;
+    --muted: 220 16% 96%;
+    --muted-foreground: 220 10% 52%;
+    --accent: 220 16% 96%;
+    --accent-foreground: 220 10% 15%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 214 20% 87%;
-    --input: 214 20% 87%;
-    --ring: 194 82% 39%;
-    --radius: 0.5rem;
+    --border: 220 14% 90%;
+    --input: 220 14% 90%;
+    --ring: 215 24% 38%;
+    --radius: 0.9rem;
   }
 
   .dark {
@@ -58,6 +58,10 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overflow-x: hidden;
+    background:
+      radial-gradient(circle at 12% 14%, rgba(255,255,255,0.95), transparent 24%),
+      radial-gradient(circle at 88% 16%, rgba(230,235,243,0.7), transparent 20%),
+      #f7f8fb;
   }
 
   html,

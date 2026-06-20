@@ -15,13 +15,15 @@ import type { Material, MaterialChunk, MaterialPage, MaterialPageTextBlock, Page
  */
 
 // ===== 常量 =====
-export const LARGE_UPLOAD_CHUNK_SIZE = 1 * 1024 * 1024 // 每片 1MB，降低 nginx/网关单请求体限制导致的大文件分片失败概率
-export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024 // 持久资料最大 2GB，适配大 PDF 后台解析
+// 持久资料使用 1MB 分片上传；小分片更容易穿过 Nginx/网关限制，也便于失败后只重传单片。
+export const LARGE_UPLOAD_CHUNK_SIZE = 1 * 1024 * 1024
+// 持久资料最大 2GB；超过该限制的超大文件应先拆分或压缩后再导入。
+export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 export const MAX_TEMPORARY_MATERIAL_BYTES = 100 * 1024 * 1024
-const PROCESSING_POLL_INTERVAL_MS = 1500               // 轮询间隔 1.5 秒
-const PROCESSING_TIMEOUT_MS = 60 * 60 * 1000           // 最长等待 60 分钟
-const CHUNK_UPLOAD_RETRY_COUNT = 3                     // 每片最多重试 3 次
-const CHUNK_UPLOAD_CONCURRENCY = 3                      // 同一文件最多并行上传 3 个分片，优先保证大文件在服务器端稳定落盘
+const PROCESSING_POLL_INTERVAL_MS = 1500               // 上传完成后轮询后端解析状态的间隔。
+const PROCESSING_TIMEOUT_MS = 60 * 60 * 1000           // 最长等待 60 分钟，避免前端无限轮询。
+const CHUNK_UPLOAD_RETRY_COUNT = 3                     // 每片最多重试 3 次。
+const CHUNK_UPLOAD_CONCURRENCY = 3                      // 同一文件最多并行上传 3 个分片，优先保证大文件在服务器端稳定落盘。
 
 /**
  * 上传会话 — 大文件分片上传的会话对象。
@@ -224,10 +226,10 @@ export async function getUploadSession(sessionId: string) {
  * 分片上传完整流程 — 这是大文件上传的主函数。
  *
  * 流程：
- * 1. 创建上传会话
- * 2. 将文件按 1MB 切片，并行 3 个分片上传（带重试）
- * 3. 所有片上传完成后，等待后端解析（轮询状态）
- * 4. 返回最终的 UploadSession
+ * 1. 创建上传会话，后端会先生成资料记录和 .parts 临时目录。
+ * 2. 将文件按 1MB 切片，跳过后端已确认存在的分片以支持断点续传。
+ * 3. 并发上传缺失分片；单片失败会按 CHUNK_UPLOAD_RETRY_COUNT 重试。
+ * 4. 所有分片完成后轮询后端解析状态，直到资料可读、解析失败或达到轮询上限。
  *
  * @param params     文件和元数据
  * @param onProgress 进度回调（用于前端显示进度条）
@@ -364,11 +366,13 @@ function uploadedChunkIndexSet(session: UploadSession, totalChunks: number) {
     return new Set(Array.from({ length: totalChunks }, (_, index) => index))
   }
   if (Array.isArray(session.uploadedChunkIndexes) && session.uploadedChunkIndexes.length > 0) {
+    // 新版后端会返回精确分片索引；优先使用它，避免按数量推断时误跳过中间缺失的分片。
     return new Set(
       session.uploadedChunkIndexes
         .filter((index) => Number.isInteger(index) && index >= 0 && index < totalChunks),
     )
   }
+  // 兼容旧响应：只有 uploadedChunks 数量时，只能假设前 N 片已经存在。
   const uploadedCount = Math.max(0, Math.min(totalChunks, session.uploadedChunks || 0))
   return new Set(Array.from({ length: uploadedCount }, (_, index) => index))
 }
@@ -376,6 +380,7 @@ function uploadedChunkIndexSet(session: UploadSession, totalChunks: number) {
 /** 生成客户端上传 ID（固定短格式，避免长中文文件名超过后端数据库字段长度） */
 function buildClientUploadId(file: File, chunkSize: number, title?: string): string {
   const identity = [file.name, file.size, file.lastModified, chunkSize, title?.trim() || file.name].join('\n')
+  // clientUploadId 必须稳定且短；后端会据此识别重复提交和断点续传会话。
   return ['web', file.size.toString(36), file.lastModified.toString(36), chunkSize.toString(36), hashUploadIdentity(identity)].join('-')
 }
 

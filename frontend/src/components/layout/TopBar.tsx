@@ -43,12 +43,12 @@ export function TopBar({ onOpenMobileMenu }: TopBarProps) {
 
   return (
     <>
-      <header className={isChat ? 'hidden' : 'flex h-14 shrink-0 items-center justify-between gap-3 border-b border-transparent px-3 md:px-6'}>
+      <header className={isChat ? 'hidden' : 'flex h-14 shrink-0 items-center justify-between gap-3 border-b border-[#edf1f5] bg-[#fcfcfd] px-3 md:px-6'}>
         {/* 移动端菜单按钮（桌面端隐藏） */}
         <Button
           variant="ghost"
           size="icon"
-          className="h-9 w-9 shrink-0 rounded-full bg-[#f5f6f8] text-muted-foreground hover:bg-[#eef0f2] dark:bg-slate-900 dark:hover:bg-slate-800 md:hidden"
+          className="h-9 w-9 shrink-0 rounded-full bg-[#f3f5f8] text-muted-foreground hover:bg-[#eceff3] dark:bg-slate-900 dark:hover:bg-slate-800 md:hidden"
           onClick={onOpenMobileMenu}
         >
           <Menu className="h-4 w-4" />
@@ -72,9 +72,9 @@ export function TopBar({ onOpenMobileMenu }: TopBarProps) {
           title="搜索"
           className={isChat
             // 聊天页面样式：桌面端定位到右侧
-            ? 'h-8 w-8 shrink-0 justify-center rounded-full border border-slate-200 bg-[#f7f8fa] px-0 text-muted-foreground shadow-sm hover:bg-white hover:text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-100'
+            ? 'h-8 w-8 shrink-0 justify-center rounded-full border border-[#e7ebf0] bg-[#f7f8fb] px-0 text-muted-foreground shadow-[0_4px_16px_rgba(15,23,42,0.04)] hover:bg-white hover:text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:hover:bg-slate-800 dark:hover:text-slate-100'
             // 非聊天页面样式：带宽度的搜索栏
-            : 'h-9 w-9 shrink-0 justify-center rounded-full border border-transparent bg-[#f5f6f8] px-0 text-sm text-muted-foreground hover:border-slate-200 hover:bg-white dark:bg-slate-900 dark:hover:border-slate-700 dark:hover:bg-slate-900 sm:w-44 sm:justify-start sm:px-3 md:w-56'}
+            : 'h-9 w-9 shrink-0 justify-center rounded-full border border-transparent bg-[#f3f5f8] px-0 text-sm text-muted-foreground hover:border-[#e7ebf0] hover:bg-white dark:bg-slate-900 dark:hover:border-slate-700 dark:hover:bg-slate-900 sm:w-44 sm:justify-start sm:px-3 md:w-56'}
           onClick={() => setOpen(true)}
         >
           <Search className="h-4 w-4" />

@@ -305,7 +305,7 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'flex h-[100dvh] min-h-0 shrink-0 flex-col bg-[#f5f6f8] py-3 transition-[width] duration-200 dark:bg-[#111318] lg:py-4',
+        'flex h-[100dvh] min-h-0 shrink-0 flex-col bg-[#f7f8fb] py-3 transition-[width] duration-200 dark:bg-[#111318] lg:py-4',
         collapsed ? 'w-[76px] px-2' : 'w-[286px] px-3',
       )}
     >
@@ -313,7 +313,7 @@ export function Sidebar() {
       <div className="mb-3 flex shrink-0 items-center justify-between px-1 lg:mb-5">
         {/* 品牌 Logo 按钮，点击回到首页 */}
         <button
-          className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#111318] text-sm font-black text-white shadow-sm dark:bg-white dark:text-[#111318]"
+          className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#111318] text-sm font-black text-white shadow-[0_6px_18px_rgba(15,23,42,0.12)] dark:bg-white dark:text-[#111318]"
           onClick={() => navigate(isAdmin ? '/admin/dashboard' : '/workspace/chat')}
           title="智学引擎"
         >
@@ -338,7 +338,7 @@ export function Sidebar() {
         <Button
           variant="outline"
           size="icon"
-          className="mb-3 h-10 w-10 shrink-0 self-center rounded-xl border-[#e1e4e8] bg-white shadow-sm hover:bg-white dark:border-slate-800 dark:bg-[#171a21] lg:mb-4"
+          className="mb-3 h-10 w-10 shrink-0 self-center rounded-2xl border-[#e6eaf0] bg-white shadow-[0_6px_20px_rgba(15,23,42,0.04)] hover:bg-white dark:border-slate-800 dark:bg-[#171a21] lg:mb-4"
           onClick={() => navigate('/workspace/chat?new=1')}
           title="新建会话"
         >
@@ -348,7 +348,7 @@ export function Sidebar() {
         // 展开状态：显示图标 + 文字 + 快捷键提示
         <Button
           variant="outline"
-          className="mb-3 h-10 shrink-0 justify-start gap-2 rounded-xl border-[#e1e4e8] bg-white px-3 text-sm font-medium shadow-sm hover:bg-white dark:border-slate-800 dark:bg-[#171a21] lg:mb-4 lg:h-11"
+          className="mb-3 h-10 shrink-0 justify-start gap-2 rounded-2xl border-[#e6eaf0] bg-white px-3 text-sm font-medium shadow-[0_6px_20px_rgba(15,23,42,0.04)] hover:bg-white dark:border-slate-800 dark:bg-[#171a21] lg:mb-4 lg:h-11"
           onClick={() => navigate('/workspace/chat?new=1')}
         >
           <Plus className="h-4 w-4" />
@@ -379,8 +379,8 @@ export function Sidebar() {
                     'flex w-full items-center rounded-lg text-sm font-medium transition-colors',
                     collapsed ? 'h-10 justify-center px-0' : 'gap-3 px-3 py-2.5',
                     isActive
-                      ? 'bg-[#e9eaec] text-[#202124] dark:bg-white/10 dark:text-white'
-                      : 'text-[#3f4247] hover:bg-[#eceef1] dark:text-slate-300 dark:hover:bg-white/[0.08]',
+                      ? 'bg-[#eceef2] text-[#202124] dark:bg-white/10 dark:text-white'
+                      : 'text-[#5b6270] hover:bg-[#f0f2f5] dark:text-slate-300 dark:hover:bg-white/[0.08]',
                   )}
                   // 折叠状态下用 title 属性提示菜单名称
                   title={collapsed ? section.label : undefined}
@@ -421,8 +421,8 @@ export function Sidebar() {
                     className={cn(
                       'group flex h-10 items-center rounded-lg px-2 pr-1 text-sm transition-colors',
                       selected
-                        ? 'bg-[#e9eaec] text-[#202124]'
-                        : 'text-muted-foreground hover:bg-[#eceef1] hover:text-foreground dark:hover:bg-white/[0.06]',
+                        ? 'bg-[#eceef2] text-[#202124]'
+                        : 'text-muted-foreground hover:bg-[#f0f2f5] hover:text-foreground dark:hover:bg-white/[0.06]',
                     )}
                     onClick={() => openHistory(item)}
                   >
@@ -445,7 +445,7 @@ export function Sidebar() {
                         <button
                           type="button"
                           className={cn(
-                            'ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#9aa0a6] transition-opacity hover:bg-white/70 dark:hover:bg-white/10',
+                            'ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#9aa0a6] transition-opacity hover:bg-[#f7f8fb] dark:hover:bg-white/10',
                             // 选中状态始终显示菜单按钮，否则仅在 hover 时显示
                             selected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
                           )}
@@ -458,11 +458,11 @@ export function Sidebar() {
                       <DropdownMenuContent
                         align="end"
                         sideOffset={8}
-                        className="w-40 rounded-2xl border-[#eceff3] bg-white/95 p-1.5 shadow-[0_14px_32px_rgba(15,23,42,0.10)] backdrop-blur-sm"
+                        className="w-40 rounded-2xl border-[#eceff3] bg-white/96 p-1.5 shadow-[0_14px_32px_rgba(15,23,42,0.08)] backdrop-blur-sm"
                       >
                         {/* 收藏/取消收藏 */}
                         <DropdownMenuItem
-                          className="rounded-xl px-3 py-2 text-[#3f4247] focus:bg-[#eef1f4] focus:text-[#3f4247]"
+                          className="rounded-xl px-3 py-2 text-[#4b5563] focus:bg-[#f1f4f7] focus:text-[#202124]"
                           onClick={(event) => {
                             event.stopPropagation()
                             handleToggleFavorite(item)
@@ -473,7 +473,7 @@ export function Sidebar() {
                         </DropdownMenuItem>
                         {/* 重命名 */}
                         <DropdownMenuItem
-                          className="rounded-xl px-3 py-2 text-[#3f4247] focus:bg-[#eef1f4] focus:text-[#3f4247]"
+                          className="rounded-xl px-3 py-2 text-[#4b5563] focus:bg-[#f1f4f7] focus:text-[#202124]"
                           onClick={(event) => {
                             event.stopPropagation()
                             handleRename(item)
@@ -484,7 +484,7 @@ export function Sidebar() {
                         </DropdownMenuItem>
                         {/* 置顶/取消置顶 */}
                         <DropdownMenuItem
-                          className="rounded-xl px-3 py-2 text-[#3f4247] focus:bg-[#eef1f4] focus:text-[#3f4247]"
+                          className="rounded-xl px-3 py-2 text-[#4b5563] focus:bg-[#f1f4f7] focus:text-[#202124]"
                           onClick={(event) => {
                             event.stopPropagation()
                             handleTogglePin(item)
@@ -527,7 +527,7 @@ export function Sidebar() {
             <Separator className="my-4" />
             <button
               onClick={() => navigate(isAdminRoute ? '/workspace/chat' : '/admin/dashboard')}
-              className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-[#eceef1] hover:text-foreground dark:hover:bg-white/[0.08]"
+              className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-[#f0f2f5] hover:text-foreground dark:hover:bg-white/[0.08]"
             >
               <ChevronLeft className="h-4 w-4" />
               <span>{isAdminRoute ? '返回工作区' : '进入管理后台'}</span>
@@ -555,13 +555,13 @@ export function Sidebar() {
 
         {/* 主题切换开关（仅展开状态显示） */}
         {!collapsed && (
-          <div className="grid grid-cols-2 gap-1 rounded-lg bg-[#eceef1] p-1 dark:bg-white/[0.08]">
+            <div className="grid grid-cols-2 gap-1 rounded-2xl bg-[#eef1f5] p-1 dark:bg-white/[0.08]">
             <button
               type="button"
               onClick={() => setTheme('light')}
               className={cn(
                 'flex h-7 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition-colors lg:h-8',
-                theme === 'light' ? 'bg-white text-foreground shadow-sm dark:bg-slate-900' : 'text-muted-foreground',
+                theme === 'light' ? 'bg-white text-foreground shadow-[0_4px_16px_rgba(15,23,42,0.05)] dark:bg-slate-900' : 'text-muted-foreground',
               )}
             >
               <Sun className="h-3.5 w-3.5" />
@@ -587,7 +587,7 @@ export function Sidebar() {
           <button
             type="button"
             className={cn(
-              'flex min-w-0 items-center gap-3 rounded-lg px-1 py-1 text-left transition-colors hover:bg-[#eceef1] dark:hover:bg-white/[0.08]',
+              'flex min-w-0 items-center gap-3 rounded-lg px-1 py-1 text-left transition-colors hover:bg-[#f0f2f5] dark:hover:bg-white/[0.08]',
               collapsed ? 'justify-center' : 'flex-1',
             )}
             onClick={() => {

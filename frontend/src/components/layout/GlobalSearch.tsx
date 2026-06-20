@@ -98,9 +98,9 @@ export function GlobalSearch({ open, onClose }: GlobalSearchProps) {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-xl overflow-hidden p-0 shadow-lg">
+      <DialogContent className="max-w-xl overflow-hidden rounded-[28px] border border-[#e9edf2] bg-white/98 p-0 shadow-[0_18px_60px_rgba(15,23,42,0.08)]">
         {/* 搜索输入框区域 */}
-        <div className="flex items-center border-b px-3">
+        <div className="flex items-center border-b border-[#edf1f5] px-3">
           <Search className="mr-2 h-4 w-4 shrink-0 text-muted-foreground" />
           <input
             className="flex h-12 w-full bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground"
@@ -131,7 +131,7 @@ export function GlobalSearch({ open, onClose }: GlobalSearchProps) {
                   <button
                     key={item.id}
                     onClick={() => handleSelect(item)}
-                    className="flex w-full gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-[#f5f6f8] dark:hover:bg-white/[0.08]"
+                    className="flex w-full gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-[#f5f7fa] dark:hover:bg-white/[0.08]"
                   >
                     {/* 对话图标 */}
                     <MessageSquare className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
@@ -141,7 +141,7 @@ export function GlobalSearch({ open, onClose }: GlobalSearchProps) {
                         <p className="truncate text-sm font-medium">{item.question}</p>
                         {/* 如果有来源资料，显示"资料问答"标签 */}
                         {item.sources?.length ? (
-                          <span className="shrink-0 rounded bg-[#eef0f2] px-1.5 py-0.5 text-[10px] text-[#4b5563]">
+                            <span className="shrink-0 rounded bg-[#eef1f5] px-1.5 py-0.5 text-[10px] text-[#667085]">
                             资料问答
                           </span>
                         ) : null}
