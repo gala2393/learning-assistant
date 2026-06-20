@@ -1560,9 +1560,9 @@ public class RagService {
                 .mapToDouble(chunk -> queryTermCoverage(retrievalText(chunk.chunk()), queryTerms))
                 .max()
                 .orElse(0.0);
-        boolean weakScore = topScore < 0.32;
+        boolean weakScore = topScore < 0.40;
         boolean weakTerms = !queryTerms.isEmpty() && termCoverage < 0.34;
-        return new EvidenceStatus(weakScore && weakTerms, topScore, termCoverage, queryTerms);
+        return new EvidenceStatus(weakScore || weakTerms, topScore, termCoverage, queryTerms);
     }
 
     /**
