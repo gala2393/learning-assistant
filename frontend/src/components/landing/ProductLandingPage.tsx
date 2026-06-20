@@ -1,1682 +1,1396 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+import { motion, useReducedMotion } from 'framer-motion'
+import { ArrowRight, BookOpen, BrainCircuit, Menu, Search, Sparkles, Upload, X } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { SiteBeianFooter } from '@/components/layout/SiteBeianFooter'
-import {
-  ArrowLeft,
-  ArrowRight,
-  BookOpen,
-  BrainCircuit,
-  CheckCircle2,
-  ChevronRight,
-  Clock,
-  FileText,
-  Layers3,
-  MessageSquare,
-  Search,
-  Sparkles,
-  Star,
-  Upload,
-} from 'lucide-react'
+import { cn } from '@/lib/utils'
 
-type PreviewSlide = 'chat' | 'materials' | 'summary'
-type IntroTargetMetrics = {
-  titleX: number
-  titleY: number
-  titleScale: number
-  subtitleX: number
-  subtitleY: number
-  subtitleScale: number
-}
+/**
+ * 统一定义落地页各分幕的锚点，便于顶部导航、移动端菜单和页面内跳转复用。
+ * 这样后续如果调整区块顺序，只需要改这里，不需要在多个组件里同步维护字符串。
+ */
+const landingSections = [
+  { id: 'hero', label: '首页' },
+  { id: 'problem', label: '问题' },
+  { id: 'solution', label: '方案' },
+  { id: 'features', label: '能力' },
+  { id: 'workspace', label: '工作台' },
+  { id: 'cta', label: '开始' },
+] as const
 
-const previewSlides: Array<{ id: PreviewSlide; title: string; desc: string }> = [
-  { id: 'chat', title: '智能问答工作台', desc: '围绕资料提问，答案带来源引用' },
-  { id: 'materials', title: '资料解析中心', desc: '上传、解析、切片和检索状态一屏掌握' },
-  { id: 'summary', title: '知识总结看板', desc: '自动生成重点、易混概念和复习路径' },
+/**
+ * 落地页采用“分屏翻页”体验，这里把每一屏的 id 收敛为数组。
+ * 后续悬浮向下按钮、右侧进度点、滚动监听都依赖同一份顺序，避免交互和页面结构不同步。
+ */
+/**
+ * Hero 区标题按行拆分，方便实现逐行入场动画。
+ * 其中“可追问”使用品牌深蓝色，作为全页唯一强锚点。
+ */
+const heroLines = [
+  ['让每份资料'],
+  ['都变成', '可追问'],
+  ['的学习助手'],
 ]
 
-const features = [
-  {
-    icon: Upload,
-    title: '资料管理',
-    text: '上传课程文档、笔记和报告，集中查看解析状态、来源片段和会话上下文。',
-  },
-  {
-    icon: Search,
-    title: 'RAG 问答',
-    text: '先检索资料片段，再生成答案，保留可追溯来源，减少凭空回答。',
-  },
-  {
-    icon: Sparkles,
-    title: '阅读总结',
-    text: '把长资料整理成重点、结论、易混概念和复习建议，适合课后快速回顾。',
-  },
-]
-
-const steps = ['上传资料', 'AI 解析', '提问检索', '生成答案/总结']
-
-const navItems = [
-  { icon: MessageSquare, label: '智能问答', active: true },
-  { icon: BookOpen, label: '资料管理' },
-  { icon: FileText, label: '边读边问' },
-  { icon: Clock, label: '历史记录' },
-  { icon: Star, label: '我的收藏' },
-  { icon: Sparkles, label: '知识总结' },
-]
-
-const CAROUSEL_INTERVAL_MS = 3500
-const INTRO_STORAGE_KEY = 'landing-intro-seen'
-const INTRO_DURATION_MS = 2600
-const DEFAULT_INTRO_TARGET: IntroTargetMetrics = {
-  titleX: 0,
-  titleY: -170,
-  titleScale: 0.72,
-  subtitleX: 0,
-  subtitleY: 34,
-  subtitleScale: 0.86,
-}
-
-const landingAnimationCss = `
-@keyframes introOverlayExit {
-  0%, 86% { opacity: 1; }
-  100% { opacity: 0; visibility: hidden; }
-}
-
-@keyframes introSceneRise {
-  from { opacity: 0; transform: translateY(18px) scale(.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes introTitleSettle {
-  0% {
-    opacity: 0;
-    transform: translate3d(0, 42px, 0) scale(1.18);
-  }
-  16%, 44% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1.18);
-  }
-  78%, 100% {
-    opacity: 1;
-    transform: translate3d(var(--intro-title-x), var(--intro-title-y), 0) scale(var(--intro-title-scale));
-  }
-}
-
-@keyframes introSubtitleSettle {
-  0%, 18% {
-    opacity: 0;
-    transform: translate3d(0, 24px, 0) scale(1.05);
-  }
-  36%, 48% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1.05);
-  }
-  78%, 100% {
-    opacity: 1;
-    transform: translate3d(var(--intro-subtitle-x), var(--intro-subtitle-y), 0) scale(var(--intro-subtitle-scale));
-  }
-}
-
-@keyframes introFragmentGather {
-  0% {
-    opacity: 0;
-    transform: translate3d(var(--fragment-start-x), var(--fragment-start-y), 0) scale(.92);
-  }
-  20%, 48% {
-    opacity: 1;
-    transform: translate3d(var(--fragment-mid-x), var(--fragment-mid-y), 0) scale(1);
-  }
-  74%, 100% {
-    opacity: 0;
-    transform: translate3d(var(--fragment-end-x), var(--fragment-end-y), 0) scale(.72);
-  }
-}
-
-@keyframes introLineTrace {
-  0%, 22% { stroke-dashoffset: 180; opacity: 0; }
-  42%, 64% { stroke-dashoffset: 0; opacity: .55; }
-  100% { stroke-dashoffset: 0; opacity: 0; }
-}
-
-@keyframes introNodePulse {
-  0%, 100% { opacity: .5; transform: scale(.88); }
-  50% { opacity: 1; transform: scale(1.12); }
-}
-
-@keyframes introScan {
-  0% { transform: translateX(-130%); opacity: 0; }
-  18% { opacity: .85; }
-  100% { transform: translateX(130%); opacity: 0; }
-}
-
-@keyframes introPageReveal {
-  from {
-    opacity: 0;
-    transform: translateY(18px);
-    filter: blur(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
-  }
-}
-
-@keyframes introRealTitleReveal {
-  0%, 78% { opacity: 0; }
-  100% { opacity: 1; }
-}
-
-@keyframes landingFloat {
-  0%, 100% { transform: translate3d(0, 0, 0); }
-  50% { transform: translate3d(0, -10px, 0); }
-}
-
-@keyframes landingDrift {
-  0%, 100% { transform: translate3d(-2px, -1px, 0); opacity: .3; }
-  50% { transform: translate3d(3px, 2px, 0); opacity: .46; }
-}
-
-@keyframes landingSweep {
-  0% { transform: translateX(-130%); }
-  100% { transform: translateX(130%); }
-}
-
-@keyframes landingEdgeFlow {
-  0% { transform: translateX(-120%); opacity: 0; }
-  18% { opacity: .7; }
-  82% { opacity: .7; }
-  100% { transform: translateX(120%); opacity: 0; }
-}
-
-@keyframes landingBorderFlow {
-  0% { background-position: 0% 50%; opacity: .58; }
-  50% { background-position: 100% 50%; opacity: .9; }
-  100% { background-position: 0% 50%; opacity: .58; }
-}
-
-@keyframes landingCornerBreath {
-  0%, 100% { opacity: .42; transform: scale(.98); }
-  50% { opacity: .86; transform: scale(1.03); }
-}
-
-@keyframes landingPulse {
-  0%, 100% { opacity: .44; transform: scale(1); }
-  50% { opacity: .92; transform: scale(1.06); }
-}
-
-@keyframes landingRise {
-  from { opacity: 0; transform: translateY(16px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes landingMeter {
-  0% { transform: translateX(-45%); }
-  100% { transform: translateX(45%); }
-}
-
-@keyframes landingFrameBreath {
-  0%, 100% { box-shadow: 0 34px 90px rgba(34,40,51,.16); transform: translateY(0); }
-  50% { box-shadow: 0 42px 110px rgba(34,40,51,.2); transform: translateY(-4px); }
-}
-
-@keyframes landingStatusMove {
-  0%, 100% { transform: translate3d(0, 0, 0); opacity: .72; }
-  50% { transform: translate3d(10px, 0, 0); opacity: 1; }
-}
-
-@keyframes landingCardBreathe {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-5px); }
-}
-
-@keyframes heroRuleGlow {
-  0%, 100% { opacity: .44; transform: translate(-50%, -50%) scaleX(.88); }
-  50% { opacity: .82; transform: translate(-50%, -50%) scaleX(1); }
-}
-
-@keyframes hexGridDrift {
-  0%, 100% { transform: translate3d(-10px, -6px, 0); opacity: .42; }
-  50% { transform: translate3d(10px, 6px, 0); opacity: .7; }
-}
-
-@keyframes hexTrace {
-  0% { stroke-dashoffset: 360; opacity: .18; }
-  42% { opacity: .55; }
-  100% { stroke-dashoffset: 0; opacity: .18; }
-}
-
-@keyframes hexPanelFloat {
-  0%, 100% { translate: 0 0; }
-  50% { translate: 0 -6px; }
-}
-
-@keyframes landingSelectedBreath {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(34,40,51,.08), 0 12px 32px rgba(34,40,51,.04); }
-  50% { box-shadow: 0 0 0 1px rgba(34,40,51,.22), 0 18px 44px rgba(34,40,51,.1); }
-}
-
-@keyframes landingStripeFlow {
-  0% { background-position: 0 0; }
-  100% { background-position: 42px 0; }
-}
-
-@keyframes retrievalNode {
-  0%, 100% { background: rgba(255,255,255,.16); transform: scale(.92); }
-  35% { background: rgba(255,255,255,.86); transform: scale(1.08); }
-}
-
-@keyframes featureGlow {
-  0%, 100% { box-shadow: 0 24px 70px rgba(34,40,51,.06); }
-  50% { box-shadow: 0 30px 86px rgba(34,40,51,.1); }
-}
-
-@keyframes flowTopLine {
-  0% { transform: translateX(-120%); opacity: 0; }
-  20% { opacity: .72; }
-  100% { transform: translateX(120%); opacity: 0; }
-}
-
-.landing-page {
-  --pointer-x: 50%;
-  --pointer-y: 28%;
-}
-
-.intro-overlay {
-  animation: introOverlayExit 2.6s cubic-bezier(.22, 1, .36, 1) forwards;
-}
-
-.intro-stage {
-  animation: introSceneRise .42s cubic-bezier(.22, 1, .36, 1) both;
-}
-
-.intro-title-ghost {
-  transform-origin: center center;
-  animation: introTitleSettle 2.6s cubic-bezier(.2, .82, .18, 1) forwards;
-}
-
-.intro-subtitle-ghost {
-  transform-origin: center center;
-  animation: introSubtitleSettle 2.6s cubic-bezier(.2, .82, .18, 1) forwards;
-}
-
-.intro-fragment {
-  animation: introFragmentGather 2.6s cubic-bezier(.22, 1, .36, 1) forwards;
-}
-
-.intro-network {
-  animation: introSceneRise .58s cubic-bezier(.22, 1, .36, 1) .38s both;
-}
-
-.intro-line {
-  stroke-dasharray: 180;
-  animation: introLineTrace 2.6s cubic-bezier(.22, 1, .36, 1) forwards;
-}
-
-.intro-node-dot {
-  animation: introNodePulse 1.15s ease-in-out infinite;
-}
-
-.intro-stage {
-  min-height: min(760px, calc(100vh - 96px));
-}
-
-.intro-real-title,
-.intro-real-subtitle {
-  opacity: 0;
-  animation: introRealTitleReveal .28s ease 2.18s forwards;
-}
-
-.intro-page-reveal {
-  opacity: 0;
-  animation: introPageReveal .64s cubic-bezier(.22, 1, .36, 1) forwards;
-}
-
-.landing-bg::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(circle at var(--pointer-x) var(--pointer-y), rgba(255,255,255,.92), rgba(255,255,255,0) 23rem),
-    radial-gradient(circle at 18% 12%, rgba(255,255,255,.98), rgba(255,255,255,0) 28rem),
-    radial-gradient(circle at 83% 38%, rgba(100,116,139,.12), rgba(100,116,139,0) 24rem);
-}
-
-.landing-bg::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(34,40,51,.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(34,40,51,.045) 1px, transparent 1px);
-  background-size: 72px 72px;
-  mask-image: radial-gradient(circle at 50% 16%, black, transparent 72%);
-  opacity: .32;
-}
-
-.landing-motion-canvas {
-  mix-blend-mode: multiply;
-}
-
-.bg-flow-line {
-  position: absolute;
-  left: 8%;
-  right: 8%;
-  height: 1px;
-  overflow: hidden;
-  opacity: .58;
-}
-
-.bg-flow-line::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,.92), rgba(34,40,51,.14), transparent);
-  animation: landingEdgeFlow 7s ease-in-out infinite;
-}
-
-.bg-flow-line:nth-of-type(2)::before {
-  animation-delay: -3.2s;
-}
-
-.bg-node {
-  animation: landingDrift 12s ease-in-out infinite;
-}
-
-.soft-orbit {
-  animation: landingDrift 13s ease-in-out infinite;
-}
-
-.soft-float {
-  animation: landingFloat 5.2s ease-in-out infinite;
-}
-
-.rise-in {
-  animation: landingRise .72s cubic-bezier(.22, 1, .36, 1) both;
-}
-
-.preview-shell {
-  position: relative;
-  isolation: isolate;
-  animation: landingFrameBreath 5.6s ease-in-out infinite;
-}
-
-.preview-shell::before {
-  content: '';
-  position: absolute;
-  inset: -1px;
-  border-radius: inherit;
-  background: linear-gradient(115deg, rgba(255,255,255,.32), rgba(34,40,51,.1), rgba(103,232,249,.14), rgba(255,255,255,.5));
-  background-size: 220% 220%;
-  animation: landingBorderFlow 5.8s ease-in-out infinite;
-  opacity: .7;
-  z-index: -1;
-}
-
-.preview-shell:hover {
-  animation-play-state: paused;
-}
-
-.preview-shell::after {
-  content: '';
-  position: absolute;
-  left: 12%;
-  right: 12%;
-  bottom: -18px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(34,40,51,.32), transparent);
-}
-
-.preview-sheen {
-  position: relative;
-  overflow: hidden;
-}
-
-.preview-sheen::after {
-  content: '';
-  position: absolute;
-  left: 8%;
-  right: 8%;
-  top: 0;
-  height: 1px;
-  width: auto;
-  background: linear-gradient(90deg, transparent, rgba(34,40,51,.22), transparent);
-  transform: translateX(-130%);
-  animation: landingSweep 4.8s ease-in-out infinite;
-  pointer-events: none;
-}
-
-.corner-glow {
-  position: absolute;
-  right: 13px;
-  top: 13px;
-  z-index: 2;
-  height: 42px;
-  width: 42px;
-  border-right: 2px solid rgba(103,232,249,.38);
-  border-top: 2px solid rgba(103,232,249,.38);
-  border-radius: 0 12px 0 0;
-  animation: landingCornerBreath 2.6s ease-in-out infinite;
-  pointer-events: none;
-}
-
-.hero-rule {
-  position: relative;
-  height: 12px;
-  width: min(640px, 84vw);
-}
-
-.hero-rule::before,
-.hero-rule::after {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  transform-origin: center center;
-  pointer-events: none;
-}
-
-.hero-rule::before {
-  width: 100%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent 0%, rgba(34,40,51,.05) 22%, rgba(34,40,51,.18) 50%, rgba(34,40,51,.05) 78%, transparent 100%);
-  border-radius: 999px;
-  box-shadow: none;
-}
-
-.hero-rule::after {
-  width: 30%;
-  height: 3px;
-  border-radius: 999px;
-  background:
-    radial-gradient(ellipse at center, rgba(34,40,51,.2) 0%, rgba(34,40,51,.1) 34%, rgba(34,40,51,.03) 68%, transparent 82%),
-    linear-gradient(90deg, transparent, rgba(255,255,255,.94), rgba(34,40,51,.13), rgba(255,255,255,.94), transparent);
-  box-shadow: 0 5px 12px rgba(34,40,51,.035);
-  animation: heroRuleGlow 3.6s ease-in-out infinite;
-}
-
-.hex-carousel-stage {
-  position: relative;
-  min-height: 520px;
-  overflow: hidden;
-  border-radius: 18px;
-  background:
-    radial-gradient(circle at 50% 44%, rgba(34,40,51,.07), transparent 25rem),
-    linear-gradient(135deg, rgba(255,255,255,.98), rgba(248,250,252,.9));
-  isolation: isolate;
-}
-
-.hex-carousel-stage::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(880px, 86%);
-  aspect-ratio: 1.9;
-  transform: translate(-50%, -50%) perspective(900px) rotateX(58deg);
-  border-radius: 999px;
-  background:
-    radial-gradient(ellipse at center, rgba(34,40,51,.11), transparent 58%),
-    linear-gradient(90deg, transparent, rgba(34,40,51,.08), transparent);
-  filter: blur(18px);
-  opacity: .55;
-  animation: hexGridDrift 10s ease-in-out infinite;
-  z-index: 0;
-}
-
-.hex-carousel-stage::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(820px, 82%);
-  aspect-ratio: 1.72;
-  transform: translate(-50%, -50%) perspective(1200px) rotateX(6deg);
-  clip-path: polygon(9% 50%, 25% 6%, 75% 6%, 91% 50%, 75% 94%, 25% 94%);
-  border: 1px solid rgba(34,40,51,.08);
-  background: linear-gradient(135deg, rgba(255,255,255,.08), rgba(34,40,51,.018));
-  box-shadow:
-    inset 0 0 0 1px rgba(255,255,255,.7),
-    0 28px 90px rgba(34,40,51,.07);
-  opacity: .78;
-  pointer-events: none;
-  z-index: 1;
-}
-
-.hex-trace {
-  position: absolute;
-  inset: 50px 12%;
-  opacity: .38;
-  pointer-events: none;
-  z-index: 2;
-}
-
-.hex-trace path {
-  stroke-dasharray: 360;
-  animation: hexTrace 7s ease-in-out infinite;
-}
-
-.hex-panel {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(820px, 68vw);
-  height: 470px;
-  min-width: 0;
-  perspective: 1400px;
-  transform: translate(-50%, -50%) translate3d(var(--hex-x), var(--hex-y), 0) scale(var(--hex-scale)) rotateY(var(--hex-rotate));
-  transform-origin: center center;
-  opacity: var(--hex-opacity);
-  filter: blur(var(--hex-blur));
-  pointer-events: none;
-  z-index: var(--hex-z);
-  transition:
-    transform .9s cubic-bezier(.22, 1, .36, 1),
-    opacity .9s cubic-bezier(.22, 1, .36, 1),
-    filter .9s cubic-bezier(.22, 1, .36, 1);
-  will-change: transform, opacity, filter;
-}
-
-.hex-panel.is-active {
-  pointer-events: auto;
-  animation: hexPanelFloat 5s ease-in-out infinite;
-}
-
-.hex-panel.is-side {
-  width: min(300px, 24vw);
-  height: 190px;
-}
-
-.hex-panel.is-side .preview-sheen {
-  clip-path: polygon(8% 50%, 22% 8%, 78% 8%, 92% 50%, 78% 92%, 22% 92%);
-  opacity: .18;
-}
-
-.hex-panel.is-side::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  clip-path: polygon(8% 50%, 22% 8%, 78% 8%, 92% 50%, 78% 92%, 22% 92%);
-  border: 1px solid rgba(34,40,51,.08);
-  background:
-    linear-gradient(135deg, rgba(255,255,255,.62), rgba(226,232,240,.4)),
-    radial-gradient(circle at 50% 50%, rgba(34,40,51,.08), transparent 58%);
-  box-shadow: 0 22px 70px rgba(34,40,51,.08);
-  pointer-events: none;
-}
-
-.hex-chip {
-  display: none;
-}
-
-@media (min-width: 1024px) {
-  .hex-carousel-stage {
-    min-height: 560px;
-  }
-
-  .hex-panel {
-    width: min(860px, 64vw);
-    height: 490px;
-  }
-
-  .hex-panel.is-side {
-    width: min(320px, 24vw);
-    height: 200px;
-  }
-}
-
-@media (max-width: 767px) {
-  .hex-carousel-stage {
-    min-height: 430px;
-  }
-
-  .hex-carousel-stage::after,
-  .hex-trace {
-    display: none;
-  }
-
-  .hex-panel {
-    width: calc(100% - 18px);
-    height: 392px;
-    transform: translate(-50%, -50%) scale(var(--hex-scale));
-  }
-
-  .hex-panel.is-side {
-    opacity: 0;
-  }
-
-  .hex-chip {
-    display: none;
-  }
-}
-
-.feature-card {
-  position: relative;
-  overflow: hidden;
-  animation: featureGlow 5s ease-in-out infinite;
-  transition: transform .28s ease, box-shadow .28s ease, border-color .28s ease;
-}
-
-.feature-card:hover {
-  transform: translateY(-6px);
-  border-color: rgba(34,40,51,.2);
-  box-shadow: 0 30px 90px rgba(34,40,51,.12);
-}
-
-.meter-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 44%;
-  border-radius: inherit;
-  background:
-    linear-gradient(90deg, transparent, rgba(255,255,255,.68), transparent),
-    repeating-linear-gradient(115deg, rgba(255,255,255,.22) 0 7px, transparent 7px 14px);
-  background-size: 100% 100%, 42px 42px;
-  animation: landingMeter 2.2s ease-in-out infinite alternate, landingStripeFlow 1.2s linear infinite;
-}
-
-.pulse-node {
-  animation: landingPulse 1.7s ease-in-out infinite;
-}
-
-.status-line {
-  animation: landingStatusMove 2.4s ease-in-out infinite;
-}
-
-.live-card {
-  animation: landingCardBreathe 3.2s ease-in-out infinite;
-}
-
-.selected-breathe {
-  animation: landingSelectedBreath 2.5s ease-in-out infinite;
-}
-
-.qa-sweep {
-  position: relative;
-  overflow: hidden;
-}
-
-.qa-sweep::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 38%;
-  background: linear-gradient(105deg, transparent, rgba(255,255,255,.78), transparent);
-  transform: translateX(-130%);
-  animation: landingSweep 5.2s ease-in-out infinite;
-  pointer-events: none;
-}
-
-.retrieval-node {
-  animation: retrievalNode 1.6s ease-in-out infinite;
-}
-
-.flow-card {
-  position: relative;
-  overflow: hidden;
-}
-
-.flow-card::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  height: 1px;
-  width: 100%;
-  background: linear-gradient(90deg, transparent, rgba(34,40,51,.34), transparent);
-  transform: translateX(-120%);
-  animation: flowTopLine 3s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .soft-orbit,
-  .soft-float,
-  .bg-node,
-  .bg-flow-line::before,
-  .rise-in,
-  .preview-shell::before,
-  .preview-sheen::after,
-  .corner-glow,
-  .meter-bar::after,
-  .pulse-node,
-  .preview-shell,
-  .status-line,
-  .live-card,
-  .selected-breathe,
-  .qa-sweep::after,
-  .retrieval-node,
-  .feature-card,
-  .hero-rule::after,
-  .hex-carousel-stage::before,
-  .hex-trace path,
-  .hex-panel,
-  .flow-card::before {
-    animation: none !important;
-  }
-
-  .hex-panel {
-    transition: none !important;
-  }
-
-}
-
-`
-
-export function ProductLandingPage() {
-  const [showIntro, setShowIntro] = useState(() => {
-    if (typeof window === 'undefined') return false
-    return window.sessionStorage.getItem(INTRO_STORAGE_KEY) !== '1'
-  })
-  const [introFinished, setIntroFinished] = useState(false)
-  const [activeSlide, setActiveSlide] = useState(0)
-  const [pointer, setPointer] = useState({ x: 50, y: 28 })
-  const activeSlideRef = useRef(0)
-  const heroTitleRef = useRef<HTMLHeadingElement | null>(null)
-  const heroSubtitleRef = useRef<HTMLParagraphElement | null>(null)
-  const [introTarget, setIntroTarget] = useState<IntroTargetMetrics>(DEFAULT_INTRO_TARGET)
-
-  const pageStyle = useMemo(
-    () => ({
-      '--pointer-x': `${pointer.x}%`,
-      '--pointer-y': `${pointer.y}%`,
-    }) as CSSProperties,
-    [pointer],
-  )
-
-  const measureIntroTarget = () => {
-    const titleRect = heroTitleRef.current?.getBoundingClientRect()
-    const subtitleRect = heroSubtitleRef.current?.getBoundingClientRect()
-    if (!titleRect || !subtitleRect) return
-
-    // 开屏标题先在视口中心出现，再移动到真实 H1 / 副标题的中心点。
-    const viewportCenterX = window.innerWidth / 2
-    const titleStartCenterY = window.innerHeight * 0.42
-    const subtitleStartCenterY = window.innerHeight * 0.62
-    const titleCenterX = titleRect.left + titleRect.width / 2
-    const titleCenterY = titleRect.top + titleRect.height / 2
-    const subtitleCenterX = subtitleRect.left + subtitleRect.width / 2
-    const subtitleCenterY = subtitleRect.top + subtitleRect.height / 2
-
-    setIntroTarget({
-      titleX: Math.round(titleCenterX - viewportCenterX),
-      titleY: Math.round(titleCenterY - titleStartCenterY),
-      titleScale: Number(Math.min(1, Math.max(0.42, titleRect.width / Math.min(window.innerWidth * 0.9, 980))).toFixed(3)),
-      subtitleX: Math.round(subtitleCenterX - viewportCenterX),
-      subtitleY: Math.round(subtitleCenterY - subtitleStartCenterY),
-      subtitleScale: Number(Math.min(1, Math.max(0.62, subtitleRect.width / Math.min(window.innerWidth * 0.78, 760))).toFixed(3)),
-    })
-  }
-
-  const moveSlide = (direction: 1 | -1) => {
-    const currentSlide = activeSlideRef.current
-    const nextSlide = (currentSlide + direction + previewSlides.length) % previewSlides.length
-    activeSlideRef.current = nextSlide
-    setActiveSlide(nextSlide)
-  }
-
-  const selectSlide = (index: number) => {
-    if (index === activeSlide) return
-    activeSlideRef.current = index
-    setActiveSlide(index)
-  }
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      moveSlide(1)
-    }, CAROUSEL_INTERVAL_MS)
-
-    return () => window.clearInterval(timer)
-  }, [])
-
-  useEffect(() => {
-    if (!showIntro) return
-
-    measureIntroTarget()
-    window.addEventListener('resize', measureIntroTarget)
-
-    return () => window.removeEventListener('resize', measureIntroTarget)
-  }, [showIntro])
-
-  const finishIntro = () => {
-    // 同一个浏览器会话只播放一次，跳过和自然播放结束都写入这个标记。
-    window.sessionStorage.setItem(INTRO_STORAGE_KEY, '1')
-    setIntroFinished(true)
-    setShowIntro(false)
-  }
-
-  const introClass = (introAnimation: string, defaultAnimation: string) => {
-    // 开屏结束后直接显示最终首页，避免从 intro 状态切回 rise-in 时二次淡入。
-    if (showIntro) return introAnimation
-    return introFinished ? '' : defaultAnimation
+/**
+ * 工作台大图上的注解说明统一数据化，后续替换成真实截图时只需要调整定位。
+ */
+const workspaceCallouts = [
+  { id: '①', title: '资料上下文保持', top: '22%', left: '12%' },
+  { id: '②', title: '来源实时追溯', top: '46%', left: '68%' },
+  { id: '③', title: '智能问答生成', top: '76%', left: '42%' },
+] as const
+
+/**
+ * 本地衬线字体栈。这里避免依赖外部字体下载，确保落地页在当前工程中直接可运行。
+ * 如果后续产品允许引入品牌字体，可在这一处替换为正式标题字体。
+ */
+const editorialSerifStyle: CSSProperties = {
+  fontFamily: "'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', 'Cormorant Garamond', serif",
+}
+
+/**
+ * 大多数版心宽度统一收敛到这里，便于所有分幕保持一致的留白节奏。
+ */
+const shellClassName = 'mx-auto w-full max-w-[1280px] px-5 sm:px-8 lg:px-10'
+
+/**
+ * 落地页中所有“图片感/截图感”的资料卡统一使用这套 hover 悬浮反馈。
+ * 鼠标经过时轻微上浮、边框加深、阴影增强，保证首页多张卡片的交互手感一致。
+ */
+const floatingCardHoverClassName =
+  'transition duration-300 ease-out hover:-translate-y-2 hover:border-[#b9c9dd] hover:shadow-[0_26px_78px_rgba(15,23,42,0.14)]'
+
+/**
+ * 大型产品预览“整张图”的悬浮反馈。
+ * 和小卡片 hover 不同，它作用于整块截图/产品画面，让用户感知整张图都是可被激活的视觉对象。
+ */
+const floatingPreviewHoverClassName =
+  'transition duration-500 ease-out hover:-translate-y-3 hover:scale-[1.012] hover:border-[#b9c9dd] hover:shadow-[0_36px_120px_rgba(15,23,42,0.16)]'
+
+/**
+ * 顶部导航中的按钮既可能跳到页面锚点，也可能直接跳到路由。
+ * 抽成小组件后，视觉和交互可以保持一致。
+ */
+function LandingLink({
+  href,
+  children,
+  className,
+  onClick,
+}: {
+  href: string
+  children: ReactNode
+  className?: string
+  onClick?: () => void
+}) {
+  const isRoute = href.startsWith('/')
+
+  if (isRoute) {
+    return (
+      <Link className={className} to={href} onClick={onClick}>
+        {children}
+      </Link>
+    )
   }
 
   return (
-    <main
-      className="landing-page min-h-screen overflow-hidden bg-[#eef3f7] text-[#222833]"
-      style={pageStyle}
-      onPointerMove={(event) => {
-        const nextX = (event.clientX / window.innerWidth) * 100
-        const nextY = (event.clientY / window.innerHeight) * 100
-        setPointer({ x: nextX, y: nextY })
-      }}
-    >
-      <style>{landingAnimationCss}</style>
-      {showIntro && <LandingIntroOverlay target={introTarget} onFinish={finishIntro} />}
-
-      <div className="landing-bg pointer-events-none fixed inset-0">
-        <LandingMotionCanvas />
-        <div className="bg-flow-line top-[57%]" />
-        <div className="bg-flow-line top-[76%]" />
-        <div className="bg-node absolute left-[9%] top-[61%] h-16 w-16 rounded-full border border-white/55 bg-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]" />
-        <div className="bg-node absolute left-[18%] top-[16%] h-1.5 w-1.5 rounded-full bg-slate-400/25 [animation-delay:-2s]" />
-        <div className="bg-node absolute right-[20%] top-[68%] h-2 w-2 rounded-full bg-slate-500/20 [animation-delay:-7s]" />
-        <div className="absolute inset-x-0 top-0 h-44 bg-gradient-to-b from-white/75 to-transparent" />
-      </div>
-
-      <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col px-5 py-6 sm:px-8 lg:px-10">
-        <header className={`${introClass('intro-page-reveal [animation-delay:2.06s]', 'rise-in')} flex items-center justify-between gap-4`}>
-          <Link to="/" className="flex min-w-0 items-center gap-3">
-            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl border border-white bg-white shadow-[0_18px_45px_rgba(34,40,51,0.10)]">
-              <BrainCircuit className="h-5 w-5 text-[#222833]" />
-            </div>
-            <div className="min-w-0">
-              <div className="truncate text-base font-black tracking-normal">智学引擎</div>
-              <div className="hidden text-xs text-slate-500 sm:block">Learning Assistant</div>
-            </div>
-          </Link>
-
-          <nav className="hidden rounded-full border border-white bg-white/82 p-1 text-sm font-bold text-slate-500 shadow-[0_18px_60px_rgba(34,40,51,0.08)] backdrop-blur md:flex">
-            <a href="#preview" className="rounded-full bg-[#222833] px-5 py-2 text-white">首页</a>
-            <a href="#features" className="rounded-full px-5 py-2 transition hover:text-[#222833]">功能</a>
-            <a href="#flow" className="rounded-full px-5 py-2 transition hover:text-[#222833]">流程</a>
-          </nav>
-
-          <div className="flex shrink-0 items-center gap-2">
-            <Link
-              to="/login"
-              className="inline-flex h-10 items-center justify-center rounded-full border border-white bg-white/82 px-5 text-sm font-bold text-[#222833] shadow-sm transition hover:bg-white"
-            >
-              登录
-            </Link>
-            <Link
-              to="/workspace/chat?new=1"
-              className="inline-flex h-10 items-center justify-center rounded-full bg-[#222833] px-5 text-sm font-bold text-white shadow-[0_16px_38px_rgba(34,40,51,0.18)] transition hover:bg-[#111827]"
-            >
-              开始使用
-            </Link>
-          </div>
-        </header>
-
-        <section className="flex flex-1 flex-col items-center pb-10 pt-9 text-center sm:pt-12">
-          <div className={`${introClass('intro-page-reveal [animation-delay:1.9s]', 'rise-in [animation-delay:.06s]')} inline-flex items-center gap-2 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_50px_rgba(34,40,51,0.08)]`}>
-            <span className="relative flex h-2 w-2">
-              <span className="pulse-node absolute inline-flex h-full w-full rounded-full bg-slate-500 opacity-40" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-slate-700" />
-            </span>
-            资料驱动的 AI 学习工作台
-          </div>
-
-          <h1
-            ref={heroTitleRef}
-            className={`${introClass('intro-real-title', 'rise-in [animation-delay:.12s]')} mt-6 max-w-5xl text-4xl font-black leading-[1.08] tracking-normal text-[#1f2933] sm:text-6xl lg:text-7xl`}
-          >
-            <span className="hidden sm:inline">让每份资料都变成</span>
-            <span className="block sm:hidden">让资料变成</span>
-            <span className="block text-slate-500">可追问的学习助手</span>
-          </h1>
-
-          <div className={`hero-rule mt-5 ${introClass('intro-page-reveal [animation-delay:2.2s]', 'rise-in [animation-delay:.15s]')}`} />
-
-          <p
-            ref={heroSubtitleRef}
-            className={`${introClass('intro-real-subtitle', 'rise-in [animation-delay:.18s]')} mt-4 max-w-3xl text-base leading-8 text-slate-500 sm:text-lg`}
-          >
-            上传文档后自动构建 RAG 知识索引，支持资料问答、来源引用、临时附件追问和自动总结。首页预览模拟真实工作台，展示从资料管理到智能问答的完整学习流程。
-          </p>
-
-          <div className={`${introClass('intro-page-reveal [animation-delay:2.28s]', 'rise-in [animation-delay:.24s]')} mt-6 flex w-full flex-col items-center justify-center gap-3 sm:flex-row`}>
-            <Link
-              to="/workspace/chat?new=1"
-              className="inline-flex h-12 w-full max-w-[220px] items-center justify-center gap-2 rounded-full bg-[#222833] px-7 text-sm font-black text-white shadow-[0_20px_50px_rgba(34,40,51,0.22)] transition hover:-translate-y-0.5 hover:bg-[#111827]"
-            >
-              开始使用
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-            <Link
-              to="/login"
-              className="inline-flex h-12 w-full max-w-[220px] items-center justify-center rounded-full border border-white bg-white/82 px-7 text-sm font-black text-[#222833] shadow-sm transition hover:-translate-y-0.5 hover:bg-white"
-            >
-              进入登录
-            </Link>
-          </div>
-
-          <section id="preview" className={`${introClass('intro-page-reveal [animation-delay:2.38s]', 'rise-in [animation-delay:.3s]')} mt-7 w-full max-w-6xl text-left sm:mt-8`}>
-            <div className="preview-shell rounded-[20px] bg-white/84 p-3 shadow-[0_34px_90px_rgba(34,40,51,0.13)] backdrop-blur">
-              <span className="corner-glow" aria-hidden="true" />
-              <div className="relative overflow-visible">
-                <div className="hex-carousel-stage">
-                  <svg className="hex-trace" viewBox="0 0 900 480" aria-hidden="true">
-                    <path d="M88 240 L220 58 L680 58 L812 240 L680 422 L220 422 Z" fill="none" stroke="rgba(34,40,51,.22)" strokeWidth="1.4" />
-                    <path d="M220 58 L450 240 L680 58" fill="none" stroke="rgba(34,40,51,.1)" strokeWidth="1.2" />
-                    <path d="M220 422 L450 240 L680 422" fill="none" stroke="rgba(34,40,51,.1)" strokeWidth="1.2" />
-                  </svg>
-
-                  {previewSlides.map((slide, index) => {
-                    const position = hexPanelPosition(index, activeSlide, previewSlides.length)
-                    if (position.hidden) return null
-
-                    return (
-                      <div
-                        key={slide.id}
-                        className={`hex-panel ${position.role === 'active' ? 'is-active' : 'is-side'}`}
-                        style={position.style}
-                        aria-hidden={index !== activeSlide}
-                      >
-                        <PreviewFrame title={slide.title} desc={slide.desc}>
-                          {slide.id === 'chat' && <ChatPreview />}
-                          {slide.id === 'materials' && <MaterialsPreview />}
-                          {slide.id === 'summary' && <SummaryPreview />}
-                        </PreviewFrame>
-                      </div>
-                    )
-                  })}
-
-                </div>
-
-                <button
-                  type="button"
-                  className="absolute left-4 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full border border-white/80 bg-white/82 text-[#222833] shadow-[0_16px_38px_rgba(34,40,51,0.12)] backdrop-blur transition hover:-translate-x-0.5 hover:bg-white sm:left-8"
-                  aria-label="上一张"
-                  onClick={() => moveSlide(-1)}
-                >
-                  <ArrowLeft className="h-4 w-4" />
-                </button>
-                <button
-                  type="button"
-                  className="absolute right-4 top-1/2 z-20 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full border border-white/80 bg-white/82 text-[#222833] shadow-[0_16px_38px_rgba(34,40,51,0.12)] backdrop-blur transition hover:translate-x-0.5 hover:bg-white sm:right-8"
-                  aria-label="下一张"
-                  onClick={() => moveSlide(1)}
-                >
-                  <ArrowRight className="h-4 w-4" />
-                </button>
-              </div>
-
-              <div className="mt-4 flex items-center justify-center gap-2">
-                {previewSlides.map((slide, index) => (
-                  <button
-                    key={slide.id}
-                    type="button"
-                    className={`h-1.5 rounded-full transition-all ${index === activeSlide ? 'w-8 bg-[#222833]' : 'w-3 bg-slate-300 hover:bg-slate-400'}`}
-                    aria-label={`切换到${slide.title}`}
-                    onClick={() => selectSlide(index)}
-                  />
-                ))}
-              </div>
-            </div>
-          </section>
-        </section>
-      </div>
-
-      <section id="features" className="relative z-10 border-y border-white/80 bg-white px-5 py-14 sm:px-8 lg:px-10">
-        <div className="mx-auto grid max-w-7xl gap-4 md:grid-cols-3">
-          {features.map((feature, index) => {
-            const Icon = feature.icon
-            return (
-              <article
-                key={feature.title}
-                className="feature-card rounded-lg border border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(34,40,51,0.08)]"
-                style={{ animationDelay: `${index * 80}ms` }}
-              >
-                <div className="grid h-11 w-11 place-items-center rounded-2xl bg-[#222833] text-white shadow-[0_16px_34px_rgba(34,40,51,0.16)]">
-                  <Icon className="h-5 w-5" />
-                </div>
-                <h2 className="mt-5 text-xl font-black text-[#222833]">{feature.title}</h2>
-                <p className="mt-3 text-sm leading-7 text-slate-500">{feature.text}</p>
-                <div className="mt-6 grid grid-cols-5 gap-1">
-                  {Array.from({ length: 10 }).map((_, cellIndex) => (
-                    <span
-                      key={cellIndex}
-                      className={`h-1.5 rounded-full ${cellIndex <= 5 + index ? 'bg-slate-300' : 'bg-slate-100'}`}
-                    />
-                  ))}
-                </div>
-              </article>
-            )
-          })}
-        </div>
-      </section>
-
-      <section id="flow" className="relative z-10 bg-[#f7f9fb] px-5 py-14 sm:px-8 lg:px-10">
-        <div className="mx-auto max-w-7xl">
-          <div className="mb-7 flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
-            <div>
-              <p className="text-sm font-black text-slate-600">学习流程</p>
-              <h2 className="mt-2 text-3xl font-black tracking-normal text-[#222833]">从资料到答案，路径清晰</h2>
-            </div>
-            <Link to="/workspace/chat?new=1" className="inline-flex w-fit items-center gap-2 rounded-full bg-[#222833] px-5 py-3 text-sm font-black text-white">
-              立即体验 <ChevronRight className="h-4 w-4" />
-            </Link>
-          </div>
-          <div className="grid gap-3 md:grid-cols-4">
-            {steps.map((item, index) => (
-              <div key={item} className="feature-card flow-card rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="mb-4 grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-sm font-black text-[#222833]">
-                  {index + 1}
-                </div>
-                <h3 className="text-lg font-black">{item}</h3>
-                <p className="mt-3 text-sm leading-6 text-slate-500">
-                  <CheckCircle2 className="mr-2 inline h-4 w-4 text-slate-500" />
-                  保留上下文、来源和可复习结构。
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <SiteBeianFooter />
-    </main>
+    <a className={className} href={href} onClick={onClick}>
+      {children}
+    </a>
   )
 }
 
-function hexPanelPosition(index: number, activeIndex: number, total: number) {
-  const previousIndex = (activeIndex - 1 + total) % total
-  const nextIndex = (activeIndex + 1) % total
-
-  if (index === activeIndex) {
-    return {
-      role: 'active',
-      hidden: false,
-      style: {
-        '--hex-x': '0px',
-        '--hex-y': '8px',
-        '--hex-scale': 1,
-        '--hex-rotate': '0deg',
-        '--hex-opacity': 1,
-        '--hex-blur': '0px',
-        '--hex-z': 4,
-      } as CSSProperties,
-    }
-  }
-
-  if (index === previousIndex) {
-    return {
-      role: 'previous',
-      hidden: false,
-      style: {
-        '--hex-x': '-28vw',
-        '--hex-y': '18px',
-        '--hex-scale': 0.82,
-        '--hex-rotate': '18deg',
-        '--hex-opacity': 0.26,
-        '--hex-blur': '3.5px',
-        '--hex-z': 2,
-      } as CSSProperties,
-    }
-  }
-
-  if (index === nextIndex) {
-    return {
-      role: 'next',
-      hidden: false,
-      style: {
-        '--hex-x': '28vw',
-        '--hex-y': '18px',
-        '--hex-scale': 0.82,
-        '--hex-rotate': '-18deg',
-        '--hex-opacity': 0.26,
-        '--hex-blur': '3.5px',
-        '--hex-z': 2,
-      } as CSSProperties,
-    }
-  }
-
-  return {
-    role: 'hidden',
-    hidden: true,
-    style: {} as CSSProperties,
-  }
-}
-
-function LandingMotionCanvas() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    type Particle = {
-      x: number
-      y: number
-      vx: number
-      vy: number
-      r: number
-      alpha: number
-    }
-
-    const particles: Particle[] = []
-    const pointer = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.28 }
-    let frame = 0
-    let tick = 0
-
-    const resize = () => {
-      const ratio = window.devicePixelRatio || 1
-      const width = window.innerWidth
-      const height = window.innerHeight
-      canvas.width = Math.floor(width * ratio)
-      canvas.height = Math.floor(height * ratio)
-      canvas.style.width = `${width}px`
-      canvas.style.height = `${height}px`
-      ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
-
-      particles.length = 0
-      const amount = Math.min(42, Math.floor((width * height) / 36000))
-      for (let i = 0; i < amount; i += 1) {
-        particles.push({
-          x: Math.random() * width,
-          y: Math.random() * height,
-          vx: (Math.random() - 0.5) * 0.18,
-          vy: (Math.random() - 0.5) * 0.18,
-          r: 0.7 + Math.random() * 1.2,
-          alpha: 0.08 + Math.random() * 0.12,
-        })
-      }
-    }
-
-    const handlePointerMove = (event: PointerEvent) => {
-      pointer.x = event.clientX
-      pointer.y = event.clientY
-    }
-
-    const drawFlowLines = (width: number, height: number) => {
-      for (let line = 0; line < 4; line += 1) {
-        ctx.beginPath()
-        const baseY = height * (0.2 + line * 0.18)
-        for (let x = -90; x <= width + 90; x += 26) {
-          const y =
-            baseY +
-            Math.sin((x + tick * (0.45 + line * 0.08)) / 165 + line) * 12 +
-            Math.cos((x - tick * 0.22) / 300) * 8
-
-          if (x === -90) ctx.moveTo(x, y)
-          else ctx.lineTo(x, y)
-        }
-        ctx.strokeStyle = `rgba(34,40,51,${0.035 + line * 0.008})`
-        ctx.lineWidth = 1
-        ctx.stroke()
-      }
-    }
-
-    const draw = () => {
-      const width = window.innerWidth
-      const height = window.innerHeight
-      tick += 1
-      ctx.clearRect(0, 0, width, height)
-
-      const glow = ctx.createRadialGradient(pointer.x, pointer.y, 0, pointer.x, pointer.y, 330)
-      glow.addColorStop(0, 'rgba(255,255,255,0.7)')
-      glow.addColorStop(0.48, 'rgba(34,40,51,0.055)')
-      glow.addColorStop(1, 'rgba(255,255,255,0)')
-      ctx.fillStyle = glow
-      ctx.fillRect(0, 0, width, height)
-
-      for (const particle of particles) {
-        const dx = pointer.x - particle.x
-        const dy = pointer.y - particle.y
-        const distance = Math.sqrt(dx * dx + dy * dy)
-        if (distance < 150) {
-          const pull = (150 - distance) / 150
-          particle.vx += (dx / Math.max(distance, 1)) * pull * 0.004
-          particle.vy += (dy / Math.max(distance, 1)) * pull * 0.004
-        }
-
-        particle.x += particle.vx
-        particle.y += particle.vy
-        particle.vx *= 0.996
-        particle.vy *= 0.996
-
-        if (particle.x < -12) particle.x = width + 12
-        if (particle.x > width + 12) particle.x = -12
-        if (particle.y < -12) particle.y = height + 12
-        if (particle.y > height + 12) particle.y = -12
-
-        ctx.beginPath()
-        ctx.arc(particle.x, particle.y, particle.r, 0, Math.PI * 2)
-        ctx.fillStyle = `rgba(34,40,51,${particle.alpha})`
-        ctx.fill()
-      }
-
-      frame = requestAnimationFrame(draw)
-    }
-
-    resize()
-    draw()
-    window.addEventListener('resize', resize)
-    window.addEventListener('pointermove', handlePointerMove)
-
-    return () => {
-      cancelAnimationFrame(frame)
-      window.removeEventListener('resize', resize)
-      window.removeEventListener('pointermove', handlePointerMove)
-    }
-  }, [])
-
-  return <canvas ref={canvasRef} className="landing-motion-canvas absolute inset-0 h-full w-full opacity-55" aria-hidden="true" />
-}
-
-function LandingIntroOverlay({
-  target,
-  onFinish,
+/**
+ * 通用分幕标题区。大标题、编号、说明文案都统一这里输出，保证节奏一致。
+ */
+function SectionIntro({
+  eyebrow,
+  title,
+  description,
+  inverse = false,
 }: {
-  target: IntroTargetMetrics
-  onFinish: () => void
+  eyebrow: string
+  title: string
+  description: string
+  inverse?: boolean
 }) {
-  const finishRef = useRef(onFinish)
+  return (
+    <div className="max-w-3xl">
+      <p className={cn('text-[11px] font-semibold uppercase tracking-[0.42em]', inverse ? 'text-white/55' : 'text-slate-400')}>
+        {eyebrow}
+      </p>
+      <h2
+        className={cn('mt-5 text-4xl leading-[1.02] sm:text-5xl lg:text-6xl', inverse ? 'text-white' : 'text-[#111111]')}
+        style={editorialSerifStyle}
+      >
+        {title}
+      </h2>
+      <p className={cn('mt-5 max-w-2xl text-sm leading-7 sm:text-base', inverse ? 'text-white/66' : 'text-slate-500')}>
+        {description}
+      </p>
+    </div>
+  )
+}
+
+/**
+ * 卡片组 stagger 动画。
+ * 进入当前分屏后，子元素会按顺序轻微上浮，形成“内容被唤醒”的节奏。
+ */
+const staggerContainerMotion = {
+  hidden: {
+    transition: {
+      staggerChildren: 0.055,
+      staggerDirection: -1,
+    },
+  },
+  show: {
+    transition: {
+      staggerChildren: 0.11,
+      delayChildren: 0.18,
+    },
+  },
+}
+
+/**
+ * 分屏切换的核心动画。
+ * 这里不再依赖 whileInView，而是由 activeSectionId 显式驱动 show/hidden，
+ * 这样点击悬浮按钮、滚轮下滑、右侧导航跳转时，旧页面会退场，新页面会进场。
+ */
+const sectionFrameMotion = {
+  hidden: {
+    opacity: 0,
+    y: 72,
+    scale: 1,
+    filter: 'blur(14px)',
+    transition: {
+      duration: 0.58,
+      ease: [0.4, 0, 0.2, 1] as const,
+    },
+  },
+  show: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    filter: 'blur(0px)',
+    transition: {
+      duration: 1.08,
+      ease: [0.16, 1, 0.3, 1] as const,
+      staggerChildren: 0.13,
+      delayChildren: 0.1,
+    },
+  },
+}
+
+const floatItemMotion = {
+  hidden: {
+    opacity: 0,
+    y: 58,
+    scale: 0.985,
+    filter: 'blur(12px)',
+    transition: { duration: 0.5, ease: [0.4, 0, 0.2, 1] as const },
+  },
+  show: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    filter: 'blur(0px)',
+    transition: { duration: 1.02, ease: [0.16, 1, 0.3, 1] as const },
+  },
+}
+
+function ScrollReveal({
+  children,
+  className,
+  delay = 0,
+  style,
+}: {
+  children: ReactNode
+  className?: string
+  delay?: number
+  style?: CSSProperties
+}) {
+  const prefersReducedMotion = useReducedMotion()
+
+  if (prefersReducedMotion) {
+    return <div className={className} style={style}>{children}</div>
+  }
+
+  return (
+    <motion.div
+      className={className}
+      style={style}
+      initial={{ opacity: 0, y: 60 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true, amount: 0.1 }}
+      transition={{ duration: 0.8, delay, ease: [0.16, 1, 0.3, 1] }}
+    >
+      {children}
+    </motion.div>
+  )
+}
+
+const heroLineMotion = {
+  hidden: {
+    opacity: 0,
+    y: 42,
+    scale: 0.985,
+    filter: 'blur(18px)',
+    transition: { duration: 0.48, ease: [0.4, 0, 0.2, 1] as const },
+  },
+  show: (index: number) => ({
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    filter: 'blur(0px)',
+    transition: {
+      duration: 0.9,
+      delay: index * 0.12,
+      ease: [0.16, 1, 0.3, 1] as const,
+    },
+  }),
+}
+
+function AnimatedHeroText({ text, className, delay = 0 }: { text: string; className?: string; delay?: number }) {
+  return (
+    <span className={className}>
+      {Array.from(text).map((char, index) => (
+        <motion.span
+          key={`${char}-${index}`}
+          className="inline-block"
+          initial={{ opacity: 0, y: 42, filter: 'blur(14px)' }}
+          animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+          transition={{
+            duration: 0.72,
+            delay: delay + index * 0.035,
+            ease: [0.16, 1, 0.3, 1],
+          }}
+        >
+          {char === ' ' ? '\u00a0' : char}
+        </motion.span>
+      ))}
+    </span>
+  )
+}
+
+function HeroMimoOrbit() {
+  return (
+    <motion.div
+      className="pointer-events-none absolute right-[7%] top-[26%] hidden h-[360px] w-[360px] opacity-80 lg:block"
+      initial={{ opacity: 0, x: 40, scale: 0.92, filter: 'blur(10px)' }}
+      animate={{ opacity: 0.8, x: 0, scale: 1, filter: 'blur(0px)' }}
+      transition={{ duration: 1.1, delay: 0.55, ease: [0.16, 1, 0.3, 1] }}
+      aria-hidden="true"
+    >
+      <motion.div
+        className="absolute inset-0 rounded-full border border-[#1a2a3a]/32"
+        animate={{ rotate: 360 }}
+        transition={{ duration: 24, repeat: Number.POSITIVE_INFINITY, ease: 'linear' }}
+      />
+      <motion.div
+        className="absolute left-1/2 top-1/2 h-[88px] w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-[50%] border border-[#1a2a3a]/20"
+        animate={{ rotate: [0, 360] }}
+        transition={{ duration: 18, repeat: Number.POSITIVE_INFINITY, ease: 'linear' }}
+      />
+      <motion.div
+        className="absolute left-1/2 top-1/2 h-[360px] w-[108px] -translate-x-1/2 -translate-y-1/2 rounded-[50%] border border-[#1a2a3a]/12"
+        animate={{ rotate: [0, -360] }}
+        transition={{ duration: 28, repeat: Number.POSITIVE_INFINITY, ease: 'linear' }}
+      />
+      <svg className="absolute inset-0 h-full w-full" viewBox="0 0 360 360" fill="none">
+        <motion.path
+          d="M102 158L158 188L218 126L264 164"
+          stroke="#1a2a3a"
+          strokeWidth="1.2"
+          strokeOpacity="0.42"
+          pathLength={1}
+          initial={{ pathLength: 0, opacity: 0 }}
+          animate={{ pathLength: 1, opacity: 1 }}
+          transition={{ duration: 1.6, delay: 0.85, ease: [0.16, 1, 0.3, 1] }}
+        />
+        {[
+          [102, 158, '#7eb3d6'],
+          [158, 188, '#75c98d'],
+          [218, 126, '#d2a15d'],
+          [264, 164, '#9aa5b1'],
+        ].map(([cx, cy, color], index) => (
+          <motion.circle
+            key={`${cx}-${cy}`}
+            cx={Number(cx)}
+            cy={Number(cy)}
+            r="5"
+            fill={String(color)}
+            stroke="white"
+            strokeWidth="2"
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: [1, 1.24, 1], opacity: 1 }}
+            transition={{
+              duration: 1.8,
+              delay: 0.9 + index * 0.16,
+              repeat: Number.POSITIVE_INFINITY,
+              repeatDelay: 1.6,
+              ease: 'easeInOut',
+            }}
+          />
+        ))}
+      </svg>
+      <div className="absolute inset-[54px] rounded-full bg-[radial-gradient(circle,rgba(255,255,255,0.92),rgba(255,255,255,0)_62%)]" />
+      <div className="absolute inset-[88px] rounded-full bg-[radial-gradient(circle,rgba(26,42,58,0.08),rgba(26,42,58,0)_64%)] blur-xl" />
+      <div className="absolute left-16 top-24 grid grid-cols-12 gap-1 opacity-35">
+        {Array.from({ length: 72 }).map((_, index) => (
+          <span key={index} className="h-1 w-1 rounded-full bg-[#1a2a3a]" />
+        ))}
+      </div>
+    </motion.div>
+  )
+}
+
+function SectionAmbientMotion({
+  align = 'right',
+  tone = 'light',
+}: {
+  align?: 'left' | 'right' | 'center'
+  tone?: 'light' | 'deep'
+}) {
+  const isDeep = tone === 'deep'
+  const anchorClassName =
+    align === 'left'
+      ? 'left-[-110px] top-8'
+      : align === 'center'
+        ? 'left-1/2 top-8 -translate-x-1/2'
+        : 'right-[-120px] top-10'
+  const lineColor = isDeep ? 'border-white/18' : 'border-[#1a2a3a]/14'
+  const dotColor = isDeep ? 'bg-white/55' : 'bg-[#1a2a3a]/42'
+
+  return (
+    <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+      <motion.div
+        className={cn('absolute hidden h-[360px] w-[360px] rounded-full lg:block', anchorClassName)}
+        initial={{ opacity: 0, y: 40, scale: 0.92, filter: 'blur(10px)' }}
+        whileInView={{ opacity: isDeep ? 0.45 : 0.72, y: 0, scale: 1, filter: 'blur(0px)' }}
+        viewport={{ once: false, amount: 0.12 }}
+        transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
+      >
+        <motion.div
+          className={cn('absolute inset-0 rounded-full border', lineColor)}
+          animate={{ rotate: 360 }}
+          transition={{ duration: 32, repeat: Number.POSITIVE_INFINITY, ease: 'linear' }}
+        />
+        <motion.div
+          className={cn('absolute left-1/2 top-1/2 h-[86px] w-[430px] -translate-x-1/2 -translate-y-1/2 rounded-[50%] border', lineColor)}
+          animate={{ rotate: -360 }}
+          transition={{ duration: 24, repeat: Number.POSITIVE_INFINITY, ease: 'linear' }}
+        />
+        <motion.div
+          className={cn('absolute left-1/2 top-1/2 h-[330px] w-[96px] -translate-x-1/2 -translate-y-1/2 rounded-[50%] border', lineColor)}
+          animate={{ rotate: 360 }}
+          transition={{ duration: 38, repeat: Number.POSITIVE_INFINITY, ease: 'linear' }}
+        />
+        <div className={cn('absolute left-[44%] top-[35%] h-2 w-2 rounded-full', dotColor)} />
+        <motion.div
+          className={cn('absolute left-[64%] top-[54%] h-3 w-3 rounded-full', dotColor)}
+          animate={{ scale: [1, 1.65, 1], opacity: [0.35, 0.95, 0.35] }}
+          transition={{ duration: 2.2, repeat: Number.POSITIVE_INFINITY, ease: 'easeInOut' }}
+        />
+      </motion.div>
+      <motion.div
+        className={cn(
+          'absolute bottom-12 h-44 w-44 rounded-full blur-3xl',
+          align === 'left' ? 'right-[8%]' : 'left-[8%]',
+          isDeep ? 'bg-white/10' : 'bg-[#c9d8ea]/50',
+        )}
+        animate={{ y: [0, -18, 0], opacity: [0.35, 0.62, 0.35] }}
+        transition={{ duration: 7, repeat: Number.POSITIVE_INFINITY, ease: 'easeInOut' }}
+      />
+    </div>
+  )
+}
+
+function LandingIntroSequence({ onComplete }: { onComplete: () => void }) {
+  const prefersReducedMotion = useReducedMotion()
 
   useEffect(() => {
-    finishRef.current = onFinish
-  }, [onFinish])
+    if (prefersReducedMotion) {
+      onComplete()
+      return undefined
+    }
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => finishRef.current(), INTRO_DURATION_MS)
+    const timer = window.setTimeout(onComplete, 2600)
     return () => window.clearTimeout(timer)
-  }, [])
+  }, [onComplete, prefersReducedMotion])
 
-  const fragments = [
-    {
-      label: '上传文档',
-      startX: '-38vw',
-      startY: '-26vh',
-      midX: '-29vw',
-      midY: '-15vh',
-      endX: '-12vw',
-      endY: '-6vh',
-    },
-    {
-      label: 'RAG 知识索引',
-      startX: '36vw',
-      startY: '-24vh',
-      midX: '25vw',
-      midY: '-13vh',
-      endX: '10vw',
-      endY: '-5vh',
-    },
-    {
-      label: '来源引用',
-      startX: '-36vw',
-      startY: '24vh',
-      midX: '-27vw',
-      midY: '13vh',
-      endX: '-10vw',
-      endY: '5vh',
-    },
-    {
-      label: '自动总结',
-      startX: '34vw',
-      startY: '24vh',
-      midX: '25vw',
-      midY: '14vh',
-      endX: '11vw',
-      endY: '5vh',
-    },
+  if (prefersReducedMotion) {
+    return null
+  }
+
+  const nodes = [
+    { cx: 120, cy: 96, delay: 0.45 },
+    { cx: 196, cy: 60, delay: 0.58 },
+    { cx: 268, cy: 118, delay: 0.72 },
+    { cx: 230, cy: 198, delay: 0.86 },
+    { cx: 138, cy: 190, delay: 1 },
   ]
 
-  // 动画标题以真实首页标题的测量结果为终点，结束时由真实标题接管画面。
-  const overlayStyle = {
-    '--intro-title-x': `${target.titleX}px`,
-    '--intro-title-y': `${target.titleY}px`,
-    '--intro-title-scale': target.titleScale,
-    '--intro-subtitle-x': `${target.subtitleX}px`,
-    '--intro-subtitle-y': `${target.subtitleY}px`,
-    '--intro-subtitle-scale': target.subtitleScale,
-  } as CSSProperties
+  return (
+    <motion.div
+      className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden bg-[#f7f8fb]"
+      initial={{ opacity: 1 }}
+      animate={{ opacity: [1, 1, 0] }}
+      transition={{ duration: 2.6, times: [0, 0.82, 1], ease: [0.16, 1, 0.3, 1] }}
+      onAnimationComplete={onComplete}
+      onClick={onComplete}
+      role="button"
+      tabIndex={0}
+      aria-label="跳过开场动画"
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          onComplete()
+        }
+      }}
+    >
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_42%,rgba(255,255,255,0.98),transparent_28%),radial-gradient(circle_at_50%_55%,rgba(197,212,231,0.72),transparent_34%),linear-gradient(180deg,#fcfcfd_0%,#f7f8fb_100%)]" />
+      <div className="absolute inset-0 opacity-[0.18] [background-image:linear-gradient(rgba(100,116,139,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(100,116,139,0.08)_1px,transparent_1px)] [background-size:56px_56px]" />
+
+      <div className="relative flex flex-col items-center">
+        <motion.svg
+          className="h-[280px] w-[360px] overflow-visible"
+          viewBox="0 0 360 260"
+          fill="none"
+          initial={{ opacity: 0, scale: 0.94 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+          aria-hidden="true"
+        >
+          <motion.circle
+            cx="180"
+            cy="130"
+            r="8"
+            fill="#1a2a3a"
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: [0, 1.2, 1], opacity: 1 }}
+            transition={{ duration: 0.58, ease: [0.16, 1, 0.3, 1] }}
+          />
+          <motion.circle
+            cx="180"
+            cy="130"
+            r="42"
+            stroke="#1a2a3a"
+            strokeOpacity="0.12"
+            initial={{ scale: 0.2, opacity: 0 }}
+            animate={{ scale: [0.2, 1.45], opacity: [0, 0.42, 0] }}
+            transition={{ duration: 1.35, delay: 0.18, ease: [0.16, 1, 0.3, 1] }}
+          />
+          <motion.path
+            d="M180 130L120 96M180 130L196 60M180 130L268 118M180 130L230 198M180 130L138 190"
+            stroke="#1a2a3a"
+            strokeWidth="1.2"
+            strokeOpacity="0.34"
+            initial={{ pathLength: 0, opacity: 0 }}
+            animate={{ pathLength: 1, opacity: 1 }}
+            transition={{ duration: 0.82, delay: 0.42, ease: [0.16, 1, 0.3, 1] }}
+          />
+          {nodes.map((node) => (
+            <motion.g key={`${node.cx}-${node.cy}`}>
+              <motion.circle
+                cx={node.cx}
+                cy={node.cy}
+                r="15"
+                fill="#ffffff"
+                stroke="#d6deea"
+                initial={{ scale: 0, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ duration: 0.42, delay: node.delay, ease: [0.16, 1, 0.3, 1] }}
+              />
+              <motion.circle
+                cx={node.cx}
+                cy={node.cy}
+                r="4"
+                fill="#1a2a3a"
+                initial={{ scale: 0, opacity: 0 }}
+                animate={{ scale: [0, 1.35, 1], opacity: 1 }}
+                transition={{ duration: 0.42, delay: node.delay + 0.08, ease: [0.16, 1, 0.3, 1] }}
+              />
+            </motion.g>
+          ))}
+        </motion.svg>
+
+        <motion.p
+          className="mt-[-28px] text-[11px] font-semibold uppercase tracking-[0.46em] text-slate-400"
+          initial={{ opacity: 0, y: 28 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.72, delay: 1.12, ease: [0.16, 1, 0.3, 1] }}
+        >
+          Learning Assistant
+        </motion.p>
+        <motion.h2
+          className="mt-5 text-center text-4xl leading-none text-[#111111] sm:text-5xl"
+          style={editorialSerifStyle}
+          initial={{ opacity: 0, y: 40 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.82, delay: 1.28, ease: [0.16, 1, 0.3, 1] }}
+        >
+          让资料开始回答问题
+        </motion.h2>
+        <motion.p
+          className="mt-7 text-xs font-medium uppercase tracking-[0.28em] text-slate-400"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 0.72 }}
+          transition={{ duration: 0.5, delay: 1.68 }}
+        >
+          点击跳过
+        </motion.p>
+      </div>
+    </motion.div>
+  )
+}
+
+function LandingIntroSequenceV2({ onComplete }: { onComplete: () => void }) {
+  const prefersReducedMotion = useReducedMotion()
+
+  useEffect(() => {
+    if (prefersReducedMotion) {
+      onComplete()
+      return undefined
+    }
+
+    const timer = window.setTimeout(onComplete, 3200)
+    return () => window.clearTimeout(timer)
+  }, [onComplete, prefersReducedMotion])
+
+  if (prefersReducedMotion) {
+    return null
+  }
+
+  const fragments = [
+    { label: '上传文档', className: '-translate-x-[280px] -translate-y-[118px]', exitX: 120, exitY: 62, delay: 0 },
+    { label: 'RAG 知识索引', className: 'translate-x-[260px] -translate-y-[126px]', exitX: -120, exitY: 62, delay: 0.08 },
+    { label: '来源引用', className: '-translate-x-[360px] translate-y-[92px]', exitX: 120, exitY: -62, delay: 0.16 },
+    { label: '自动总结', className: 'translate-x-[330px] translate-y-[116px]', exitX: -120, exitY: -62, delay: 0.24 },
+  ]
+
+  const introPaths = [
+    'M380 210C300 150 240 118 166 112',
+    'M380 210C462 144 532 112 614 118',
+    'M380 210C282 250 236 302 154 314',
+    'M380 210C488 252 544 304 636 316',
+    'M270 116H492',
+    'M260 316H506',
+  ]
 
   return (
-    <div
-      className="intro-overlay fixed inset-0 z-[80] overflow-hidden bg-[#eef3f7] px-5 text-[#222833] sm:px-8 lg:px-10"
-      style={overlayStyle}
-      aria-label="正在展示首页标题归位动画"
-      role="status"
+    <motion.div
+      className="fixed inset-0 z-[100] overflow-hidden bg-[#f7f8fb] px-5 text-[#111111] sm:px-8 lg:px-10"
+      initial={{ opacity: 1 }}
+      animate={{ opacity: [1, 1, 0] }}
+      transition={{ duration: 3.2, times: [0, 0.84, 1], ease: [0.22, 1, 0.36, 1] }}
     >
-      <div className="pointer-events-none absolute inset-0">
-        <div className="landing-bg absolute inset-0" />
-        <div className="bg-flow-line top-[36%]" />
-        <div className="bg-flow-line top-[70%]" />
-        <div className="absolute inset-x-0 top-0 h-48 bg-gradient-to-b from-white/85 to-transparent" />
-      </div>
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_36%,rgba(255,255,255,0.98),transparent_30%),radial-gradient(circle_at_50%_62%,rgba(197,212,231,0.72),transparent_34%),linear-gradient(180deg,#fcfcfd_0%,#f7f8fb_100%)]" />
+      <div className="absolute inset-0 opacity-[0.18] [background-image:linear-gradient(rgba(100,116,139,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(100,116,139,0.08)_1px,transparent_1px)] [background-size:56px_56px]" />
 
       <button
         type="button"
-        className="absolute right-5 top-5 z-10 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_48px_rgba(34,40,51,0.12)] backdrop-blur transition hover:bg-white focus:outline-none focus:ring-2 focus:ring-slate-400"
-        onClick={onFinish}
+        className="absolute right-5 top-5 z-20 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-semibold text-slate-600 shadow-[0_14px_34px_rgba(15,23,42,0.08)] backdrop-blur transition hover:-translate-y-0.5 hover:text-[#111111]"
+        onClick={onComplete}
       >
         跳过
       </button>
 
-      <section className="intro-stage relative z-10 mx-auto h-screen w-full max-w-7xl py-7 sm:py-9">
-        <div className="pointer-events-none absolute inset-x-0 top-7 flex justify-center sm:top-9">
-          <div className="inline-flex items-center gap-2 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_48px_rgba(34,40,51,0.08)] backdrop-blur">
-            <span className="intro-node-dot h-2 w-2 rounded-full bg-slate-700" />
-            正在构建 RAG 知识索引
-          </div>
-        </div>
+      <section className="relative z-10 mx-auto flex h-screen w-full max-w-7xl flex-col items-center justify-center">
+        <motion.div
+          className="absolute top-9 inline-flex items-center gap-2 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-semibold text-slate-600 shadow-[0_14px_34px_rgba(15,23,42,0.08)] backdrop-blur"
+          initial={{ opacity: 0, y: -18 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
+        >
+          <span className="h-2 w-2 rounded-full bg-[#1a2a3a]" />
+          正在构建 RAG 知识索引
+        </motion.div>
 
-        <div className="relative h-full">
-          <svg
-            className="intro-network pointer-events-none absolute left-1/2 top-1/2 h-[min(560px,78vh)] w-[min(980px,96vw)] -translate-x-1/2 -translate-y-1/2"
-            viewBox="0 0 980 560"
-            aria-hidden="true"
-          >
-            <path className="intro-line" d="M490 280 C386 220 312 176 220 150" fill="none" stroke="rgba(34,40,51,.24)" strokeWidth="2" />
-            <path className="intro-line" d="M490 280 C586 214 676 170 780 146" fill="none" stroke="rgba(34,40,51,.24)" strokeWidth="2" />
-            <path className="intro-line" d="M490 280 C394 340 312 392 220 424" fill="none" stroke="rgba(34,40,51,.24)" strokeWidth="2" />
-            <path className="intro-line" d="M490 280 C584 348 672 392 790 424" fill="none" stroke="rgba(34,40,51,.24)" strokeWidth="2" />
-            <path className="intro-line" d="M300 178 C410 158 570 158 690 178" fill="none" stroke="rgba(34,40,51,.16)" strokeWidth="1.5" />
-            <path className="intro-line" d="M298 404 C410 430 586 430 700 402" fill="none" stroke="rgba(34,40,51,.16)" strokeWidth="1.5" />
-            <circle cx="490" cy="280" r="42" fill="rgba(34,40,51,.08)" />
-            <circle className="intro-node-dot" cx="490" cy="280" r="8" fill="rgba(34,40,51,.78)" />
-            <circle cx="220" cy="150" r="10" fill="rgba(34,40,51,.18)" />
-            <circle cx="780" cy="146" r="10" fill="rgba(34,40,51,.18)" />
-            <circle cx="220" cy="424" r="10" fill="rgba(34,40,51,.18)" />
-            <circle cx="790" cy="424" r="10" fill="rgba(34,40,51,.18)" />
-          </svg>
-
-          {fragments.map((fragment, index) => (
-            <div
-              key={fragment.label}
-              className="intro-fragment absolute left-1/2 top-1/2 rounded-full border border-white bg-white/88 px-4 py-2 text-xs font-black text-slate-600 shadow-[0_18px_54px_rgba(34,40,51,.11)] backdrop-blur sm:px-5 sm:py-2.5 sm:text-sm"
-              style={{
-                '--fragment-start-x': fragment.startX,
-                '--fragment-start-y': fragment.startY,
-                '--fragment-mid-x': fragment.midX,
-                '--fragment-mid-y': fragment.midY,
-                '--fragment-end-x': fragment.endX,
-                '--fragment-end-y': fragment.endY,
-                animationDelay: `${index * 70}ms`,
-              } as CSSProperties}
-            >
-              {fragment.label}
-            </div>
+        <motion.svg
+          className="absolute left-1/2 top-1/2 h-[420px] w-[760px] -translate-x-1/2 -translate-y-1/2 overflow-visible opacity-80"
+          viewBox="0 0 760 420"
+          fill="none"
+          initial={{ opacity: 0, y: 36, scale: 0.96 }}
+          animate={{ opacity: 0.8, y: 0, scale: 1 }}
+          transition={{ duration: 0.58, delay: 0.28, ease: [0.22, 1, 0.36, 1] }}
+          aria-hidden="true"
+        >
+          {introPaths.map((d, index) => (
+            <motion.path
+              key={d}
+              d={d}
+              stroke="#1a2a3a"
+              strokeWidth="1.2"
+              strokeOpacity="0.42"
+              pathLength={1}
+              initial={{ pathLength: 0, opacity: 0 }}
+              animate={{ pathLength: 1, opacity: 0.55 }}
+              transition={{ duration: 1.45, delay: 0.34 + index * 0.05, ease: [0.22, 1, 0.36, 1] }}
+            />
           ))}
+          <motion.circle
+            cx="380"
+            cy="210"
+            r="44"
+            fill="white"
+            fillOpacity="0.82"
+            stroke="#d6deea"
+            initial={{ scale: 0.4, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ duration: 0.62, delay: 0.72, ease: [0.22, 1, 0.36, 1] }}
+          />
+          <motion.circle
+            cx="380"
+            cy="210"
+            r="8"
+            fill="#1a2a3a"
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: [0, 1.35, 1], opacity: 1 }}
+            transition={{ duration: 0.5, delay: 0.86, ease: [0.22, 1, 0.36, 1] }}
+          />
+        </motion.svg>
 
-          <div className="pointer-events-none absolute left-1/2 top-[42%] w-[min(980px,90vw)] -translate-x-1/2 -translate-y-1/2 text-center">
-            <div className="intro-title-ghost text-[2.35rem] font-black leading-[1.03] tracking-normal text-[#1f2933] sm:text-7xl lg:text-8xl">
-              <span className="hidden sm:inline">让每份资料都变成</span>
-              <span className="block sm:hidden">让资料变成</span>
-              <span className="block text-slate-500">可追问的学习助手</span>
+        {fragments.map((fragment) => (
+          <motion.div
+            key={fragment.label}
+            className={cn(
+              'absolute left-1/2 top-1/2 rounded-full border border-white bg-white/88 px-4 py-2 text-xs font-semibold text-slate-600 shadow-[0_18px_48px_rgba(15,23,42,0.1)] backdrop-blur',
+              fragment.className,
+            )}
+            initial={{ opacity: 0, scale: 0.72 }}
+            animate={{
+              opacity: [0, 1, 1, 0],
+              scale: [0.72, 1, 0.92, 0.78],
+              x: [0, 0, 0, fragment.exitX],
+              y: [0, 0, 0, fragment.exitY],
+            }}
+            transition={{
+              duration: 2.15,
+              delay: fragment.delay,
+              times: [0, 0.28, 0.72, 1],
+              ease: [0.22, 1, 0.36, 1],
+            }}
+          >
+            {fragment.label}
+          </motion.div>
+        ))}
+
+        <motion.div
+          className="relative z-10 w-[min(980px,90vw)] text-center"
+          initial={{ opacity: 0, y: 72, scale: 0.9 }}
+          animate={{ opacity: 1, y: [72, 0, -112], scale: [0.9, 1, 0.72] }}
+          transition={{ duration: 2.25, delay: 0.62, times: [0, 0.48, 1], ease: [0.2, 0.82, 0.18, 1] }}
+        >
+          <p className="mb-5 text-[11px] font-semibold uppercase tracking-[0.46em] text-slate-400">Learning Assistant</p>
+          <h2 className="text-[2.6rem] font-semibold leading-[1.03] text-[#111111] sm:text-7xl lg:text-8xl" style={editorialSerifStyle}>
+            让每份资料都变成
+            <span className="block text-[#1a2a3a]">可追问的学习助手</span>
+          </h2>
+        </motion.div>
+
+        <motion.p
+          className="relative z-10 mt-8 max-w-3xl text-center text-base font-medium leading-8 text-slate-500 sm:text-xl sm:leading-9"
+          initial={{ opacity: 0, y: 58, scale: 0.96 }}
+          animate={{ opacity: [0, 1, 1, 0], y: [58, 0, -74, -112], scale: [0.96, 1, 0.96, 0.88] }}
+          transition={{ duration: 2.1, delay: 0.88, times: [0, 0.38, 0.76, 1], ease: [0.2, 0.82, 0.18, 1] }}
+        >
+          上传文档后自动构建 RAG 知识索引，支持资料问答、来源引用、临时附件追问和自动总结。
+        </motion.p>
+      </section>
+    </motion.div>
+  )
+}
+
+export function ProductLandingPage() {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [headerSolid, setHeaderSolid] = useState(false)
+  const [introVisible, setIntroVisible] = useState(true)
+  const prefersReducedMotion = useReducedMotion()
+  const revealSectionMotion = prefersReducedMotion
+    ? {}
+    : {
+        variants: sectionFrameMotion,
+        initial: 'hidden',
+        whileInView: 'show',
+        viewport: { once: false, amount: 0.12, margin: '0px 0px -12% 0px' },
+      }
+
+  /**
+   * 顶部导航和悬浮翻页控件共享同一个滚动监听。
+   * 监听时会计算哪个分屏最靠近视口顶部，让右侧进度点和向下按钮保持当前页面状态。
+   */
+  useEffect(() => {
+    const onScroll = () => {
+      setHeaderSolid(window.scrollY > 20)
+    }
+
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
+  /**
+   * 真正产生“翻页感”的滚动容器是浏览器视口，对应 documentElement。
+   * 这里在落地页挂载时临时开启 scroll snap，离开页面时恢复原值，避免影响工作台等普通滚动页面。
+   */
+  useEffect(() => {
+    document.documentElement.style.scrollBehavior = prefersReducedMotion ? 'auto' : 'smooth'
+  }, [prefersReducedMotion])
+
+  /**
+   * 鼠标滚轮和触控板下滑也走“PPT 切屏”逻辑。
+   * 这里主动阻止原生滚动，统一交给 transitionToSection 控制，确保滚动和点击都有同样的淡入淡出质感。
+   */
+  useEffect(() => {
+    return undefined
+  }, [])
+
+  useEffect(() => {
+    return undefined
+  }, [])
+
+  const completeIntro = () => {
+    setIntroVisible(false)
+  }
+
+  return (
+    <div className="min-h-screen scroll-smooth bg-[#f7f8fb] text-[#111111]">
+      {introVisible ? <LandingIntroSequenceV2 onComplete={completeIntro} /> : null}
+
+      <header
+        className={cn(
+          'fixed inset-x-0 top-0 z-50 transition-all duration-300',
+          headerSolid ? 'border-b border-black/8 bg-white/76 backdrop-blur-xl' : 'bg-transparent'
+        )}
+      >
+        <div className={cn(shellClassName, 'flex h-16 items-center justify-between')}>
+          <LandingLink href="#hero" className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-full border border-black/10 bg-white text-[#1a2a3a] shadow-[0_8px_24px_rgba(17,17,17,0.05)]">
+              <BrainCircuit className="h-4 w-4" />
+            </div>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">Learning Assistant</p>
+              <p className="text-sm font-semibold text-[#111111]">智学引擎</p>
+            </div>
+          </LandingLink>
+
+          <nav className="hidden items-center gap-7 md:flex">
+            {landingSections.slice(1).map((section) => (
+              <LandingLink
+                key={section.id}
+                href={`#${section.id}`}
+                className="text-sm text-slate-500 transition hover:text-[#111111]"
+              >
+                {section.label}
+              </LandingLink>
+            ))}
+          </nav>
+
+          <div className="hidden items-center gap-3 md:flex">
+            <Button
+              asChild
+              variant="outline"
+              className="h-11 rounded-full border-black/10 bg-white/76 px-5 text-[#111111] shadow-[0_10px_26px_rgba(15,23,42,0.04)] transition duration-300 hover:-translate-y-1 hover:border-[#111111] hover:bg-[#111111] hover:text-white hover:shadow-[0_18px_42px_rgba(15,23,42,0.14)]"
+            >
+              <Link to="/login">登录</Link>
+            </Button>
+            <Button
+              asChild
+              className="group h-11 rounded-full bg-[#111111] px-6 text-white shadow-[0_12px_30px_rgba(15,23,42,0.12)] transition duration-300 hover:-translate-y-1 hover:bg-white hover:text-[#111111] hover:shadow-[inset_0_0_0_1px_rgba(17,17,17,0.18),0_18px_42px_rgba(15,23,42,0.12)]"
+            >
+              <Link to="/workspace/chat?new=1" className="inline-flex items-center">
+                开始使用
+                <ArrowRight className="ml-2 h-4 w-4 transition duration-300 group-hover:translate-x-1" />
+              </Link>
+            </Button>
+          </div>
+
+          <button
+            type="button"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-white text-[#111111] md:hidden"
+            aria-label={mobileMenuOpen ? '关闭导航菜单' : '打开导航菜单'}
+            onClick={() => setMobileMenuOpen((value) => !value)}
+          >
+            {mobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+          </button>
+        </div>
+
+        {mobileMenuOpen ? (
+          <div className="border-t border-black/8 bg-white/92 px-5 py-5 backdrop-blur-xl md:hidden">
+            <div className="mx-auto flex max-w-[1280px] flex-col gap-4">
+              {landingSections.slice(1).map((section) => (
+                <LandingLink
+                  key={section.id}
+                  href={`#${section.id}`}
+                  className="text-base text-slate-600"
+                  onClick={() => setMobileMenuOpen(false)}
+                >
+                  {section.label}
+                </LandingLink>
+              ))}
+              <Button
+                asChild
+                variant="outline"
+                className="mt-2 h-11 rounded-full border-black/10 bg-white text-[#111111] transition duration-300 hover:-translate-y-0.5 hover:bg-[#111111] hover:text-white"
+              >
+                <Link to="/login" onClick={() => setMobileMenuOpen(false)}>
+                  登录
+                </Link>
+              </Button>
+              <Button
+                asChild
+                className="h-11 rounded-full bg-[#111111] text-white shadow-[0_12px_30px_rgba(15,23,42,0.12)] transition duration-300 hover:-translate-y-0.5 hover:bg-white hover:text-[#111111] hover:shadow-[inset_0_0_0_1px_rgba(17,17,17,0.18)]"
+              >
+                <Link to="/workspace/chat?new=1" onClick={() => setMobileMenuOpen(false)}>
+                  开始使用
+                </Link>
+              </Button>
             </div>
           </div>
+        ) : null}
+      </header>
 
-          <div className="pointer-events-none absolute left-1/2 top-[62%] w-[min(760px,84vw)] -translate-x-1/2 -translate-y-1/2 text-center">
-            <p className="intro-subtitle-ghost text-base font-bold leading-8 text-slate-500 sm:text-xl sm:leading-9">
-              上传文档后自动构建 RAG 知识索引，支持资料问答、来源引用、临时附件追问和自动总结。首页预览模拟真实工作台，展示从资料管理到智能问答的完整学习流程。
-            </p>
+      <main className="overflow-x-hidden">
+        <section id="hero" className="relative min-h-screen overflow-hidden bg-[#f7f8fb] pt-28">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.96),transparent_30%),radial-gradient(circle_at_82%_18%,rgba(206,218,234,0.92),transparent_24%),radial-gradient(circle_at_22%_78%,rgba(226,233,243,0.84),transparent_28%),linear-gradient(180deg,#fcfcfd_0%,#f7f8fb_100%)]" />
+          <div className="absolute inset-0 opacity-[0.22] [background-image:linear-gradient(rgba(100,116,139,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(100,116,139,0.08)_1px,transparent_1px)] [background-size:56px_56px]" />
+          <div className="pointer-events-none absolute inset-x-0 bottom-[-1px] z-[1] h-40 bg-gradient-to-b from-transparent via-[#f7f8fb]/88 to-[#f7f8fb]" />
+          <HeroMimoOrbit />
+          <motion.div className={cn(shellClassName, 'relative flex min-h-[calc(100vh-7rem)] items-center py-14 lg:py-20')} {...revealSectionMotion}>
+            <div className="flex max-w-[900px] -translate-y-12 flex-col items-center text-center lg:-translate-y-10 lg:items-start lg:text-left">
+              <motion.p
+                className="text-[11px] font-semibold uppercase tracking-[0.42em] text-slate-400"
+                variants={floatItemMotion}
+              >
+                资料驱动的 AI 学习工作台
+              </motion.p>
+
+              <div className="mt-8 space-y-2">
+                {heroLines.map((segments, index) => (
+                  <motion.h1
+                    key={segments.join('-')}
+                    className="text-[3.1rem] leading-[0.95] text-[#111111] sm:text-[4.4rem] lg:text-[5.7rem]"
+                    style={editorialSerifStyle}
+                    custom={index}
+                    variants={heroLineMotion}
+                  >
+                    {segments.map((segment, segmentIndex) => (
+                      <AnimatedHeroText
+                        key={`${segment}-${segmentIndex}`}
+                        text={segment}
+                        className={segment === '可追问' ? 'text-[#1a2a3a]' : undefined}
+                        delay={0.18 + index * 0.18 + segmentIndex * 0.08}
+                      />
+                    ))}
+                  </motion.h1>
+                ))}
+              </div>
+
+              <motion.div
+                className="mt-8 h-px w-full max-w-[520px] overflow-hidden bg-black/10"
+                variants={floatItemMotion}
+                style={{ transformOrigin: 'left center' }}
+              >
+                <div className="mx-auto h-full w-1/3 bg-[#1a2a3a] lg:mx-0" />
+              </motion.div>
+
+              <motion.p
+                className="mt-8 max-w-[42rem] text-base leading-8 text-slate-500 sm:text-lg"
+                variants={floatItemMotion}
+              >
+                上传 PDF、讲义、笔记与报告，立即获得可追问答案、来源页码与自动总结。
+              </motion.p>
+
+              <motion.div
+                className="mt-10 flex flex-col justify-center gap-4 sm:flex-row lg:justify-start"
+                variants={floatItemMotion}
+              >
+                <Button
+                  asChild
+                  className="group h-12 rounded-full bg-[#111111] px-7 text-white shadow-[0_14px_34px_rgba(15,23,42,0.12)] transition duration-300 hover:-translate-y-1 hover:bg-white hover:text-[#111111] hover:shadow-[inset_0_0_0_1px_rgba(17,17,17,0.18),0_22px_52px_rgba(15,23,42,0.14)]"
+                >
+                  <Link to="/workspace/chat?new=1" className="inline-flex items-center">
+                    开始使用
+                    <ArrowRight className="ml-2 h-4 w-4 transition duration-300 group-hover:translate-x-1" />
+                  </Link>
+                </Button>
+                <Button
+                  asChild
+                  variant="outline"
+                  className="h-12 rounded-full border-black/12 bg-white/80 px-7 text-[#111111] shadow-[0_12px_28px_rgba(15,23,42,0.05)] transition duration-300 hover:-translate-y-1 hover:border-[#111111] hover:bg-[#111111] hover:text-white hover:shadow-[0_22px_52px_rgba(15,23,42,0.12)]"
+                >
+                  <LandingLink href="#workspace">查看工作台</LandingLink>
+                </Button>
+              </motion.div>
+            </div>
+          </motion.div>
+        </section>
+
+        <section id="problem" className="relative -mt-1 overflow-hidden bg-[#f7f8fb] py-16 sm:py-20 lg:py-24">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_10%,rgba(255,255,255,0.72),transparent_30%),radial-gradient(circle_at_78%_36%,rgba(194,209,228,0.7),transparent_26%),linear-gradient(180deg,#f7f8fb_0%,#f7f8fb_18%,rgba(247,248,251,0)_56%)]" />
+          <div className="absolute inset-0 opacity-[0.32] [background-image:linear-gradient(rgba(100,116,139,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(100,116,139,0.08)_1px,transparent_1px)] [background-size:44px_44px] [mask-image:radial-gradient(circle_at_52%_46%,black,transparent_72%)]" />
+          <SectionAmbientMotion align="right" />
+          <div className="pointer-events-none absolute left-[8%] top-14 hidden text-[8rem] font-black uppercase leading-none tracking-[-0.08em] text-white/70 lg:block">
+            UNREAD
           </div>
-        </div>
-      </section>
+          <div className={cn(shellClassName, 'relative grid min-h-[560px] items-center gap-12 lg:grid-cols-[0.92fr_1.08fr]')}>
+            <ScrollReveal>
+              <SectionIntro
+                eyebrow="Act I / Problem"
+                title="资料可以存下来。"
+                description="但很难真正被追问、被消化、被复习。信息在堆积，理解却没有同步增长。"
+              />
+              <div className="mt-9 grid max-w-xl gap-3 sm:grid-cols-3">
+                {[
+                  ['17', '课程讲义'],
+                  ['42', '课堂笔记'],
+                  ['0', '可追问索引'],
+                ].map(([value, label], index) => (
+                  <ScrollReveal key={label} delay={0.12 + index * 0.1} className={cn('rounded-[22px] border border-[#e6eaf0] bg-white/82 p-4 shadow-[0_14px_36px_rgba(15,23,42,0.05)] backdrop-blur', floatingCardHoverClassName)}>
+                    <p className="text-3xl leading-none text-[#1a2a3a]" style={editorialSerifStyle}>{value}</p>
+                    <p className="mt-2 text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">{label}</p>
+                  </ScrollReveal>
+                ))}
+              </div>
+            </ScrollReveal>
+
+            <ScrollReveal
+              className={cn('relative mx-auto flex w-full max-w-[640px] justify-center lg:justify-end rounded-[38px]', floatingPreviewHoverClassName)}
+              delay={0.12}
+            >
+              <div className="relative h-[460px] w-full max-w-[650px]">
+                <div className="absolute left-8 right-10 top-[214px] h-px -rotate-[13deg] bg-gradient-to-r from-transparent via-[#9fb0c7] to-transparent" />
+                <div className="absolute left-[48%] top-[38%] h-24 w-24 rounded-full border border-dashed border-[#b8c5d8] bg-white/52 shadow-[0_18px_60px_rgba(15,23,42,0.08)] backdrop-blur">
+                  <div className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#1a2a3a]" />
+                </div>
+
+                {[
+                  { name: '课程讲义', meta: '17 份', className: 'left-0 top-16 rotate-[-5deg]' },
+                  { name: '课堂笔记', meta: '42 条', className: 'right-14 top-2 rotate-[6deg]' },
+                  { name: '论文摘录', meta: '未关联', className: 'right-0 bottom-16 rotate-[-3deg]', warning: true },
+                ].map((item) => (
+                  <div
+                    key={item.name}
+                    className={cn(
+                      'absolute w-[250px] rounded-[30px] border border-[#dbe3ee] bg-white/92 p-5 shadow-[0_28px_80px_rgba(15,23,42,0.1)] backdrop-blur',
+                      floatingCardHoverClassName,
+                      item.className,
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.26em] text-slate-400">Material</p>
+                      <span className={cn('rounded-full px-3 py-1 text-xs font-semibold', item.warning ? 'bg-[#fff7e8] text-amber-600' : 'bg-[#f0f4f9] text-[#1a2a3a]')}>
+                        {item.meta}
+                      </span>
+                    </div>
+                    <p className="mt-7 text-2xl leading-none text-[#111111]" style={editorialSerifStyle}>{item.name}</p>
+                    <div className="mt-6 space-y-2">
+                      <div className="h-2 rounded-full bg-[#e6eaf0]" />
+                      <div className="h-2 w-4/5 rounded-full bg-[#eef2f7]" />
+                    </div>
+                  </div>
+                ))}
+
+                <div className={cn('absolute left-20 bottom-5 w-[330px] rounded-[34px] border border-[#d6deea] bg-[#111318] p-6 text-white shadow-[0_30px_90px_rgba(15,23,42,0.18)]', floatingCardHoverClassName)}>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-white/45">Question Gap</p>
+                  <p className="mt-5 text-2xl leading-[1.15]" style={editorialSerifStyle}>
+                    没有索引，
+                    <br />
+                    资料就无法回答问题。
+                  </p>
+                  <div className="mt-6 flex items-center justify-between rounded-full bg-white/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white/72">
+                    <span>Missing Context</span>
+                    <span>0%</span>
+                  </div>
+                </div>
+                <div className="absolute bottom-4 right-2 h-36 w-36 rounded-full bg-[#b9c9dd] blur-3xl" />
+              </div>
+            </ScrollReveal>
+          </div>
+        </section>
+
+        <section id="solution" className="relative overflow-hidden bg-[#fcfcfd] py-16 sm:py-20 lg:py-24">
+          <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-[#f7f8fb] to-transparent" />
+          <div className="absolute -left-24 top-24 h-72 w-72 rounded-full bg-[#dbe6f3] blur-3xl" />
+          <SectionAmbientMotion align="left" />
+          <div className={cn(shellClassName, 'relative grid min-h-[640px] items-center gap-14 lg:grid-cols-[0.86fr_1.14fr]')}>
+            <ScrollReveal>
+              <SectionIntro
+                eyebrow="Act II / Solution"
+                title="每一份资料，都自带一个可追问的智能体。"
+                description="系统先读取原文片段，再组织回答；关键结论附带来源位置，追问时保留上下文。"
+              />
+            </ScrollReveal>
+
+            <ScrollReveal
+              className={cn('rounded-[32px] border border-[#e6eaf0] bg-white p-2.5 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur', floatingPreviewHoverClassName)}
+              delay={0.12}
+            >
+              <SolutionPreview />
+            </ScrollReveal>
+          </div>
+        </section>
+
+        <section id="features" className="relative overflow-hidden bg-[#f7f8fb] py-16 sm:py-20 lg:py-24">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_0%,rgba(255,255,255,0.9),transparent_24%),radial-gradient(circle_at_82%_60%,rgba(207,219,234,0.64),transparent_28%)]" />
+          <div className="absolute inset-0 opacity-[0.2] [background-image:linear-gradient(rgba(100,116,139,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(100,116,139,0.08)_1px,transparent_1px)] [background-size:48px_48px]" />
+          <SectionAmbientMotion align="right" />
+          <div className={cn(shellClassName, 'relative flex min-h-[640px] flex-col justify-center space-y-12')}>
+            <ScrollReveal>
+              <SectionIntro
+                eyebrow="Act III / Montage"
+                title="把资料变成可以连续操作的学习现场。"
+                description="不是只给一个答案，而是把上传、检索、追问和复习串成一个连续工作流。"
+              />
+            </ScrollReveal>
+
+            <div className={cn('grid gap-5 lg:grid-cols-[1.35fr_0.65fr]', floatingPreviewHoverClassName)}>
+              <ScrollReveal delay={0.1} className="relative overflow-hidden rounded-[34px] border border-[#dce4ee] bg-white/84 p-6 shadow-[0_26px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl">
+                <div className="absolute inset-x-10 top-1/2 h-px bg-gradient-to-r from-transparent via-[#9fb0c7] to-transparent" />
+                <div className="grid gap-4 lg:grid-cols-4">
+                  {[
+                    { title: '上传', text: 'PDF、讲义、笔记进入资料库。', icon: Upload },
+                    { title: '索引', text: '自动切片、抽取、建立检索上下文。', icon: BookOpen },
+                    { title: '追问', text: '围绕资料连续提问并保留来源。', icon: Search },
+                    { title: '复习', text: '沉淀重点、易混概念和复习建议。', icon: Sparkles },
+                  ].map((step, index) => {
+                    const Icon = step.icon
+
+                    return (
+                      <ScrollReveal
+                        key={step.title}
+                        delay={0.18 + index * 0.1}
+                        className={cn('group relative rounded-[28px] border border-[#e6eaf0] bg-[#f7f8fb]/92 p-5 shadow-[0_14px_34px_rgba(15,23,42,0.04)] backdrop-blur', floatingCardHoverClassName)}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400">0{index + 1}</span>
+                          <div className="flex h-11 w-11 items-center justify-center rounded-full border border-[#d6deea] bg-white text-[#1a2a3a] transition group-hover:bg-[#1a2a3a] group-hover:text-white">
+                            <Icon className="h-5 w-5" />
+                          </div>
+                        </div>
+                        <h3 className="mt-10 text-3xl leading-none text-[#111111]" style={editorialSerifStyle}>{step.title}</h3>
+                        <p className="mt-4 text-sm leading-7 text-slate-600">{step.text}</p>
+                      </ScrollReveal>
+                    )
+                  })}
+                </div>
+              </ScrollReveal>
+
+              <ScrollReveal delay={0.24} className={cn('rounded-[34px] border border-[#dce4ee] bg-[#111318] p-6 text-white shadow-[0_28px_86px_rgba(15,23,42,0.18)]', floatingCardHoverClassName)}>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-white/45">Workflow State</p>
+                <h3 className="mt-6 text-4xl leading-[0.98]" style={editorialSerifStyle}>
+                  一条链路，
+                  <br />
+                  串起所有学习动作。
+                </h3>
+                <div className="mt-8 space-y-3">
+                  {['资料进入索引', '答案绑定来源', '总结回到复习'].map((item, index) => (
+                    <div key={item} className="flex items-center justify-between rounded-2xl bg-white/10 px-4 py-3 text-sm text-white/72">
+                      <span>{item}</span>
+                      <span className="text-xs font-semibold uppercase tracking-[0.18em] text-white/42">0{index + 1}</span>
+                    </div>
+                  ))}
+                </div>
+              </ScrollReveal>
+            </div>
+          </div>
+        </section>
+
+        <section id="workspace" className="relative overflow-hidden bg-[#fcfcfd] py-16 sm:py-20 lg:py-24">
+          <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-[#f7f8fb] to-transparent" />
+          <SectionAmbientMotion align="center" />
+          <div className={cn(shellClassName, 'relative flex min-h-[640px] flex-col justify-center space-y-12')}>
+            <ScrollReveal>
+              <SectionIntro
+                eyebrow="Act IV / Workspace"
+                title="一个工作台，完成上传、追问与复习。"
+                description="全景视图里同时保留资料入口、来源片段和对话现场，让整个学习过程在一个地方闭环。"
+              />
+            </ScrollReveal>
+
+            <ScrollReveal
+              className={cn('relative rounded-[36px] border border-[#e6eaf0] bg-[#f7f8fb] p-4 shadow-[0_30px_90px_rgba(15,23,42,0.08)] sm:p-6', floatingPreviewHoverClassName)}
+              delay={0.12}
+            >
+              <div className="pointer-events-none absolute left-6 top-6 h-9 w-9 border-l border-t border-[#cbd5e1]" />
+              <div className="pointer-events-none absolute right-6 top-6 h-9 w-9 border-r border-t border-[#cbd5e1]" />
+              <div className="pointer-events-none absolute bottom-6 left-6 h-9 w-9 border-b border-l border-[#cbd5e1]" />
+              <div className="pointer-events-none absolute bottom-6 right-6 h-9 w-9 border-b border-r border-[#cbd5e1]" />
+
+              <div className="overflow-hidden rounded-[28px] border border-[#e6eaf0] bg-white">
+                <WorkspacePreview />
+              </div>
+
+              {workspaceCallouts.map((callout) => (
+                <motion.div
+                  key={callout.id}
+                  className="absolute hidden min-w-[150px] rounded-full border border-[#d6deea] bg-white/95 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#1a2a3a] shadow-[0_12px_28px_rgba(15,23,42,0.08)] lg:block"
+                  style={{ top: callout.top, left: callout.left }}
+                  variants={floatItemMotion}
+                >
+                  {callout.id} {callout.title}
+                </motion.div>
+              ))}
+            </ScrollReveal>
+          </div>
+        </section>
+
+        <section id="cta" className="relative overflow-hidden bg-[#f7f8fb] py-18 sm:py-20 lg:py-24">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_18%,rgba(255,255,255,0.95),transparent_30%),radial-gradient(circle_at_50%_70%,rgba(198,214,234,0.7),transparent_34%)]" />
+          <SectionAmbientMotion align="center" />
+          <div className={cn(shellClassName, 'relative flex min-h-[560px] items-center justify-center text-center')}>
+            <ScrollReveal>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.42em] text-slate-400">Final Frame</p>
+              <h2 className="mt-6 text-5xl leading-[0.98] text-[#111111] sm:text-6xl" style={editorialSerifStyle}>
+                开始构建
+                <br />
+                你的知识索引
+              </h2>
+              <div className="mx-auto mt-10 flex max-w-md flex-col gap-4 sm:flex-row sm:justify-center">
+                <Button asChild className="group h-12 rounded-full bg-[#111111] px-8 text-white hover:bg-white hover:text-[#111111] hover:shadow-[inset_0_0_0_1px_rgba(17,17,17,0.18)]">
+                  <Link to="/workspace/chat?new=1">
+                    开始使用
+                    <ArrowRight className="ml-2 h-4 w-4 transition group-hover:translate-x-1" />
+                  </Link>
+                </Button>
+                <Button asChild variant="outline" className="h-12 rounded-full border-black/12 bg-white px-8 text-[#111111] hover:border-[#111111]">
+                  <Link to="/login">进入登录</Link>
+                </Button>
+              </div>
+              <div className="mt-14 text-[11px] font-medium uppercase tracking-[0.3em] text-slate-400">
+                智学引擎 · Learning Assistant
+              </div>
+              <p className="mt-3 text-sm text-slate-500">资料驱动的 AI 学习工作台</p>
+            </ScrollReveal>
+          </div>
+        </section>
+      </main>
+
+      <SiteBeianFooter />
     </div>
   )
 }
 
-function PreviewFrame({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
+/**
+ * 方案章节继续使用浅色工作页语言，避免突然切入深色造成品牌断层。
+ * 内容重点强调 RAG 的检索、生成、来源回链三个步骤。
+ */
+function SolutionPreview() {
   return (
-    <div className="h-full p-3 sm:p-4">
-      <div className="preview-sheen flex h-full flex-col overflow-hidden rounded-[14px] border border-slate-200 bg-white shadow-[inset_0_1px_0_rgba(255,255,255,.8)]">
-        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3 sm:px-5">
-          <div className="flex items-center gap-2">
-            <span className="h-3 w-3 rounded-full bg-slate-300" />
-            <span className="h-3 w-3 rounded-full bg-slate-400" />
-            <span className="h-3 w-3 rounded-full bg-slate-500" />
+    <div className={cn('relative overflow-hidden rounded-[28px] border border-[#e3e6ea] bg-[#f7f8fb] p-3 shadow-[0_30px_90px_rgba(15,23,42,0.1)] sm:p-3.5', floatingPreviewHoverClassName)}>
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_18%,rgba(255,255,255,0.98),transparent_30%),radial-gradient(circle_at_82%_76%,rgba(17,17,17,0.055),transparent_34%),linear-gradient(135deg,#ffffff_0%,#f7f8fb_58%,#f0f2f5_100%)]" />
+      <div className="absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-black/14 to-transparent" />
+
+      <div className="relative z-10 rounded-[24px] border border-[#e3e6ea] bg-white/78 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] backdrop-blur-xl sm:p-5">
+        <ScrollReveal className="flex flex-wrap items-start justify-between gap-4 border-b border-[#e3e6ea] pb-4">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-slate-400">Focused Answer</p>
+            <h3 className="mt-3 text-2xl leading-none text-[#101722] sm:text-[1.7rem]" style={editorialSerifStyle}>
+              回答来自资料，而不是凭空生成
+            </h3>
           </div>
-          <div className="text-right">
-            <div className="text-sm font-black text-[#222833]">{title}</div>
-            <div className="hidden text-xs font-bold text-slate-500 sm:block">{desc}</div>
-          </div>
+          <span className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-semibold text-[#111111] shadow-[0_8px_18px_rgba(15,23,42,0.04)]">
+            RAG Flow
+          </span>
+        </ScrollReveal>
+
+        <div className="mt-5 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+          <ScrollReveal delay={0.1} className={cn('rounded-[24px] border border-[#e3e6ea] bg-white/88 p-4 shadow-[0_22px_58px_rgba(15,23,42,0.06)] sm:p-5', floatingCardHoverClassName)}>
+            <div className="rounded-[22px] bg-gradient-to-br from-[#f3f4f6] via-white to-[#eceff3] p-4">
+              <p className="text-sm leading-7 text-[#2f3742]">
+                监督学习和无监督学习的关键区别在于：前者依赖带标签样本来学习输入到输出的映射，而后者更关注数据结构、聚类关系和潜在分布。
+              </p>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              {['来源第 12 页', '来源第 19 页', '课堂笔记节选'].map((source) => (
+                <span key={source} className="rounded-full border border-black/10 bg-white px-3 py-1 text-xs font-semibold text-[#111111]">
+                  {source}
+                </span>
+              ))}
+            </div>
+
+            <div className="mt-5 rounded-[22px] border border-[#e3e6ea] bg-gradient-to-br from-white to-[#f3f4f6] p-4">
+              <p className="text-sm leading-7 text-slate-600">
+                继续追问时，系统会保持当前资料上下文，并优先检索已命中的原文片段。
+              </p>
+            </div>
+          </ScrollReveal>
+
+          <ScrollReveal delay={0.2} className={cn('rounded-[24px] border border-[#e3e6ea] bg-white/84 p-4 shadow-[0_22px_58px_rgba(15,23,42,0.06)] sm:p-5', floatingCardHoverClassName)}>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-slate-400">Indexed Fragments</p>
+            <div className="mt-4 space-y-3">
+              {[
+                ['Fragment 01', '标签数据用于建立可泛化的预测函数。'],
+                ['Fragment 02', '聚类方法用于发现样本之间的自然分组。'],
+                ['Fragment 03', '模型评估需要结合验证集与误差分析。'],
+              ].map(([title, text], index) => (
+                <div
+                  key={title}
+                  className={cn(
+                    'rounded-[20px] border border-[#e3e6ea] bg-gradient-to-br p-4 shadow-[0_12px_30px_rgba(15,23,42,0.045)]',
+                    index === 0 ? 'from-[#f8f9fb] to-white' : index === 1 ? 'from-[#f4f5f7] to-white' : 'from-[#f1f3f5] to-white',
+                    floatingCardHoverClassName,
+                  )}
+                >
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400">{title}</p>
+                  <p className="mt-3 text-sm leading-6 text-slate-600">{text}</p>
+                </div>
+              ))}
+            </div>
+          </ScrollReveal>
         </div>
-        {children}
       </div>
     </div>
   )
 }
 
-function ChatPreview() {
+function WorkspacePreview() {
   return (
-    <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[240px_1fr_270px]">
-      <aside className="hidden border-r border-slate-200 bg-[#222833] p-5 text-white lg:block">
-        <div className="mb-5 flex items-center gap-3">
-          <div className="grid h-10 w-10 place-items-center rounded-2xl bg-white/12">
-            <BrainCircuit className="h-5 w-5" />
+    <div className="grid min-h-[620px] gap-0 bg-[#fcfcfd] transition duration-500 hover:bg-white xl:grid-cols-[220px_1fr_280px]">
+      <aside className="border-b border-[#e6eaf0] bg-[#f7f8fb] p-5 xl:border-b-0 xl:border-r">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[#111318] text-white">
+            <BookOpen className="h-5 w-5" />
           </div>
           <div>
-            <p className="text-sm font-black">智学引擎</p>
-            <p className="text-xs text-slate-300">资料问答空间</p>
+            <p className="text-sm font-semibold text-[#111111]">学习工作台</p>
+            <p className="text-xs text-slate-500">Materials · Chat · Summary</p>
           </div>
         </div>
-        <div className="space-y-2">
-          {navItems.map((item) => {
-            const Icon = item.icon
-            return (
-              <div key={item.label} className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-bold ${item.active ? 'selected-breathe bg-white text-[#222833]' : 'text-slate-300'}`}>
-                <Icon className="h-4 w-4" />
-                <span>{item.label}</span>
-              </div>
-            )
-          })}
+
+        <div className="mt-8 space-y-2">
+          {[
+            { label: '资料管理', active: false },
+            { label: '智能问答', active: true },
+            { label: '边读边问', active: false },
+            { label: '知识总结', active: false },
+          ].map((item) => (
+            <div
+              key={item.label}
+              className={cn(
+                'rounded-2xl px-4 py-3 text-sm',
+                item.active ? 'bg-[#eceef2] font-medium text-[#202124]' : 'text-[#667085]'
+              )}
+            >
+              {item.label}
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-8 space-y-3">
+          {[
+            ['机器学习导论.pdf', '已解析'],
+            ['课堂笔记.md', '可追问'],
+            ['论文摘录.docx', '处理中'],
+          ].map(([name, status]) => (
+            <div key={name} className={cn('rounded-[22px] border border-[#e6eaf0] bg-white p-4 shadow-[0_8px_22px_rgba(15,23,42,0.04)]', floatingCardHoverClassName)}>
+              <p className="truncate text-sm font-semibold text-[#111111]">{name}</p>
+              <p className="mt-2 text-xs text-slate-400">{status}</p>
+            </div>
+          ))}
         </div>
       </aside>
 
-      <section className="flex min-w-0 flex-col bg-[#f8fafc] p-4 sm:p-5">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <section className="border-b border-[#e6eaf0] bg-white p-5 sm:p-6 xl:border-b-0 xl:border-r">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h2 className="text-xl font-black text-[#222833] sm:text-2xl">智能问答</h2>
-            <p className="text-sm font-bold text-slate-500">当前资料：机器学习导论.pdf</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400">Knowledge Workspace</p>
+            <h3 className="mt-3 text-3xl leading-none text-[#111111]" style={editorialSerifStyle}>
+              问答与复习并行展开
+            </h3>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <div className="rounded-full bg-white p-1 text-xs font-black text-slate-500 shadow-sm">
-              <span className="px-3 py-1">智能</span>
-              <span className="selected-breathe inline-flex rounded-full bg-[#222833] px-3 py-1 text-white">资料</span>
-            </div>
-            <span className="status-line rounded-full bg-white px-4 py-2 text-xs font-black text-slate-600 shadow-sm">3 个来源已命中</span>
+          <div className="rounded-full border border-[#d6deea] bg-[#f7f8fb] px-4 py-2 text-xs font-semibold text-[#667085]">
+            当前模式 · 资料问答
           </div>
         </div>
 
-        <div className="space-y-3">
-          <div className="live-card ml-auto max-w-[78%] rounded-2xl bg-[#222833] px-4 py-3 text-sm font-bold leading-6 text-white">
-            监督学习和无监督学习的核心区别是什么？
+        <div className="mt-8 grid gap-4 lg:grid-cols-[1fr_1fr]">
+          <div className={cn('rounded-[24px] border border-[#e6eaf0] bg-[#f7f8fb] p-5', floatingCardHoverClassName)}>
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-semibold text-[#111111]">提问记录</p>
+              <span className="text-xs text-slate-400">Thread 01</span>
+            </div>
+            <div className="mt-5 space-y-3">
+              <div className={cn('ml-auto max-w-[86%] rounded-[22px] border border-transparent bg-[#111318] px-4 py-3 text-sm leading-7 text-white', floatingCardHoverClassName)}>
+                模型容量过高时为什么更容易过拟合？
+              </div>
+              <div className={cn('max-w-[90%] rounded-[22px] border border-[#e6eaf0] bg-white px-4 py-3 text-sm leading-7 text-slate-600', floatingCardHoverClassName)}>
+                因为模型表达能力变强后，既能学习真实规律，也更容易记住训练集中的噪声与偶然模式。
+              </div>
+              <div className={cn('max-w-[84%] rounded-[22px] border border-[#e6eaf0] bg-white px-4 py-3 text-sm leading-7 text-slate-500', floatingCardHoverClassName)}>
+                可继续追问正则化、验证集或偏差-方差权衡。
+              </div>
+            </div>
           </div>
-          <div className="qa-sweep max-w-[88%] rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600 shadow-sm">
-            监督学习依赖带标签样本，目标是学习输入到输出的映射；无监督学习没有明确标签，更关注数据结构、聚类关系和潜在分布。
-            <div className="mt-3 flex flex-wrap gap-2">
-              {['第 12 页', '第 19 页', '课堂笔记'].map((source) => (
-                <span key={source} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-600">
-                  来源 {source}
-                </span>
+
+          <div className={cn('rounded-[24px] border border-[#e6eaf0] bg-[#f7f8fb] p-5', floatingCardHoverClassName)}>
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-semibold text-[#111111]">自动总结</p>
+              <span className="text-xs text-slate-400">Summary</span>
+            </div>
+            <div className="mt-5 space-y-3">
+              {[
+                ['重点', '模型容量提升会增加表达能力，也提高记忆噪声的风险。'],
+                ['易混概念', '过拟合不是“训练效果差”，而是“训练好但泛化差”。'],
+                ['复习建议', '把正则化、验证集和偏差-方差一起复习。'],
+              ].map(([title, text]) => (
+                <div key={title} className={cn('rounded-[20px] border border-[#e6eaf0] bg-white p-4 shadow-[0_8px_20px_rgba(15,23,42,0.04)]', floatingCardHoverClassName)}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">{title}</p>
+                  <p className="mt-3 text-sm leading-6 text-slate-600">{text}</p>
+                </div>
               ))}
             </div>
           </div>
-          <div className="max-w-[84%] rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600 shadow-sm">
-            可以继续追问模型评估、过拟合或正则化之间的关系。
-          </div>
         </div>
 
-        <div className="mt-auto pt-4">
-          <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="h-9 flex-1 rounded-xl bg-slate-100 px-4 py-2 text-sm font-bold text-slate-400">
-                继续针对这份资料提问...
-              </div>
-              <div className="grid h-9 w-9 place-items-center rounded-xl bg-[#222833] text-white">
-                <ArrowRight className="h-4 w-4" />
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <aside className="hidden border-l border-slate-200 bg-white p-5 lg:block">
-        <h3 className="text-sm font-black text-[#222833]">来源片段</h3>
-        <div className="mt-4 space-y-3">
-          {[
-            ['机器学习导论.pdf', '标签数据用于建立可泛化的预测函数。', '92%'],
-            ['课堂笔记.md', '聚类方法常用于发现样本之间的自然分组。', '86%'],
-            ['复习提纲.docx', '模型效果需要结合验证集和误差分析判断。', '79%'],
-          ].map(([name, text, score], index) => (
-            <div key={name} className="live-card rounded-xl border border-slate-200 bg-[#f8fafc] p-3" style={{ animationDelay: `${index * 140}ms` }}>
-              <div className="flex items-center justify-between gap-2">
-                <p className="truncate text-xs font-black text-[#222833]">{name}</p>
-                <span className="text-xs font-black text-slate-500">{score}</span>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-slate-500">{text}</p>
-            </div>
-          ))}
-        </div>
-      </aside>
-    </div>
-  )
-}
-
-function MaterialsPreview() {
-  const rows = [
-    ['深度学习笔记.pdf', '已解析', 94],
-    ['数据结构复习.docx', '切片完成', 82],
-    ['论文阅读记录.md', '索引中', 68],
-  ]
-
-  return (
-    <div className="grid min-h-0 flex-1 gap-4 bg-[#f8fafc] p-4 sm:p-5 lg:grid-cols-[.96fr_1.04fr]">
-      <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-xl font-black text-[#222833] sm:text-2xl">资料解析中心</h2>
-            <p className="mt-1 text-sm font-bold text-slate-500">从上传到检索索引，状态透明可见</p>
-          </div>
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-[#222833] text-white">
-            <Layers3 className="h-5 w-5" />
-          </div>
-        </div>
-
-        <div className="live-card mt-5 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5">
-          <div className="flex items-center gap-4">
-            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-white text-[#222833] shadow-sm">
-              <Upload className="h-5 w-5" />
-            </div>
+        <div className={cn('mt-4 rounded-[24px] border border-[#d6deea] bg-[#fcfcfd] p-5', floatingCardHoverClassName)}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-black text-[#222833]">拖入资料或点击上传</p>
-              <p className="mt-1 text-xs font-bold text-slate-500">支持 PDF、Word、Markdown、课堂笔记</p>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400">Context Maintained</p>
+              <p className="mt-3 text-sm leading-7 text-slate-500">同一份资料的提问、命中片段与总结结果，会在一个工作台内持续关联。</p>
             </div>
+            <Button className="h-10 rounded-full bg-[#111318] px-5 text-white hover:bg-[#1f2937]">继续追问</Button>
           </div>
-        </div>
-
-        <div className="mt-5 space-y-3">
-          {rows.map(([name, status, percent], index) => (
-            <div key={name} className={`live-card rounded-xl border border-slate-200 bg-white p-4 shadow-sm ${index === 0 ? 'selected-breathe' : ''}`} style={{ animationDelay: `${index * 120}ms` }}>
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-black text-[#222833]">{name}</p>
-                  <p className="mt-1 text-xs font-bold text-slate-500">{status}</p>
-                </div>
-                <span className="text-xs font-black text-slate-500">{percent}%</span>
-              </div>
-              <div className="relative mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
-                <div className="meter-bar relative h-full overflow-hidden rounded-full bg-slate-700" style={{ width: `${percent}%` }} />
-              </div>
-            </div>
-          ))}
         </div>
       </section>
 
-      <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="mb-5 flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-black text-[#222833]">解析管线</h3>
-            <p className="mt-1 text-sm font-bold text-slate-500">切片、向量化、索引和问答上下文</p>
+      <aside className="bg-[#f7f8fb] p-5">
+        <div className={cn('rounded-[24px] border border-[#e6eaf0] bg-white p-4 shadow-[0_12px_30px_rgba(15,23,42,0.04)]', floatingCardHoverClassName)}>
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-semibold text-[#111111]">来源片段</p>
+            <span className="text-xs text-slate-400">Live</span>
           </div>
-          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-600">实时</span>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          {[
-            ['文本提取', '32 页内容已读取'],
-            ['语义切片', '156 个片段'],
-            ['向量索引', '检索可用'],
-            ['来源回链', '答案可追溯'],
-          ].map(([title, text], index) => (
-            <div key={title} className="live-card rounded-xl bg-[#f8fafc] p-4" style={{ animationDelay: `${index * 110}ms` }}>
-              <div className="grid h-8 w-8 place-items-center rounded-full bg-white text-xs font-black text-[#222833] shadow-sm">
-                {index + 1}
+          <div className="mt-4 space-y-3">
+            {[
+              ['第 12 页', '标签数据用于建立可泛化的预测函数。'],
+              ['第 19 页', '聚类方法常用于发现自然分组。'],
+              ['课堂笔记', '验证集帮助判断模型是否过拟合。'],
+            ].map(([page, text]) => (
+              <div key={page} className={cn('rounded-[18px] border border-[#e6eaf0] bg-[#f7f8fb] p-4', floatingCardHoverClassName)}>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#1a2a3a]">{page}</p>
+                <p className="mt-3 text-sm leading-6 text-slate-600">{text}</p>
               </div>
-              <h4 className="mt-4 text-sm font-black text-[#222833]">{title}</h4>
-              <p className="mt-2 text-xs leading-5 text-slate-500">{text}</p>
-            </div>
-          ))}
-        </div>
-        <div className="mt-4 rounded-xl bg-[#222833] p-4 text-white">
-          <div className="mb-3 flex items-center gap-2">
-            {[0, 1, 2, 3].map((item) => (
-              <span
-                key={item}
-                className="retrieval-node h-2 w-2 rounded-full bg-white/20"
-                style={{ animationDelay: `${item * 180}ms` }}
-              />
             ))}
           </div>
-          <p className="text-sm font-black">下一步建议</p>
-          <p className="mt-2 text-sm leading-6 text-slate-300">围绕“泛化能力”和“模型评估”发起追问，系统会优先检索刚解析完成的资料。</p>
         </div>
-      </section>
-    </div>
-  )
-}
 
-function SummaryPreview() {
-  return (
-    <div className="grid min-h-0 flex-1 gap-4 bg-[#f8fafc] p-4 sm:p-5 lg:grid-cols-[0.92fr_1.08fr]">
-      <aside className="rounded-xl bg-[#222833] p-5 text-white">
-        <p className="text-sm font-black text-slate-300">知识总结看板</p>
-        <h2 className="mt-4 text-2xl font-black leading-tight">从长资料里生成可复习的结构</h2>
-        {['重点结论', '易混概念', '复习建议'].map((item, index) => (
-          <div key={item} className="live-card mt-4 rounded-xl bg-white/10 p-4" style={{ animationDelay: `${index * 130}ms` }}>
-            <div className="flex items-center justify-between text-sm font-black">
-              <span>{item}</span>
-              <span className="text-slate-300">0{index + 1}</span>
-            </div>
-            <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/15">
-              <div className="h-full rounded-full bg-white/70" style={{ width: `${82 - index * 12}%` }} />
-            </div>
+        <div className={cn('mt-4 rounded-[24px] border border-[#e6eaf0] bg-white p-4 shadow-[0_12px_30px_rgba(15,23,42,0.04)]', floatingCardHoverClassName)}>
+          <p className="text-sm font-semibold text-[#111111]">资料状态</p>
+          <div className="mt-4 space-y-4">
+            {[
+              ['文本抽取', '完成'],
+              ['切片与索引', '完成'],
+              ['来源回链', '可用'],
+            ].map(([label, status]) => (
+              <div key={label} className="flex items-center justify-between text-sm">
+                <span className="text-slate-500">{label}</span>
+                <span className="font-semibold text-[#111111]">{status}</span>
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
       </aside>
-
-      <section className="rounded-xl border border-slate-200 bg-white p-5">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-xl font-black text-[#222833] sm:text-2xl">复习路径</h2>
-            <p className="text-sm font-bold text-slate-500">按理解、对比、巩固三步生成</p>
-          </div>
-          <span className="rounded-full bg-slate-100 px-4 py-2 text-sm font-black text-slate-600">自动更新</span>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-3">
-          {['理解', '对比', '巩固'].map((item, index) => (
-            <div key={item} className="live-card rounded-xl border border-slate-200 bg-[#f8fafc] p-5 shadow-sm" style={{ animationDelay: `${index * 120}ms` }}>
-              <div className="grid h-10 w-10 place-items-center rounded-full bg-white text-sm font-black shadow-sm">{index + 1}</div>
-              <h3 className="mt-5 text-lg font-black text-[#222833]">{item}</h3>
-              <p className="mt-2 text-sm leading-6 text-slate-500">
-                {index === 0 ? '先读定义和结论' : index === 1 ? '区分相近概念边界' : '用追问检查薄弱点'}
-              </p>
-            </div>
-          ))}
-        </div>
-        <div className="mt-4 rounded-xl bg-[#f8fafc] p-4 shadow-sm">
-          <h3 className="text-lg font-black text-[#222833]">自动总结摘录</h3>
-          <div className="mt-3 space-y-3 text-sm font-bold text-slate-600">
-            <p className="rounded-lg bg-white p-3">模型容量过高时更容易过拟合，需要正则化或更多数据。</p>
-            <p className="rounded-lg bg-white p-3">监督学习关注输入输出映射，无监督学习关注数据结构。</p>
-          </div>
-        </div>
-      </section>
     </div>
   )
 }
