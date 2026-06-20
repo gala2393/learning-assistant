@@ -18,7 +18,7 @@
  * 5. 支持浅色/深色主题切换
  */
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Button } from '@/components/ui/button'
@@ -82,8 +82,6 @@ export function AppShell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   // 个人资料弹窗的开关状态
   const [profileOpen, setProfileOpen] = useState(false)
-  // 路由模块切换时展示一层短暂的浅色光幕，让“图片/页面”切换更有进退场感。
-  const [routeTransitionVisible, setRouteTransitionVisible] = useState(false)
   // 聊天和阅读器都是高频交互页面，需要自己管理内部滚动，外层不能再加 padding 和滚动条。
   const isImmersiveWorkspace = location.pathname === '/workspace/chat' || location.pathname === '/workspace/reader'
   // 路由切换动画使用完整 URL 作为 key，确保同一路由下切换查询参数也能触发进退场。
@@ -110,16 +108,6 @@ export function AppShell() {
     localStorage.setItem('learning-assistant.theme', theme)
   }
 
-  /**
-   * 每次工作区路由变化时触发短暂光幕。
-   * 这个效果和 Outlet 自身的淡入淡出叠加，模拟“旧模块退场、光幕扫过、新模块入场”的切换节奏。
-   */
-  useEffect(() => {
-    setRouteTransitionVisible(true)
-    const timer = window.setTimeout(() => setRouteTransitionVisible(false), 520)
-    return () => window.clearTimeout(timer)
-  }, [routeAnimationKey])
-
   return (
     <div className="flex h-[100dvh] overflow-hidden bg-[#f7f8fb] text-[#202124] dark:bg-[#111318] dark:text-slate-100">
       {/* 桌面端左侧导航栏（移动端隐藏） */}
@@ -133,35 +121,15 @@ export function AppShell() {
         <TopBar onOpenMobileMenu={() => setMobileMenuOpen(true)} />
         {/* 主内容：聊天页面不使用 padding 和滚动，其他页面使用 */}
         <main className={cn('relative', isImmersiveWorkspace ? 'min-h-0 flex-1 overflow-hidden pb-16 md:pb-0' : 'min-h-0 flex-1 overflow-y-auto p-3 pb-20 md:p-6 md:pb-6')}>
-          <AnimatePresence>
-            {routeTransitionVisible ? (
-              <motion.div
-                key="workspace-route-transition"
-                className="pointer-events-none absolute inset-0 z-30 bg-[radial-gradient(circle_at_50%_42%,rgba(255,255,255,0.92),rgba(232,238,247,0.72)_42%,rgba(252,252,253,0)_74%)] backdrop-blur-[4px]"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
-              >
-                <motion.div
-                  className="absolute left-1/2 top-1/2 h-px w-[46%] -translate-x-1/2 -translate-y-1/2 bg-gradient-to-r from-transparent via-[#9fb0c7]/80 to-transparent"
-                  initial={{ scaleX: 0.2, opacity: 0 }}
-                  animate={{ scaleX: 1, opacity: 0.82 }}
-                  exit={{ scaleX: 1.2, opacity: 0 }}
-                  transition={{ duration: 0.42, ease: [0.16, 1, 0.3, 1] }}
-                />
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
           {/* 子路由内容渲染点。AnimatePresence 让侧栏切换模块时，旧页面先淡出，新页面再浮入。 */}
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
               key={routeAnimationKey}
               className={isImmersiveWorkspace ? 'h-full min-h-0' : 'min-h-full'}
-              initial={{ opacity: 0, y: 24, scale: 0.988, filter: 'blur(14px)' }}
+              initial={{ opacity: 0, y: 18, scale: 0.992, filter: 'blur(10px)' }}
               animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
-              exit={{ opacity: 0, y: -18, scale: 0.988, filter: 'blur(14px)' }}
-              transition={{ duration: 0.48, ease: [0.16, 1, 0.3, 1] }}
+              exit={{ opacity: 0, y: -12, scale: 0.994, filter: 'blur(8px)' }}
+              transition={{ duration: 0.56, ease: [0.16, 1, 0.3, 1] }}
             >
               <Outlet />
             </motion.div>

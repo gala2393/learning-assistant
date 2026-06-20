@@ -26,6 +26,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import {
   BookOpen,
   ChevronLeft,
@@ -89,6 +90,7 @@ const iconMap: Record<string, React.ElementType> = {
 
 const READER_CONTEXT_STORAGE_KEY = 'learning-assistant.reader.current-context'
 const READER_LAST_ROUTE_STORAGE_KEY = 'learning-assistant.reader.last-route'
+const sidebarActiveLayoutId = 'sidebar-active-navigation-pill'
 
 function restoreReaderPath(path: string) {
   if (typeof window === 'undefined' || path !== '/workspace/reader') return path
@@ -370,25 +372,60 @@ export function Sidebar() {
             const Icon = iconMap[section.icon] || FileText
             return (
               <li key={section.path}>
-                <button
+                <motion.button
                   onClick={() => {
                     rememberReaderRoute(location.pathname, location.search)
                     navigate(restoreReaderPath(section.path))
                   }}
                   className={cn(
-                    'flex w-full items-center rounded-lg text-sm font-medium transition-colors',
+                    'group relative flex w-full items-center overflow-hidden rounded-2xl text-sm font-medium outline-none transition-colors duration-300 focus-visible:ring-2 focus-visible:ring-[#111318]/15 dark:focus-visible:ring-white/20',
                     collapsed ? 'h-10 justify-center px-0' : 'gap-3 px-3 py-2.5',
                     isActive
-                      ? 'bg-[#eceef2] text-[#202124] dark:bg-white/10 dark:text-white'
-                      : 'text-[#5b6270] hover:bg-[#f0f2f5] dark:text-slate-300 dark:hover:bg-white/[0.08]',
+                      ? 'text-[#111318] dark:text-white'
+                      : 'text-[#626a76] hover:bg-white/55 hover:text-[#111318] dark:text-slate-300 dark:hover:bg-white/[0.07] dark:hover:text-white',
                   )}
+                  whileHover={{ x: collapsed ? 0 : 2 }}
+                  whileTap={{ scale: 0.985 }}
+                  transition={{ type: 'spring', stiffness: 420, damping: 34 }}
                   // 折叠状态下用 title 属性提示菜单名称
                   title={collapsed ? section.label : undefined}
                 >
-                  <Icon className="h-4 w-4" />
+                  {isActive && (
+                    <motion.span
+                      layoutId={sidebarActiveLayoutId}
+                      className="absolute inset-0 rounded-2xl border border-white/85 bg-white shadow-[0_12px_28px_rgba(15,23,42,0.10),inset_0_1px_0_rgba(255,255,255,0.90)] dark:border-white/10 dark:bg-white/[0.12] dark:shadow-[0_12px_28px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.10)]"
+                      transition={{ type: 'spring', stiffness: 500, damping: 38, mass: 0.72 }}
+                    />
+                  )}
+                  <motion.span
+                    className={cn(
+                      'relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl transition-colors duration-300',
+                      isActive ? 'bg-[#111318] text-white shadow-[0_8px_18px_rgba(17,19,24,0.18)] dark:bg-white dark:text-[#111318]' : 'text-[#7b838f] group-hover:text-[#111318] dark:text-slate-400 dark:group-hover:text-white',
+                    )}
+                    animate={{ scale: isActive ? 1.03 : 1 }}
+                    transition={{ type: 'spring', stiffness: 420, damping: 28 }}
+                  >
+                    <Icon className="h-4 w-4" />
+                  </motion.span>
                   {/* 展开状态下显示文字标签 */}
-                  {!collapsed && <span>{section.label}</span>}
-                </button>
+                  {!collapsed && (
+                    <motion.span
+                      className="relative z-10 truncate"
+                      animate={{ opacity: isActive ? 1 : 0.82, x: isActive ? 1 : 0 }}
+                      transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+                    >
+                      {section.label}
+                    </motion.span>
+                  )}
+                  {!collapsed && isActive && (
+                    <motion.span
+                      className="relative z-10 ml-auto h-1.5 w-1.5 rounded-full bg-[#111318] dark:bg-white"
+                      initial={{ scale: 0, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 0.92 }}
+                      transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                    />
+                  )}
+                </motion.button>
               </li>
             )
           })}
