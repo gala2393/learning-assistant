@@ -55,6 +55,31 @@ class RagQueryIntentServiceTest {
     }
 
     @Test
+    void trimsTrailingChineseCopulaFromFieldLookupTerms() {
+        List<String> terms = service.significantQueryTerms("项目名称是");
+
+        assertThat(terms).containsExactly("项目名称");
+        assertThat(service.queryTermCoverage("项目名称 基于大模型与 RAG 的课程学习助手设计与实现", terms)).isEqualTo(1.0);
+    }
+
+    @Test
+    void trimsTrailingChineseListQuestionFromFieldLookupTerms() {
+        List<String> terms = service.significantQueryTerms("技术栈有哪些");
+
+        assertThat(terms).containsExactly("技术栈");
+        assertThat(service.queryTermCoverage("技术栈 后端 Spring Boot 3.5 Java 21", terms)).isEqualTo(1.0);
+    }
+
+    @Test
+    void extractsListFieldLookupAsKeywordQuery() {
+        RagQueryIntentService.KeywordQuery query = service.extractKeywordQuery("技术栈有哪些");
+
+        assertThat(query).isNotNull();
+        assertThat(query.intent()).isEqualTo(RagQueryIntentService.KeywordIntent.OCCURRENCE);
+        assertThat(query.terms()).containsExactly("技术栈");
+    }
+
+    @Test
     void scoresKeywordTextByIntentSignals() {
         List<String> terms = List.of(service.normalizeForTermMatch("索引"));
 

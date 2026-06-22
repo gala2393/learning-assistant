@@ -1548,6 +1548,9 @@ public class RagService {
         if (generalChat || selectedChunks == null || selectedChunks.isEmpty() || isCasualQuestion(question)) {
             return EvidenceStatus.notApplicable();
         }
+        if (isMaterialOverviewQuestion(question)) {
+            return EvidenceStatus.notApplicable();
+        }
         List<String> queryTerms = significantQueryTerms(question);
         double topScore = selectedChunks.stream()
             .mapToDouble(ScoredChunk::score)
@@ -1560,9 +1563,7 @@ public class RagService {
                 .mapToDouble(chunk -> queryTermCoverage(retrievalText(chunk.chunk()), queryTerms))
                 .max()
                 .orElse(0.0);
-        boolean weakScore = topScore < 0.40;
-        boolean weakTerms = !queryTerms.isEmpty() && termCoverage < 0.34;
-        return new EvidenceStatus(weakScore || weakTerms, topScore, termCoverage, queryTerms);
+        return new EvidenceStatus(false, topScore, termCoverage, queryTerms);
     }
 
     /**
@@ -4657,6 +4658,10 @@ public class RagService {
         if (!pairedTermsExcerpt.isBlank()) {
             return pairedTermsExcerpt;
         }
+        String fieldHeadingExcerpt = fieldHeadingExcerpt(normalized, lower, chunk.highlightTerms());
+        if (!fieldHeadingExcerpt.isBlank()) {
+            return fieldHeadingExcerpt;
+        }
         int bestStart = -1;
         int bestEnd = -1;
         int bestScore = -1;
@@ -4868,6 +4873,36 @@ public class RagService {
             rightIndex = lower.indexOf(rightTerm, rightIndex + rightTerm.length());
         }
         return "";
+    }
+
+    private String fieldHeadingExcerpt(String normalized, String lower, List<String> highlightTerms) {
+        for (String term : highlightTerms) {
+            if (term == null || term.isBlank()) {
+                continue;
+            }
+            String normalizedTerm = term.toLowerCase(Locale.ROOT);
+            if (!looksLikeChineseFieldHeading(normalizedTerm)) {
+                continue;
+            }
+            int index = lower.indexOf(normalizedTerm);
+            if (index >= 0) {
+                return forwardExcerpt(normalized, index, 260);
+            }
+        }
+        return "";
+    }
+
+    private boolean looksLikeChineseFieldHeading(String term) {
+        return term.length() >= 2
+            && term.length() <= 12
+            && Pattern.compile("[\\u4e00-\\u9fa5]").matcher(term).find()
+            && !term.matches(".*(?:是什么|有哪些|有什么|介绍|说明|总结|概括).*");
+    }
+
+    private String forwardExcerpt(String normalized, int anchorIndex, int windowChars) {
+        int start = Math.max(0, anchorIndex);
+        int end = Math.min(normalized.length(), start + windowChars);
+        return (start > 0 ? "..." : "") + normalized.substring(start, end) + (end < normalized.length() ? "..." : "");
     }
 
     private int countTermsInExcerpt(String lowerExcerpt, List<String> terms) {

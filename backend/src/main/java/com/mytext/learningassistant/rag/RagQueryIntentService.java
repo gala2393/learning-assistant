@@ -79,6 +79,10 @@ public class RagQueryIntentService {
         if (occurrence != null) {
             return occurrence;
         }
+        KeywordQuery listField = extractListFieldQuery(trimmed);
+        if (listField != null) {
+            return listField;
+        }
         KeywordQuery function = extractFunctionQuery(trimmed);
         if (function != null) {
             return function;
@@ -204,7 +208,8 @@ public class RagQueryIntentService {
             .replaceAll("(?i)^(the|a|an|this|current|material|document)\\s+", "")
             .replaceAll("^(资料里的|文中的|课件里的|书中的|这个|该|所谓)\\s*", "")
             .replaceAll("(?i)\\s+(definition|meaning|concept|role|function|purpose|use)$", "")
-            .replaceAll("\\s*(是什么|是啥|的定义|的含义|的概念|的作用|的用途|的区别|的关系)$", "")
+            .replaceAll("\\s*(是什么|是啥|有哪些|有什么|都有啥|都有哪(?:些|几种)|包括哪些|包含哪些|列一下|列出|的定义|的含义|的概念|的作用|的用途|的区别|的关系)$", "")
+            .replaceAll("\\s*(?:是|为|叫|叫做)$", "")
             .replaceAll("[?.!,;:]+$", "")
             .replaceAll("[？！。，；：]+$", "")
             .trim();
@@ -272,6 +277,14 @@ public class RagQueryIntentService {
         Matcher appear = Pattern.compile("(?i)where\\s+does\\s+(.{2,80}?)\\s+appear").matcher(question);
         if (appear.find()) {
             return keywordQuery(KeywordIntent.OCCURRENCE, appear.group(1));
+        }
+        return null;
+    }
+
+    private KeywordQuery extractListFieldQuery(String question) {
+        Matcher listQuestion = Pattern.compile("(.{2,80}?)\\s*(?:有哪些|有什么|都有啥|都有哪(?:些|几种)|包括哪些|包含哪些|列一下|列出)(?:[\\uff1f?\\u3002]|$)").matcher(question);
+        if (listQuestion.find()) {
+            return keywordQuery(KeywordIntent.OCCURRENCE, listQuestion.group(1));
         }
         return null;
     }

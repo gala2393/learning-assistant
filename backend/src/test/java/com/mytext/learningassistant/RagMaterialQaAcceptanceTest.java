@@ -141,6 +141,31 @@ class RagMaterialQaAcceptanceTest {
         assertAnswerContains(overviewAnswer, "MySQL");
         assertFirstSourceExcerptContains(overviewAnswer, "database fundamentals");
 
+        Long markdownOverviewMaterialId = uploadTextMaterial(
+            token,
+            "\u9879\u76ee\u901f\u8bb0.md",
+            "\u9879\u76ee\u901f\u8bb0\n\n\u9879\u76ee\u540d\u79f0\n\u57fa\u4e8e\u5927\u6a21\u578b\u4e0e RAG \u7684\u8bfe\u7a0b\u5b66\u4e60\u52a9\u624b\u8bbe\u8ba1\u4e0e\u5b9e\u73b0\n\n\u4e00\u53e5\u8bdd\u8bf4\u660e\n\u628a\u8bfe\u7a0b\u8d44\u6599\u4e0a\u4f20\u5230\u7cfb\u7edf\u540e\uff0c\u540e\u7aef\u89e3\u6790\u5e76\u5207\u7247\u5165\u5e93\uff0c\u7528\u6237\u53ef\u4ee5\u56f4\u7ed5\u8d44\u6599\u8fdb\u884c\u667a\u80fd\u95ee\u7b54\u3001\u67e5\u770b\u6765\u6e90\u3001\u751f\u6210\u603b\u7ed3\u3002\n\n\u5f53\u524d\u529f\u80fd\n\u666e\u901a\u7528\u6237\uff1a\u6ce8\u518c\u767b\u5f55\u3001\u8d44\u6599\u4e0a\u4f20\u3001\u7f51\u9875\u5bfc\u5165\u3001\u8d44\u6599\u5217\u8868\u3001\u9605\u8bfb\u5668\u3001\u8d44\u6599\u95ee\u7b54\u3001\u6765\u6e90\u5f15\u7528\u3001\u95ee\u7b54\u5386\u53f2\u3001\u6536\u85cf\u590d\u4e60\u3001\u77e5\u8bc6\u603b\u7ed3\u3002\n\u7ba1\u7406\u5458\uff1a\u7edf\u8ba1\u770b\u677f\u3001\u7528\u6237\u641c\u7d22\u5206\u9875\u3001\u8d44\u6599\u641c\u7d22\u5206\u9875\u3001\u65e5\u5fd7\u641c\u7d22\u5206\u9875\u3001\u89d2\u8272\u6743\u9650\u4fdd\u62a4\u3002\n\n\u6280\u672f\u6808\n- \u540e\u7aef\uff1aSpring Boot 3.5\u3001Java 21+\u3001Spring Data JPA\u3001MySQL\u3001H2 \u6d4b\u8bd5\u5e93\u3002\n- \u4e3b\u524d\u7aef\uff1aReact 18\u3001Vite\u3001TypeScript\u3001Tailwind CSS\u3001React Query\u3001Radix UI\u3002\n- AI/RAG\uff1aBM25 \u68c0\u7d22\u3001OpenAI-compatible Chat Completions\u3001\u53ef\u9009\u6d41\u5f0f\u8f93\u51fa\u3001\u53ef\u9009\u56fe\u7247 OCR\u3002"
+        );
+
+        JsonNode markdownOverviewAnswer = chat(token, "\u8fd9\u662f\u4ec0\u4e48\u6587\u4ef6", markdownOverviewMaterialId, null);
+        printCase("markdown overview", markdownOverviewAnswer);
+        assertAnswerNotContains(markdownOverviewAnswer, "\u5f53\u524d\u8d44\u6599\u91cc\u6ca1\u6709\u68c0\u7d22\u5230\u8db3\u591f\u4f9d\u636e");
+        assertAnswerContains(markdownOverviewAnswer, "\u9879\u76ee\u901f\u8bb0");
+        assertAnswerContains(markdownOverviewAnswer, "\u6280\u672f\u6808");
+
+        JsonNode markdownFieldAnswer = chat(token, "\u9879\u76ee\u540d\u79f0\u662f", markdownOverviewMaterialId, null);
+        printCase("markdown field lookup", markdownFieldAnswer);
+        assertAnswerNotContains(markdownFieldAnswer, "\u5f53\u524d\u8d44\u6599\u91cc\u6ca1\u6709\u68c0\u7d22\u5230\u8db3\u591f\u4f9d\u636e");
+        assertFirstSourceExcerptContains(markdownFieldAnswer, "\u9879\u76ee\u540d\u79f0");
+        assertFirstSourceExcerptContains(markdownFieldAnswer, "\u57fa\u4e8e\u5927\u6a21\u578b\u4e0e RAG");
+
+        Long markdownCurrentChunkId = findChunkIdContaining(getChunks(token, markdownOverviewMaterialId), "\u9879\u76ee\u540d\u79f0");
+        JsonNode markdownTechStackAnswer = chat(token, "\u6280\u672f\u6808\u6709\u54ea\u4e9b", markdownOverviewMaterialId, markdownCurrentChunkId);
+        printCase("markdown tech stack lookup from another current chunk", markdownTechStackAnswer);
+        assertAnswerNotContains(markdownTechStackAnswer, "\u5f53\u524d\u8d44\u6599\u91cc\u6ca1\u6709\u68c0\u7d22\u5230\u8db3\u591f\u4f9d\u636e");
+        assertAnswerContains(markdownTechStackAnswer, "Spring Boot");
+        assertFirstSourceExcerptContains(markdownTechStackAnswer, "\u6280\u672f\u6808");
+
         Long plantMaterialId = uploadTextMaterial(
             token,
             "Plant Only Material",
