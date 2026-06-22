@@ -21,7 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
  * <ul>
  *   <li>{@link UserRepository} — 用户数据持久化</li>
  *   <li>{@link PasswordHasher} — 密码哈希和验证</li>
- *   <li>{@link TokenService} — JWT Token 的生成和解析</li>
+ *   <li>{@link TokenService} - 自定义 Token 的生成和解析</li>
  *   <li>{@link EmailCodeService} — 邮箱验证码的发送和验证</li>
  *   <li>{@link LoginCaptchaService} — 登录验证码（防暴力破解）</li>
  * </ul>
@@ -41,7 +41,7 @@ public class AuthService {
     /** 密码哈希工具，负责密码加密和验证 */
     private final PasswordHasher passwordHasher;
 
-    /** Token 服务，负责生成和解析 JWT Token */
+    /** Token 服务，负责生成和解析自定义 Token */
     private final TokenService tokenService;
 
     /** 邮箱验证码服务，负责发送和验证邮箱验证码 */

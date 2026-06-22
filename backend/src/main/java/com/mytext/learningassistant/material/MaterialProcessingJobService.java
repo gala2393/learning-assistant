@@ -157,9 +157,6 @@ public class MaterialProcessingJobService {
     }
 
     /**
-     * 定时扫描数据库队列。测试或单机维护场景可通过 app.material-processing.scheduler-enabled=false 禁用。
-     */
-    /**
      * 判断长耗时任务是否已经被取消。
      * 删除资料或重新解析会把旧任务标记为 CANCELLED；解析/OCR 在写库前检查它，避免旧任务继续覆盖新状态。
      */
@@ -173,6 +170,9 @@ public class MaterialProcessingJobService {
             .orElse(true);
     }
 
+    /**
+     * 定时扫描数据库队列。测试或单机维护场景可通过 app.material-processing.scheduler-enabled=false 禁用。
+     */
     @Scheduled(fixedDelayString = "${app.material-processing.scan-delay:2s}")
     public void scanAndRun() {
         if (!schedulerEnabled) {

@@ -43,6 +43,42 @@ function typeIcon(sourceType: string) {
   return <BookOpen className="h-4 w-4" />  // 默认：文档类型
 }
 
+interface FullTextBackfillStatus {
+  title: string
+  message: string
+  percent: number
+}
+
+/**
+ * 计算大 PDF 后台补齐全文索引的用户可见状态。
+ *
+ * 后端会先让前若干页快速可问答，再逐批补齐后续页面。这里不依赖固定的后端中文阶段名，
+ * 而是直接用 textPageCount/pageCount 判断进度，保证用户能看到“已处理 80 / 320 页”。
+ */
+function getFullTextBackfillStatus(material: Material): FullTextBackfillStatus | null {
+  const totalPages = material.pageCount
+  const processedPages = material.textPageCount
+  if (typeof totalPages !== 'number' || typeof processedPages !== 'number' || totalPages <= 0) {
+    return null
+  }
+
+  const safeProcessedPages = Math.max(0, Math.min(processedPages, totalPages))
+  const textStatus = String(material.textStatus || '').toUpperCase()
+  const stage = String(material.processingStage || '')
+  const isBackfilling = safeProcessedPages < totalPages
+    && (textStatus === 'PARTIAL' || stage.includes('补齐') || stage.includes('剩余页面'))
+  if (!isBackfilling) {
+    return null
+  }
+
+  const percent = Math.max(1, Math.min(99, Math.round((safeProcessedPages / totalPages) * 100)))
+  return {
+    title: `正在补齐全文索引：已处理 ${safeProcessedPages} / ${totalPages} 页`,
+    message: '前面页面已经可以先问答，后续页面正在后台逐批写入索引',
+    percent,
+  }
+}
+
 export function MaterialCard({
   material,
   selected,
@@ -64,20 +100,22 @@ export function MaterialCard({
   const parsePercent = Math.max(0, Math.min(100, Math.round(
     material.processingProgressPercent ?? material.parseProgressPercent ?? (isProcessing ? 0 : 100)
   )))
-  const stageText = material.processingStage || material.parseStage || '后台处理中'
-  const messageText = material.processingMessage || material.parseMessage
+  const fullTextBackfill = getFullTextBackfillStatus(material)
+  const stageText = fullTextBackfill?.title || material.processingStage || material.parseStage || '后台处理中'
+  const messageText = fullTextBackfill?.message || material.processingMessage || material.parseMessage
   const ocrInProgress = ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.ocrStatus || '').toUpperCase())
+  const displayPercent = fullTextBackfill?.percent ?? parsePercent
   const pipelineVisible = isProcessing
     || parsePercent < 100
+    || !!fullTextBackfill
     || ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.textStatus || ''))
     || ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.indexStatus || ''))
     // 图片型 PDF 的文本和索引可能先部分可用，OCR 仍在后台逐页补齐；此时也要展示流水线，避免用户误以为已经彻底结束。
     || ocrInProgress
-  const pageProgressText = material.pageCount && material.textPageCount != null
-    ? `${material.textPageCount}/${material.pageCount} 页`
-    : null
-  const pageProgressLabel = pageProgressText
-    ? (ocrInProgress ? `页面 ${material.pageCount} 页` : `已处理 ${pageProgressText}`)
+  const pageProgressLabel = fullTextBackfill
+    ? null
+    : material.pageCount && material.textPageCount != null
+    ? (ocrInProgress ? `页面 ${material.pageCount} 页` : `已处理 ${material.textPageCount}/${material.pageCount} 页`)
     : null
   const indexedText = material.indexedChunkCount != null ? `${material.indexedChunkCount} 片段` : null
   const detailText = [messageText, pageProgressLabel, indexedText ? `已索引 ${indexedText}` : null]
@@ -122,13 +160,16 @@ export function MaterialCard({
               <span className="truncate font-medium text-slate-700 dark:text-slate-200">
                 {stageText}
               </span>
-              <span className="shrink-0 tabular-nums text-slate-500">{parsePercent}%</span>
+              <span className="shrink-0 tabular-nums text-slate-500">{displayPercent}%</span>
             </div>
             {/* 渐变进度条 */}
             <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-[#2563eb] via-[#0f766e] to-[#65a30d] transition-all duration-500"
-                style={{ width: `${parsePercent}%` }}
+                className={cn(
+                  'h-full rounded-full transition-all duration-500',
+                  fullTextBackfill ? 'bg-slate-950 dark:bg-slate-100' : 'bg-gradient-to-r from-[#2563eb] via-[#0f766e] to-[#65a30d]',
+                )}
+                style={{ width: `${displayPercent}%` }}
               />
             </div>
             <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">

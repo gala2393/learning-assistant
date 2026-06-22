@@ -64,6 +64,12 @@ class RagRetrievalService {
                 .toList();
     }
 
+    /**
+     * 只让 READY/PARTIAL 的资料进入检索。
+     *
+     * <p>PARTIAL 代表资料已经有可用正文或部分索引，后台 OCR/向量增强可能仍在补齐。
+     * 这里允许 PARTIAL，是为了让大 PDF 在轻量解析完成后即可开始问答，而不是等待全部后台任务结束。</p>
+     */
     boolean isMaterialReadyForRetrieval(LearningMaterialEntity material) {
         if (material == null) {
             return false;
@@ -72,6 +78,12 @@ class RagRetrievalService {
         return textStatus == MaterialTextStatus.READY || textStatus == MaterialTextStatus.PARTIAL;
     }
 
+    /**
+     * 读取一次完整检索结果缓存。
+     *
+     * <p>缓存只保存 chunkId 和分数，不缓存实体对象；命中后会重新查库并校验资料仍属于当前用户、
+     * 资料仍可检索。任一条件失效就丢弃缓存，避免用户删除资料或重新解析后拿到旧来源。</p>
+     */
     List<ScoredChunk> cachedRetrievalChunks(String cacheKey, long userId) {
         RetrievalCacheEntry cached = retrievalResultCache.get(cacheKey);
         if (cached == null) {
@@ -94,6 +106,12 @@ class RagRetrievalService {
         return chunks;
     }
 
+    /**
+     * 记住一次检索结果，供同一用户、同一资料集合、同一问题的连续请求复用。
+     *
+     * <p>这里使用简单容量上限和整表清空策略，因为缓存只优化短时间内的继续生成/重复请求，
+     * 不是业务正确性依赖；超过上限后清空比维护复杂 LRU 更符合当前使用场景。</p>
+     */
     void rememberRetrievalResult(String cacheKey, List<ScoredChunk> chunks) {
         if (chunks.isEmpty()) {
             return;
@@ -108,6 +126,12 @@ class RagRetrievalService {
         ));
     }
 
+    /**
+     * 执行 RAG 的主检索路径：查询扩展、向量召回、BM25 召回、摘要种子召回、HyDE 召回和最终融合。
+     *
+     * <p>RagService 仍负责具体召回函数和文本工具函数，本服务只编排候选集合的合并与排序，
+     * 这样可以把大块排序逻辑集中在一个可测试的类里。</p>
+     */
     List<ScoredChunk> selectVectorOrKeywordChunks(
         long userId,
         String question,
@@ -116,6 +140,7 @@ class RagRetrievalService {
         RetrievalTextTools tools
     ) {
         List<LearningMaterialEntity> materials = retrievalScopeMaterials(userId, materialId);
+        // 缓存键包含资料更新时间和 chunk 数量；资料重新解析或新增切片后会自然失效。
         String cacheKey = retrievalCacheKey(userId, materialId, question, materials, callbacks.normalize(), callbacks.hash());
         List<ScoredChunk> cachedChunks = cachedRetrievalChunks(cacheKey, userId);
         if (cachedChunks != null) {
@@ -129,6 +154,7 @@ class RagRetrievalService {
         List<String> queries = callbacks.expandedQueries().apply(question);
         for (int i = 0; i < queries.size(); i++) {
             String query = queries.get(i);
+            // 原始问题权重最高，扩展查询稍降权，避免扩展词把主题拉偏。
             double weight = i == 0 ? 1.0 : 0.82;
             vectorChunks.addAll(weightedChunks(callbacks.vectorChunks().apply(query), weight));
             bm25Chunks.addAll(weightedChunks(callbacks.bm25Chunks().apply(query), weight));
@@ -234,6 +260,7 @@ class RagRetrievalService {
         double bm25Score = maxBm25 <= 0.0 ? 0.0 : candidate.bm25Score / maxBm25;
         double summaryScore = maxSummary <= 0.0 ? 0.0 : candidate.summaryScore / maxSummary;
         double termScore = tools.queryTermCoverage().apply(tools.retrievalText().apply(candidate.chunk), queryTerms);
+        // 权重按当前项目经验值设置：语义召回优先，BM25 保底精确词命中，摘要和关键词覆盖作为辅助信号。
         double fusedScore = (0.48 * vectorScore) + (0.30 * bm25Score) + (0.12 * summaryScore) + (0.10 * termScore);
         String penaltyReason = tools.looksLikeContentsChunk().apply(tools.retrievalText().apply(candidate.chunk))
             && !tools.isTableOfContentsQuestion().apply(question)
@@ -345,6 +372,7 @@ class RagRetrievalService {
                 break;
             }
             String pageKey = chunk.material().getId() + ":" + (chunk.chunk().getPageNo() == null ? "null" : chunk.chunk().getPageNo());
+            // 前 3 个结果允许集中在同页，后续结果尽量跨页，降低上下文被同一页重复片段占满的概率。
             if (selected.size() >= 3 && seenPages.contains(pageKey)) {
                 continue;
             }

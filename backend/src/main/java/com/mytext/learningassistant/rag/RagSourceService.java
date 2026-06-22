@@ -22,8 +22,8 @@ import org.springframework.stereotype.Service;
 /**
  * RAG 回答来源服务。
  *
- * <p>负责来源去重、展示分计算、响应 DTO 组装和来源落库。文本清洗与检索文本构造暂时由
- * RagService 通过回调传入，避免第一阶段拆分时同时迁移大量 prompt/检索工具方法。</p>
+ * <p>负责回答来源的去重、得分展示、响应 DTO 组装以及最终落库。文本相关的规范化、摘要、检索文本构造等能力
+ * 以通用回调的形式从 {@link RagService} 传入，使这个服务专注在“来源如何被保存和展示”的责任边界。</p>
  */
 @Service
 class RagSourceService {
@@ -38,7 +38,9 @@ class RagSourceService {
         this.ragQuestionSourceRepository = ragQuestionSourceRepository;
         this.retrievalDebugService = retrievalDebugService;
     }
-
+    /**
+     * 将最终选中的回答证据片段写入数据库，同时在检索调试记录中标记“已选为最终来源”。
+     */
     List<RagQuestionSourceEntity> saveSources(
         long questionId,
         List<ScoredChunk> chunks,
@@ -78,7 +80,9 @@ class RagSourceService {
             presentScore(source.getRankScore())
         );
     }
-
+    /**
+     * 基于已生成的回答再次校准来源，降低目录、页眉类片段被误选为最终引用的概率。
+     */
     List<ScoredChunk> groundSourcesToAnswer(
         String answer,
         List<ScoredChunk> selectedChunks,
@@ -218,7 +222,9 @@ class RagSourceService {
             score
         );
     }
-
+    /**
+     * 对来源片段按“资料 + 页码 + 摘要”做轻量去重，保证前端展示和落库来源不会出现大量重复项。
+     */
     List<ScoredChunk> deduplicateSourceChunks(List<ScoredChunk> chunks, SourceTextTools textTools) {
         List<ScoredChunk> deduplicated = new ArrayList<>();
         Set<String> seen = new HashSet<>();

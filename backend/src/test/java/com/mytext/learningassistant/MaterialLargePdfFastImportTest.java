@@ -91,6 +91,53 @@ class MaterialLargePdfFastImportTest {
             .andExpect(jsonPath("$.data[119].chunkText").value(Matchers.containsString("[[material-image:page-120.png]]")));
     }
 
+    @Test
+    void largeTextPdfBackfillsChunksAfterFastImportLimit() throws Exception {
+        org.mockito.Mockito.when(embeddingClient.embedDocument(org.mockito.ArgumentMatchers.anyString()))
+            .thenReturn(Optional.of(List.of(0.1, 0.2, 0.3)));
+        String token = registerAndLogin("large_text_pdf_user_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10));
+
+        MockMultipartFile file = new MockMultipartFile(
+            "file",
+            "large-text.pdf",
+            "application/pdf",
+            minimalTextPdf(120)
+        );
+
+        var uploadResult = mockMvc.perform(multipart("/api/materials")
+                .file(file)
+                .header("Authorization", "Bearer " + token)
+                .param("title", "Large Text PDF")
+                .param("sourceType", "PDF"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.uploadStatus").value("UPLOADED"))
+            .andReturn();
+
+        Long materialId = extractLong(uploadResult.getResponse().getContentAsString(), "id");
+        drainMaterialJobs();
+
+        var chunksResult = mockMvc.perform(get("/api/materials/" + materialId + "/chunks")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data", Matchers.hasSize(Matchers.greaterThanOrEqualTo(120))))
+            .andExpect(jsonPath("$.data[0].chunkText").value(Matchers.containsString("large text pdf page 1 unique token alpha")))
+            .andReturn();
+        String chunksJson = chunksResult.getResponse().getContentAsString();
+        org.junit.jupiter.api.Assertions.assertTrue(
+            chunksJson.contains("\"pageNo\":120"),
+            "后续补齐任务应该把第 120 页写入问答 chunk"
+        );
+        org.junit.jupiter.api.Assertions.assertTrue(
+            chunksJson.contains("large text pdf page 120 unique token omega"),
+            "后续补齐任务应该保留第 120 页的唯一文本，保证 RAG 能匹配后面页面"
+        );
+
+        mockMvc.perform(get("/api/materials/" + materialId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.textPageCount").value(120));
+    }
+
     /** 主动驱动后台队列，避免测试依赖定时器。 */
     private void drainMaterialJobs() throws InterruptedException {
         long deadline = System.currentTimeMillis() + 20_000;
@@ -162,6 +209,59 @@ class MaterialLargePdfFastImportTest {
         objects[0] = object1;
         objects[1] = object2;
         System.arraycopy(pageObjects, 0, objects, 2, pageCount);
+
+        StringBuilder pdf = new StringBuilder("%PDF-1.4\n");
+        int[] offsets = new int[objects.length + 1];
+        offsets[0] = 0;
+        for (int index = 0; index < objects.length; index++) {
+            offsets[index + 1] = pdf.toString().getBytes(StandardCharsets.US_ASCII).length;
+            pdf.append(objects[index]);
+        }
+        int xrefOffset = pdf.toString().getBytes(StandardCharsets.US_ASCII).length;
+        pdf.append("xref\n0 ").append(objects.length + 1).append("\n");
+        pdf.append("0000000000 65535 f \n");
+        for (int index = 1; index < offsets.length; index++) {
+            pdf.append(String.format("%010d 00000 n \n", offsets[index]));
+        }
+        pdf.append("trailer\n<< /Size ").append(objects.length + 1).append(" /Root 1 0 R >>\n");
+        pdf.append("startxref\n").append(xrefOffset).append("\n%%EOF\n");
+        return pdf.toString().getBytes(StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * 生成一个带真实文本层的多页 PDF，用来验证大 PDF 快速导入后的后台补齐逻辑。
+     *
+     * <p>测试故意在第 1 页和第 120 页放入不同的唯一文本：第 1 页覆盖快速导入阶段，
+     * 第 120 页覆盖后续 {@code EXTRACT_TEXT_REMAINING} 任务。如果后续页没有被追加写入 chunk，
+     * RAG 问答就无法命中靠后的页面，这个回归测试会直接失败。</p>
+     */
+    private byte[] minimalTextPdf(int pageCount) {
+        if (pageCount <= 0) {
+            throw new IllegalArgumentException("pageCount must be positive");
+        }
+        StringBuilder kids = new StringBuilder();
+        String[] objects = new String[pageCount * 2 + 3];
+        objects[0] = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+        String fontObjectNumber = String.valueOf(pageCount * 2 + 3);
+        for (int pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+            int pageNo = pageIndex + 1;
+            int pageObjectNo = pageIndex + 3;
+            int contentObjectNo = pageIndex + 3 + pageCount;
+            kids.append(pageObjectNo).append(" 0 R ");
+            objects[pageObjectNo - 1] = pageObjectNo + " 0 obj\n"
+                + "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents "
+                + contentObjectNo + " 0 R /Resources << /Font << /F1 "
+                + fontObjectNumber + " 0 R >> >> >>\nendobj\n";
+            String pageText = "large text pdf page " + pageNo + " unique token "
+                + (pageNo == pageCount ? "omega" : "alpha");
+            String escapedText = pageText.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)");
+            String stream = "BT\n/F1 12 Tf\n72 720 Td\n(" + escapedText + ") Tj\nET\n";
+            objects[contentObjectNo - 1] = contentObjectNo + " 0 obj\n<< /Length "
+                + stream.getBytes(StandardCharsets.US_ASCII).length + " >>\nstream\n"
+                + stream + "endstream\nendobj\n";
+        }
+        objects[1] = "2 0 obj\n<< /Type /Pages /Kids [" + kids.toString().trim() + "] /Count " + pageCount + " >>\nendobj\n";
+        objects[objects.length - 1] = fontObjectNumber + " 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
 
         StringBuilder pdf = new StringBuilder("%PDF-1.4\n");
         int[] offsets = new int[objects.length + 1];

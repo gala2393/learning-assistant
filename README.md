@@ -1,7 +1,5 @@
 # 智学引擎 Learning Assistant
 
-[中文](README.md) | [English](README.en.md)
-
 在线访问：[https://learnstudy.cloud](https://learnstudy.cloud)
 
 公开页面：
@@ -38,8 +36,8 @@
 learning-assistant/
 ├── backend/                 # Spring Boot 后端
 ├── frontend/                # React + Vite 前端
-├── 更新说明.md              # 版本更新记录
-├── README.en.md             # English README
+├── deploy/                  # 前端部署脚本和 Nginx/环境变量模板
+├── 开发教程/                # 项目开发教程
 └── README.md
 ```
 
@@ -315,7 +313,7 @@ npm run build
 git status --short
 ```
 
-如果需要更新线上前端静态文件，请参考 [DOCKER_DEPLOY.md](DOCKER_DEPLOY.md) 中的安全部署脚本说明。脚本会保留服务器上的 `frontend-dist` 目录本身，只替换目录内容，避免 Docker bind mount 失效导致 Nginx 首页 403 或子路由 500。
+如果需要更新线上前端静态文件，请使用 [deploy-frontend.ps1](deploy/deploy-frontend.ps1) 中的安全部署脚本。脚本会保留服务器上的 `frontend-dist` 目录本身，只替换目录内容，避免 Docker bind mount 失效导致 Nginx 首页 403 或子路由 500。
 
 ## 常见问题
 
@@ -381,6 +379,6 @@ DOCUMENT_PREVIEW_CONVERTER_ENABLED=true
 
 本地最小启动可以不启用向量库。要提升资料问答质量，需要配置 Embedding 和 Qdrant，并对已有资料重建索引。
 
-## 发布记录
+## 开发文档
 
-详细更新内容见：[更新说明.md](更新说明.md)
+系统架构、模块说明和部署流程见 [开发教程](开发教程/01-项目总览.md)。
