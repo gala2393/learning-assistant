@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { motion, useReducedMotion } from 'framer-motion'
 import { ArrowRight, BookOpen, BrainCircuit, Menu, Search, Sparkles, Upload, X } from 'lucide-react'
@@ -160,11 +160,11 @@ const staggerContainerMotion = {
 const sectionFrameMotion = {
   hidden: {
     opacity: 0,
-    y: 72,
+    y: 84,
     scale: 1,
     filter: 'blur(14px)',
     transition: {
-      duration: 0.58,
+      duration: 0.72,
       ease: [0.4, 0, 0.2, 1] as const,
     },
   },
@@ -174,10 +174,10 @@ const sectionFrameMotion = {
     scale: 1,
     filter: 'blur(0px)',
     transition: {
-      duration: 1.08,
+      duration: 1.36,
       ease: [0.16, 1, 0.3, 1] as const,
-      staggerChildren: 0.13,
-      delayChildren: 0.1,
+      staggerChildren: 0.18,
+      delayChildren: 0.16,
     },
   },
 }
@@ -185,17 +185,17 @@ const sectionFrameMotion = {
 const floatItemMotion = {
   hidden: {
     opacity: 0,
-    y: 58,
+    y: 66,
     scale: 0.985,
     filter: 'blur(12px)',
-    transition: { duration: 0.5, ease: [0.4, 0, 0.2, 1] as const },
+    transition: { duration: 0.66, ease: [0.4, 0, 0.2, 1] as const },
   },
   show: {
     opacity: 1,
     y: 0,
     scale: 1,
     filter: 'blur(0px)',
-    transition: { duration: 1.02, ease: [0.16, 1, 0.3, 1] as const },
+    transition: { duration: 1.28, ease: [0.16, 1, 0.3, 1] as const },
   },
 }
 
@@ -212,18 +212,14 @@ function ScrollReveal({
 }) {
   const prefersReducedMotion = useReducedMotion()
 
-  if (prefersReducedMotion) {
-    return <div className={className} style={style}>{children}</div>
-  }
-
   return (
     <motion.div
       className={className}
       style={style}
-      initial={{ opacity: 0, y: 60 }}
+      initial={{ opacity: 0, y: prefersReducedMotion ? 18 : 60 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, amount: 0.1 }}
-      transition={{ duration: 0.8, delay, ease: [0.16, 1, 0.3, 1] }}
+      transition={{ duration: prefersReducedMotion ? 1.02 : 1.12, delay, ease: [0.16, 1, 0.3, 1] }}
     >
       {children}
     </motion.div>
@@ -244,7 +240,7 @@ const heroLineMotion = {
     scale: 1,
     filter: 'blur(0px)',
     transition: {
-      duration: 0.9,
+      duration: 1.05,
       delay: index * 0.12,
       ease: [0.16, 1, 0.3, 1] as const,
     },
@@ -261,8 +257,8 @@ function AnimatedHeroText({ text, className, delay = 0 }: { text: string; classN
           initial={{ opacity: 0, y: 42, filter: 'blur(14px)' }}
           animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
           transition={{
-            duration: 0.72,
-            delay: delay + index * 0.035,
+            duration: 0.86,
+            delay: delay + index * 0.038,
             ease: [0.16, 1, 0.3, 1],
           }}
         >
@@ -369,7 +365,7 @@ function SectionAmbientMotion({
         initial={{ opacity: 0, y: 40, scale: 0.92, filter: 'blur(10px)' }}
         whileInView={{ opacity: isDeep ? 0.45 : 0.72, y: 0, scale: 1, filter: 'blur(0px)' }}
         viewport={{ once: false, amount: 0.12 }}
-        transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: 1.55, ease: [0.16, 1, 0.3, 1] }}
       >
         <motion.div
           className={cn('absolute inset-0 rounded-full border', lineColor)}
@@ -410,18 +406,9 @@ function LandingIntroSequence({ onComplete }: { onComplete: () => void }) {
   const prefersReducedMotion = useReducedMotion()
 
   useEffect(() => {
-    if (prefersReducedMotion) {
-      onComplete()
-      return undefined
-    }
-
-    const timer = window.setTimeout(onComplete, 2600)
+    const timer = window.setTimeout(onComplete, prefersReducedMotion ? 2700 : 2600)
     return () => window.clearTimeout(timer)
   }, [onComplete, prefersReducedMotion])
-
-  if (prefersReducedMotion) {
-    return null
-  }
 
   const nodes = [
     { cx: 120, cy: 96, delay: 0.45 },
@@ -544,37 +531,40 @@ function LandingIntroSequence({ onComplete }: { onComplete: () => void }) {
   )
 }
 
-function LandingIntroSequenceV2({ onComplete }: { onComplete: () => void }) {
+function LandingIntroSequenceV2({
+  onRevealHome,
+  onComplete,
+}: {
+  onRevealHome: () => void
+  onComplete: () => void
+}) {
   const prefersReducedMotion = useReducedMotion()
 
   useEffect(() => {
-    if (prefersReducedMotion) {
-      onComplete()
-      return undefined
+    const duration = prefersReducedMotion ? 5200 : 5600
+    const revealTimer = window.setTimeout(onRevealHome, prefersReducedMotion ? 2050 : 2120)
+    const completeTimer = window.setTimeout(onComplete, duration)
+    return () => {
+      window.clearTimeout(revealTimer)
+      window.clearTimeout(completeTimer)
     }
+  }, [onComplete, onRevealHome, prefersReducedMotion])
 
-    const timer = window.setTimeout(onComplete, 3200)
-    return () => window.clearTimeout(timer)
-  }, [onComplete, prefersReducedMotion])
-
-  if (prefersReducedMotion) {
-    return null
+  const skipIntro = () => {
+    onRevealHome()
+    onComplete()
   }
 
-  const fragments = [
-    { label: '上传文档', className: '-translate-x-[280px] -translate-y-[118px]', exitX: 120, exitY: 62, delay: 0 },
-    { label: 'RAG 知识索引', className: 'translate-x-[260px] -translate-y-[126px]', exitX: -120, exitY: 62, delay: 0.08 },
-    { label: '来源引用', className: '-translate-x-[360px] translate-y-[92px]', exitX: 120, exitY: -62, delay: 0.16 },
-    { label: '自动总结', className: 'translate-x-[330px] translate-y-[116px]', exitX: -120, exitY: -62, delay: 0.24 },
+  const documents = [
+    { title: 'COURSE PDF', subtitle: '32 pages', y: -54, rotate: -4, delay: 0.18 },
+    { title: 'LECTURE NOTE', subtitle: '18 pages', y: 0, rotate: 0, delay: 0.32 },
+    { title: 'RESEARCH BRIEF', subtitle: '09 pages', y: 54, rotate: 4, delay: 0.46 },
   ]
 
-  const introPaths = [
-    'M380 210C300 150 240 118 166 112',
-    'M380 210C462 144 532 112 614 118',
-    'M380 210C282 250 236 302 154 314',
-    'M380 210C488 252 544 304 636 316',
-    'M270 116H492',
-    'M260 316H506',
+  const sourceNodes = [
+    { label: 'P12', text: '来源页码', delay: 1.12 },
+    { label: 'P19', text: '关键片段', delay: 1.24 },
+    { label: 'SUM', text: '自动总结', delay: 1.36 },
   ]
 
   return (
@@ -582,15 +572,15 @@ function LandingIntroSequenceV2({ onComplete }: { onComplete: () => void }) {
       className="fixed inset-0 z-[100] overflow-hidden bg-[#f7f8fb] px-5 text-[#111111] sm:px-8 lg:px-10"
       initial={{ opacity: 1 }}
       animate={{ opacity: [1, 1, 0] }}
-      transition={{ duration: 3.2, times: [0, 0.84, 1], ease: [0.22, 1, 0.36, 1] }}
+      transition={{ duration: prefersReducedMotion ? 5.2 : 5.6, times: [0, 0.74, 1], ease: [0.22, 1, 0.36, 1] }}
     >
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_36%,rgba(255,255,255,0.98),transparent_30%),radial-gradient(circle_at_50%_62%,rgba(197,212,231,0.72),transparent_34%),linear-gradient(180deg,#fcfcfd_0%,#f7f8fb_100%)]" />
-      <div className="absolute inset-0 opacity-[0.18] [background-image:linear-gradient(rgba(100,116,139,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(100,116,139,0.08)_1px,transparent_1px)] [background-size:56px_56px]" />
+      <div className="absolute inset-0 opacity-[0.16] [background-image:linear-gradient(rgba(100,116,139,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(100,116,139,0.08)_1px,transparent_1px)] [background-size:56px_56px]" />
 
       <button
         type="button"
         className="absolute right-5 top-5 z-20 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-semibold text-slate-600 shadow-[0_14px_34px_rgba(15,23,42,0.08)] backdrop-blur transition hover:-translate-y-0.5 hover:text-[#111111]"
-        onClick={onComplete}
+        onClick={skipIntro}
       >
         跳过
       </button>
@@ -598,103 +588,101 @@ function LandingIntroSequenceV2({ onComplete }: { onComplete: () => void }) {
       <section className="relative z-10 mx-auto flex h-screen w-full max-w-7xl flex-col items-center justify-center">
         <motion.div
           className="absolute top-9 inline-flex items-center gap-2 rounded-full border border-white bg-white/82 px-4 py-2 text-xs font-semibold text-slate-600 shadow-[0_14px_34px_rgba(15,23,42,0.08)] backdrop-blur"
-          initial={{ opacity: 0, y: -18 }}
+          initial={{ opacity: 0, y: prefersReducedMotion ? -8 : -18 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
+          transition={{ duration: prefersReducedMotion ? 0.56 : 0.42, ease: [0.22, 1, 0.36, 1] }}
         >
           <span className="h-2 w-2 rounded-full bg-[#1a2a3a]" />
-          正在构建 RAG 知识索引
+          正在读取资料上下文
         </motion.div>
 
-        <motion.svg
-          className="absolute left-1/2 top-1/2 h-[420px] w-[760px] -translate-x-1/2 -translate-y-1/2 overflow-visible opacity-80"
-          viewBox="0 0 760 420"
-          fill="none"
-          initial={{ opacity: 0, y: 36, scale: 0.96 }}
-          animate={{ opacity: 0.8, y: 0, scale: 1 }}
-          transition={{ duration: 0.58, delay: 0.28, ease: [0.22, 1, 0.36, 1] }}
-          aria-hidden="true"
-        >
-          {introPaths.map((d, index) => (
-            <motion.path
-              key={d}
-              d={d}
-              stroke="#1a2a3a"
-              strokeWidth="1.2"
-              strokeOpacity="0.42"
-              pathLength={1}
-              initial={{ pathLength: 0, opacity: 0 }}
-              animate={{ pathLength: 1, opacity: 0.55 }}
-              transition={{ duration: 1.45, delay: 0.34 + index * 0.05, ease: [0.22, 1, 0.36, 1] }}
+        <div className="relative grid w-full max-w-5xl items-center gap-10 md:grid-cols-[0.92fr_0.36fr_0.92fr]">
+          <div className="relative mx-auto h-[260px] w-[min(330px,82vw)]">
+            {documents.map((document) => (
+              <motion.div
+                key={document.title}
+                className="absolute left-1/2 top-1/2 h-[156px] w-[250px] -translate-x-1/2 -translate-y-1/2 rounded-[28px] border border-[#dbe2ec] bg-white/92 p-5 shadow-[0_24px_70px_rgba(15,23,42,0.10)] backdrop-blur-xl"
+                initial={{ opacity: 0, x: prefersReducedMotion ? -28 : -86, y: document.y + 18, rotate: document.rotate - 3, filter: 'blur(10px)' }}
+                animate={{ opacity: 1, x: 0, y: document.y, rotate: document.rotate, filter: 'blur(0px)' }}
+                transition={{ duration: prefersReducedMotion ? 1.05 : 1.18, delay: document.delay + 0.18, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.28em] text-slate-400">{document.title}</span>
+                  <span className="rounded-full border border-[#e1e7ef] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    {document.subtitle}
+                  </span>
+                </div>
+                <div className="mt-6 space-y-2">
+                  <div className="h-2 rounded-full bg-[#111318]" />
+                  <div className="h-2 w-5/6 rounded-full bg-[#d8e0eb]" />
+                  <div className="h-2 w-2/3 rounded-full bg-[#e8edf3]" />
+                </div>
+                <div className="mt-6 grid grid-cols-4 gap-2">
+                  {Array.from({ length: 8 }).map((_, index) => (
+                    <span key={index} className="h-1.5 rounded-full bg-[#eef2f7]" />
+                  ))}
+                </div>
+              </motion.div>
+            ))}
+          </div>
+
+          <div className="relative mx-auto hidden h-[220px] w-full items-center justify-center md:flex">
+            <motion.div
+              className="absolute h-px w-full bg-gradient-to-r from-transparent via-[#1a2a3a]/72 to-transparent"
+              initial={{ scaleX: 0, opacity: 0 }}
+              animate={{ scaleX: 1, opacity: [0, 1, 0.84] }}
+              transition={{ duration: prefersReducedMotion ? 1.85 : 2.05, delay: 1.16, ease: [0.16, 1, 0.3, 1] }}
+              style={{ transformOrigin: 'left center' }}
             />
-          ))}
-          <motion.circle
-            cx="380"
-            cy="210"
-            r="44"
-            fill="white"
-            fillOpacity="0.82"
-            stroke="#d6deea"
-            initial={{ scale: 0.4, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            transition={{ duration: 0.62, delay: 0.72, ease: [0.22, 1, 0.36, 1] }}
-          />
-          <motion.circle
-            cx="380"
-            cy="210"
-            r="8"
-            fill="#1a2a3a"
-            initial={{ scale: 0, opacity: 0 }}
-            animate={{ scale: [0, 1.35, 1], opacity: 1 }}
-            transition={{ duration: 0.5, delay: 0.86, ease: [0.22, 1, 0.36, 1] }}
-          />
-        </motion.svg>
+            <motion.div
+              className="relative z-10 flex h-16 w-16 items-center justify-center rounded-full border border-[#d7dee8] bg-white shadow-[0_20px_54px_rgba(15,23,42,0.10)]"
+              initial={{ scale: 0.72, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ duration: 0.9, delay: 1.78, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <BrainCircuit className="h-6 w-6 text-[#1a2a3a]" />
+            </motion.div>
+            <motion.div
+              className="absolute h-24 w-24 rounded-full border border-[#1a2a3a]/12"
+              initial={{ scale: 0.72, opacity: 0 }}
+              animate={{ scale: [0.72, 1.12, 1], opacity: [0, 0.54, 0.22] }}
+              transition={{ duration: 1.75, delay: 1.86, ease: [0.16, 1, 0.3, 1] }}
+            />
+          </div>
 
-        {fragments.map((fragment) => (
           <motion.div
-            key={fragment.label}
-            className={cn(
-              'absolute left-1/2 top-1/2 rounded-full border border-white bg-white/88 px-4 py-2 text-xs font-semibold text-slate-600 shadow-[0_18px_48px_rgba(15,23,42,0.1)] backdrop-blur',
-              fragment.className,
-            )}
-            initial={{ opacity: 0, scale: 0.72 }}
-            animate={{
-              opacity: [0, 1, 1, 0],
-              scale: [0.72, 1, 0.92, 0.78],
-              x: [0, 0, 0, fragment.exitX],
-              y: [0, 0, 0, fragment.exitY],
-            }}
-            transition={{
-              duration: 2.15,
-              delay: fragment.delay,
-              times: [0, 0.28, 0.72, 1],
-              ease: [0.22, 1, 0.36, 1],
-            }}
+            className="mx-auto w-[min(330px,82vw)] rounded-[30px] border border-[#dbe2ec] bg-white/88 p-5 shadow-[0_24px_70px_rgba(15,23,42,0.10)] backdrop-blur-xl"
+            initial={{ opacity: 0, x: prefersReducedMotion ? 28 : 86, y: 18, filter: 'blur(10px)' }}
+            animate={{ opacity: 1, x: 0, y: 0, filter: 'blur(0px)' }}
+            transition={{ duration: prefersReducedMotion ? 1.08 : 1.24, delay: 2.02, ease: [0.16, 1, 0.3, 1] }}
           >
-            {fragment.label}
+            <p className="text-[10px] font-semibold uppercase tracking-[0.32em] text-slate-400">Knowledge Index</p>
+            <div className="mt-5 space-y-3">
+              {sourceNodes.map((node) => (
+                <motion.div
+                  key={node.label}
+                  className="flex items-center gap-3 rounded-2xl border border-[#e2e8f0] bg-[#f8fafc] p-3"
+                  initial={{ opacity: 0, y: 14 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.72, delay: node.delay + 1.05, ease: [0.16, 1, 0.3, 1] }}
+                >
+                  <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#111318] text-[10px] font-semibold text-white">
+                    {node.label}
+                  </span>
+                  <span className="text-sm font-semibold text-[#1a2a3a]">{node.text}</span>
+                </motion.div>
+              ))}
+            </div>
           </motion.div>
-        ))}
-
-        <motion.div
-          className="relative z-10 w-[min(980px,90vw)] text-center"
-          initial={{ opacity: 0, y: 72, scale: 0.9 }}
-          animate={{ opacity: 1, y: [72, 0, -112], scale: [0.9, 1, 0.72] }}
-          transition={{ duration: 2.25, delay: 0.62, times: [0, 0.48, 1], ease: [0.2, 0.82, 0.18, 1] }}
-        >
-          <p className="mb-5 text-[11px] font-semibold uppercase tracking-[0.46em] text-slate-400">Learning Assistant</p>
-          <h2 className="text-[2.6rem] font-semibold leading-[1.03] text-[#111111] sm:text-7xl lg:text-8xl" style={editorialSerifStyle}>
-            让每份资料都变成
-            <span className="block text-[#1a2a3a]">可追问的学习助手</span>
-          </h2>
-        </motion.div>
+        </div>
 
         <motion.p
-          className="relative z-10 mt-8 max-w-3xl text-center text-base font-medium leading-8 text-slate-500 sm:text-xl sm:leading-9"
-          initial={{ opacity: 0, y: 58, scale: 0.96 }}
-          animate={{ opacity: [0, 1, 1, 0], y: [58, 0, -74, -112], scale: [0.96, 1, 0.96, 0.88] }}
-          transition={{ duration: 2.1, delay: 0.88, times: [0, 0.38, 0.76, 1], ease: [0.2, 0.82, 0.18, 1] }}
+          className="relative z-10 mt-12 text-center text-[11px] font-semibold uppercase tracking-[0.46em] text-slate-400"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: [0, 1, 1, 0], y: [16, 0, 0, -12] }}
+          transition={{ duration: prefersReducedMotion ? 2.75 : 3.05, delay: 2.35, times: [0, 0.28, 0.78, 1], ease: [0.16, 1, 0.3, 1] }}
         >
-          上传文档后自动构建 RAG 知识索引，支持资料问答、来源引用、临时附件追问和自动总结。
+          INDEX READY · ENTER WORKSPACE
         </motion.p>
       </section>
     </motion.div>
@@ -705,9 +693,15 @@ export function ProductLandingPage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [headerSolid, setHeaderSolid] = useState(false)
   const [introVisible, setIntroVisible] = useState(true)
+  const [heroAnimationKey, setHeroAnimationKey] = useState(0)
   const prefersReducedMotion = useReducedMotion()
   const revealSectionMotion = prefersReducedMotion
-    ? {}
+    ? {
+        initial: { opacity: 0, y: 20 },
+        whileInView: { opacity: 1, y: 0 },
+        viewport: { once: false, amount: 0.08, margin: '0px 0px -8% 0px' },
+        transition: { duration: 1.06, ease: [0.16, 1, 0.3, 1] },
+      }
     : {
         variants: sectionFrameMotion,
         initial: 'hidden',
@@ -749,13 +743,17 @@ export function ProductLandingPage() {
     return undefined
   }, [])
 
-  const completeIntro = () => {
+  const revealHome = useCallback(() => {
+    setHeroAnimationKey((key) => key + 1)
+  }, [])
+
+  const completeIntro = useCallback(() => {
     setIntroVisible(false)
-  }
+  }, [])
 
   return (
     <div className="min-h-screen scroll-smooth bg-[#f7f8fb] text-[#111111]">
-      {introVisible ? <LandingIntroSequenceV2 onComplete={completeIntro} /> : null}
+      {introVisible ? <LandingIntroSequenceV2 onRevealHome={revealHome} onComplete={completeIntro} /> : null}
 
       <header
         className={cn(
@@ -856,7 +854,10 @@ export function ProductLandingPage() {
           <div className="absolute inset-0 opacity-[0.22] [background-image:linear-gradient(rgba(100,116,139,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(100,116,139,0.08)_1px,transparent_1px)] [background-size:56px_56px]" />
           <div className="pointer-events-none absolute inset-x-0 bottom-[-1px] z-[1] h-40 bg-gradient-to-b from-transparent via-[#f7f8fb]/88 to-[#f7f8fb]" />
           <HeroMimoOrbit />
-          <motion.div className={cn(shellClassName, 'relative flex min-h-[calc(100vh-7rem)] items-center py-14 lg:py-20')} {...revealSectionMotion}>
+          <motion.div
+            key={heroAnimationKey}
+            className={cn(shellClassName, 'relative flex min-h-[calc(100vh-7rem)] items-center py-14 lg:py-20')}
+          >
             <div className="flex max-w-[900px] -translate-y-12 flex-col items-center text-center lg:-translate-y-10 lg:items-start lg:text-left">
               <motion.p
                 className="text-[11px] font-semibold uppercase tracking-[0.42em] text-slate-400"
@@ -879,7 +880,7 @@ export function ProductLandingPage() {
                         key={`${segment}-${segmentIndex}`}
                         text={segment}
                         className={segment === '可追问' ? 'text-[#1a2a3a]' : undefined}
-                        delay={0.18 + index * 0.18 + segmentIndex * 0.08}
+                        delay={0.06 + index * 0.16 + segmentIndex * 0.06}
                       />
                     ))}
                   </motion.h1>
