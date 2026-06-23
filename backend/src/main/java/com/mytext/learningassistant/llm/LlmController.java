@@ -3,9 +3,6 @@ package com.mytext.learningassistant.llm;
 import com.mytext.learningassistant.common.ApiResponse;
 import com.mytext.learningassistant.common.BusinessException;
 import com.mytext.learningassistant.security.OutboundUrlGuard;
-import com.mytext.learningassistant.security.RateLimitService;
-
-import jakarta.servlet.http.HttpServletRequest;
 
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -47,9 +44,6 @@ public class LlmController {
     /** 第三方 LLM 客户端，用于测试连通性和调用 AI 模型 */
     private final ThirdPartyLlmClient thirdPartyLlmClient;
 
-    /** 限流服务，防止用户频繁调用测试接口 */
-    private final RateLimitService rateLimitService;
-
     /** 出站 URL 安全检查，确保用户配置的 URL 是合法的公网地址 */
     private final OutboundUrlGuard outboundUrlGuard;
 
@@ -59,20 +53,17 @@ public class LlmController {
      * @param properties               系统默认 LLM 配置
      * @param userLlmConfigRepository  用户自定义 LLM 配置仓库
      * @param thirdPartyLlmClient      第三方 LLM 客户端
-     * @param rateLimitService         限流服务
      * @param outboundUrlGuard         出站 URL 安全检查
      */
     public LlmController(
         LlmProperties properties,
         UserLlmConfigRepository userLlmConfigRepository,
         ThirdPartyLlmClient thirdPartyLlmClient,
-        RateLimitService rateLimitService,
         OutboundUrlGuard outboundUrlGuard
     ) {
         this.properties = properties;
         this.userLlmConfigRepository = userLlmConfigRepository;
         this.thirdPartyLlmClient = thirdPartyLlmClient;
-        this.rateLimitService = rateLimitService;
         this.outboundUrlGuard = outboundUrlGuard;
     }
 
@@ -130,10 +121,8 @@ public class LlmController {
     @Transactional
     public ApiResponse<UserLlmConfigResponse> saveUserConfig(
         @RequestAttribute("currentUserId") long currentUserId,
-        @RequestBody UserLlmConfigRequest request,
-        HttpServletRequest httpRequest
+        @RequestBody UserLlmConfigRequest request
     ) {
-        rateLimitService.checkLlmConfigTest(rateIdentity(currentUserId, httpRequest));
         // 如果用户选择停用自定义模型，清除所有激活状态
         if (!request.enabled()) {
             deactivateUserConfigs(currentUserId);
@@ -191,10 +180,8 @@ public class LlmController {
     @PostMapping("/user-config/test")
     public ApiResponse<UserLlmTestResponse> testUserConfig(
         @RequestAttribute("currentUserId") long currentUserId,
-        @RequestBody UserLlmConfigRequest request,
-        HttpServletRequest httpRequest
+        @RequestBody UserLlmConfigRequest request
     ) {
-        rateLimitService.checkLlmConfigTest(rateIdentity(currentUserId, httpRequest));
         // 查找已有配置（如果有的话），用于补充缺失的字段
         UserLlmConfigEntity existing = request.id() == null
             ? userLlmConfigRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(currentUserId).orElse(null)
@@ -368,34 +355,4 @@ public class LlmController {
         return trimmed.isBlank() ? null : trimmed;
     }
 
-    /**
-     * 生成限流标识：userId:clientIp 格式。
-     * 用于限流服务区分不同用户和不同来源 IP 的请求。
-     *
-     * @param currentUserId 用户 ID
-     * @param request       HTTP 请求
-     * @return 限流标识字符串
-     */
-    private String rateIdentity(long currentUserId, HttpServletRequest request) {
-        return currentUserId + ":" + clientIp(request);
-    }
-
-    /**
-     * 获取客户端真实 IP 地址。
-     * 优先从 X-Forwarded-For（反向代理）获取，其次 X-Real-IP，最后使用 remoteAddr。
-     *
-     * @param request HTTP 请求
-     * @return 客户端 IP 地址
-     */
-    private String clientIp(HttpServletRequest request) {
-        String forwardedFor = request.getHeader("X-Forwarded-For");
-        if (forwardedFor != null && !forwardedFor.isBlank()) {
-            return forwardedFor.split(",", 2)[0].trim();
-        }
-        String realIp = request.getHeader("X-Real-IP");
-        if (realIp != null && !realIp.isBlank()) {
-            return realIp.trim();
-        }
-        return request.getRemoteAddr();
-    }
 }
