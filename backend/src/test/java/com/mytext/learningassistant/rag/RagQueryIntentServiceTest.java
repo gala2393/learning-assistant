@@ -71,12 +71,44 @@ class RagQueryIntentServiceTest {
     }
 
     @Test
+    void trimsColloquialChineseQuestionSuffixFromKeywordTerms() {
+        List<String> terms = service.significantQueryTerms("关键词索引呢");
+
+        assertThat(terms).containsExactly("关键词索引");
+        assertThat(service.queryTermCoverage("关键词索引：保留资料中的核心术语，辅助 BM25 检索。", terms)).isEqualTo(1.0);
+    }
+
+    @Test
+    void trimsChineseSituationQuestionSuffixFromKeywordTerms() {
+        List<String> terms = service.significantQueryTerms("关键词索引是什么情况");
+
+        assertThat(terms).containsExactly("关键词索引");
+        assertThat(service.queryTermCoverage("关键词索引：保留资料中的核心术语，辅助 BM25 检索。", terms)).isEqualTo(1.0);
+    }
+
+    @Test
+    void extractsColloquialKeywordLookupAsKeywordQuery() {
+        RagQueryIntentService.KeywordQuery query = service.extractKeywordQuery("关键词索引呢");
+
+        assertThat(query).isNotNull();
+        assertThat(query.intent()).isEqualTo(RagQueryIntentService.KeywordIntent.OCCURRENCE);
+        assertThat(query.terms()).containsExactly("关键词索引");
+    }
+
+    @Test
     void extractsListFieldLookupAsKeywordQuery() {
         RagQueryIntentService.KeywordQuery query = service.extractKeywordQuery("技术栈有哪些");
 
         assertThat(query).isNotNull();
         assertThat(query.intent()).isEqualTo(RagQueryIntentService.KeywordIntent.OCCURRENCE);
         assertThat(query.terms()).containsExactly("技术栈");
+    }
+
+    @Test
+    void putsCleanedKeywordBeforeOriginalQuestionForRetrieval() {
+        List<String> queries = service.retrievalQueries("关键词索引呢");
+
+        assertThat(queries).containsExactly("关键词索引", "关键词索引呢");
     }
 
     @Test

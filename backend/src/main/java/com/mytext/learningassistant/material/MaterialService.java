@@ -1147,10 +1147,16 @@ public class MaterialService {
             throw new BusinessException(404, "Original material file is missing. Please upload this material again.");
         }
 
+        int processedPage = 0;
+        int totalPages = material.getPageCount() == null ? 0 : material.getPageCount();
+        int startPage = totalPages <= 0 ? 0 : 1;
+        int endPage = totalPages;
         material.setParseStatus(MaterialParseStatus.PARSING);
         material.setParseProgressPercent(10);
         material.setParseStage("读取原文件");
         material.setParseMessage("正在准备重新解析");
+        material.setProcessingStage("补齐全文索引");
+        material.setProcessingMessage("正在补齐全文索引：已处理 " + processedPage + " / " + totalPages + " 页，本批处理第 " + startPage + "-" + endPage + " 页");
         learningMaterialRepository.saveAndFlush(material);
 
         ParsedMaterial parsed = parseMaterial(material.getSourceType(), sourcePath, (percent, stage, message) ->
@@ -2002,6 +2008,15 @@ public class MaterialService {
         material.setProcessingProgressPercent(partialLargePdfImport ? 85 : 100);
         material.setProcessingStage(resolveTextExtractionStage(partialLargePdfImport, imagePlaceholderOnly));
         material.setProcessingMessage(resolveTextExtractionMessage(material, parsed, partialLargePdfImport, imagePlaceholderOnly));
+        int startPage = 1;
+        int endPage = material.getTextPageCount() == null ? 0 : material.getTextPageCount();
+        int totalPages = parsed.pageCount() == null ? endPage : parsed.pageCount();
+        material.setProcessingStage(imagePlaceholderOnly ? "图片页已入库" : (endPage >= totalPages ? "全文索引补齐完成" : "补齐全文索引"));
+        material.setProcessingMessage(imagePlaceholderOnly
+            ? "第 " + startPage + "-" + endPage + " 页未识别到可抽取文字，已保留原页图片占位"
+            : endPage >= totalPages
+            ? "全文索引补齐完成：已处理 " + totalPages + " / " + totalPages + " 页，向量索引继续后台同步"
+            : "正在补齐全文索引：已处理 " + endPage + " / " + totalPages + " 页，后续页面继续后台处理");
         learningMaterialRepository.save(material);
 
         saveChunks(material, chunks, false, false);
@@ -3279,6 +3294,7 @@ public class MaterialService {
             material == null ? null : material.getProcessingMessage(),
             material == null ? null : material.getIndexedChunkCount(),
             material == null ? null : material.getTextPageCount(),
+            material == null ? null : material.getPageCount(),
             session.getCreatedAt() == null ? null : session.getCreatedAt().format(DATETIME_FORMATTER),
             session.getUpdatedAt() == null ? null : session.getUpdatedAt().format(DATETIME_FORMATTER)
         );

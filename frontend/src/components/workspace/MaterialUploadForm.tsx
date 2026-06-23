@@ -269,7 +269,7 @@ function progressDetailFor(item: UploadProgressItem) {
   return `${item.stage || '后台解析中'}${item.message ? `：${item.message}` : ''}`
 }
 
-/** 上传阶段轨道：把每个文件的上传、清洗、切片、索引状态直接展示给用户。 */
+/** 上传阶段轨道：直接展示上传、文本处理、OCR 处理和索引处理四条流水线。 */
 function UploadStageRail({ item }: { item: UploadProgressItem }) {
   const stages = uploadStagesFor(item)
   return (
@@ -290,17 +290,26 @@ function UploadStageRail({ item }: { item: UploadProgressItem }) {
 
 type UploadStageState = 'done' | 'active' | 'pending' | 'error'
 
-/** 根据后端阶段文案和进度百分比推断四个阶段的 UI 状态。 */
+/** 优先使用后端流水线状态；旧响应缺字段时再退回阶段文案和进度推断。 */
 function uploadStagesFor(item: UploadProgressItem) {
   const percent = progressPercentFor(item)
   const stageText = `${item.stage || ''} ${item.message || ''}`
   const uploadDone = item.phase === 'processing' || item.status === 'success' || item.uploadedChunks >= item.totalChunks
+  const indexedText = typeof item.indexedChunkCount === 'number' ? `，已索引 ${item.indexedChunkCount} 个片段` : ''
   return [
     { label: '上传', state: stageState(item, uploadDone, item.phase === 'uploading'), detail: `${item.uploadedChunks}/${item.totalChunks} 个分片` },
-    { label: '清洗', state: stageState(item, item.status === 'success' || percent >= 72, item.phase === 'processing' && /提取|解析|清洗|OCR/.test(stageText)), detail: '提取并清洗文本' },
-    { label: '切片', state: stageState(item, item.status === 'success' || percent >= 85, item.phase === 'processing' && /切分|切片|保存/.test(stageText)), detail: '按页、标题和语义生成片段' },
-    { label: '索引', state: stageState(item, item.status === 'success', item.phase === 'processing' && /索引|向量|BM25|同步/.test(stageText)), detail: '构建检索索引' },
+    { label: '文本处理', state: statusStageState(item, item.textStatus, item.phase === 'processing' && /提取|解析|清洗|文本|切分|切片|保存/.test(stageText), item.status === 'success' || percent >= 72), detail: '提取、清洗并切分文本' },
+    { label: 'OCR处理', state: statusStageState(item, item.ocrStatus, item.phase === 'processing' && /OCR|识别|图片页/.test(stageText), item.status === 'success' || percent >= 88), detail: '扫描页或图片页文字识别' },
+    { label: '索引处理', state: statusStageState(item, item.indexStatus, item.phase === 'processing' && /索引|向量|BM25|同步|embedding/.test(stageText), item.status === 'success'), detail: `构建 BM25 与向量检索索引${indexedText}` },
   ]
+}
+
+function statusStageState(item: UploadProgressItem, status: string | null | undefined, activeFallback: boolean, doneFallback: boolean): UploadStageState {
+  const normalized = String(status || '').toUpperCase()
+  if (item.status === 'error' || normalized === 'FAILED') return 'error'
+  if (normalized === 'READY' || normalized === 'UPLOADED' || normalized === 'DISABLED') return 'done'
+  if (normalized === 'RUNNING' || normalized === 'UPLOADING' || normalized === 'PARTIAL') return 'active'
+  return stageState(item, doneFallback, activeFallback)
 }
 
 /** 统一阶段状态判定，失败优先，其次完成、进行中、等待。 */

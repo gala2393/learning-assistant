@@ -1,28 +1,8 @@
 /**
- * ReaderAsk -- 边读边问 AI 问答面板
+ * 阅读器里的“边读边问”面板。
  *
- * 【用途】
- * 在阅读器页面（ReaderPage）的右侧/底部展示 AI 问答功能，
- * 让用户可以针对当前正在阅读的资料片段直接向 AI 提问。
- *
- * 【主要功能】
- * 1. 针对当前资料片段提问：AI 基于 RAG 检索回答
- * 2. 流式回答（SSE）：实时逐字展示 AI 回复，支持暂停输出
- * 3. 推荐问题：首次加载时 AI 根据当前片段生成推荐问题
- * 4. 检索来源查看：回答完成后可查看引用的资料片段，点击跳转
- * 5. 使用额度：显示今日剩余问答次数
- * 6. "在聊天中继续"按钮：跳转到独立聊天页面继续对话
- * 7. 清空对话：清除所有消息和来源
- *
- * 【SSE 流式回答流程】
- * 1. 用户输入问题 -> 创建用户消息 + AI 占位消息（thinking 状态）
- * 2. 调用 reader-ask-session 中的模块级流式任务发起 SSE 连接
- * 3. onStatus: 收到状态更新（如"正在检索"）-> 显示状态文字
- * 4. onChunk: 收到文本片段 -> 累积到缓冲区 -> 逐字更新 UI
- * 5. onSources: 收到检索来源 -> 存入 sourcesRef
- * 6. onDone: 流式完成 -> 最终设置完整回答和来源
- * 7. onError: 出错 -> 显示错误信息
- * 8. 完成后刷新使用额度缓存
+ * 面板状态托管在 reader-ask-session 的模块级 store 中。这样用户切换路由或阅读页重渲染时，
+ * 正在进行的 SSE 流式回答不会被组件卸载打断，重新进入页面也能恢复同一段问答。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -54,17 +34,6 @@ import type { HistoryItem, Material, MaterialChunk, RagSource } from '@/types'
 /** 边读边问的单次直接输入上限，与主聊天和后端 ChatRequest 保持一致。 */
 const READER_ASK_INPUT_MAX_CHARS = 6000
 
-/**
- * ReaderAsk 组件属性
- *
- * @property material - 当前选中的资料对象
- * @property chunk - 当前正在阅读的片段
- * @property chunks - 所有片段列表（用于来源跳转时定位片段索引）
- * @property currentPageNo - 当前页码（用于问答上下文）
- * @property currentPageChunkIds - 当前页包含的片段 ID 列表（用于限定 RAG 检索范围）
- * @property onNavigateToChunk - 跳转到指定片段的回调（点击来源卡片时触发）
- * @property className - 额外的 CSS 类名
- */
 interface ReaderAskProps {
   material: Material | null
   chunk: MaterialChunk | null
@@ -75,11 +44,7 @@ interface ReaderAskProps {
   className?: string
 }
 
-/**
- * buildContextLabel -- 构建上下文标签文字
- * 用于在问答面板顶部显示当前上下文信息
- * 例如："当前页 P3"
- */
+/** 构建面板顶部的当前阅读位置提示。 */
 function buildContextLabel(currentPageNo?: number | null) {
   const labels: string[] = []
   if (typeof currentPageNo === 'number' && currentPageNo > 0) labels.push(`当前页 P${currentPageNo}`)
@@ -99,15 +64,8 @@ export function ReaderAsk({
   const { isAuthenticated } = useAuth()
   const { showToast } = useToast()
 
-  // === Refs ===
-  /** 输入框引用（用于聚焦控制） */
   const questionRef = useRef<HTMLTextAreaElement>(null)
 
-  /**
-   * 边读边问核心状态来自模块级 store。
-   * 普通路由切换会卸载 ReaderAsk，但 store 不会销毁，因此 SSE 会继续接收并更新消息；
-   * 重新进入阅读页后，这里会重新订阅并恢复同一份会话快照。
-   */
   const askSession = useSyncExternalStore(
     subscribeReaderAsk,
     getReaderAskSnapshot,
@@ -166,6 +124,14 @@ export function ReaderAsk({
     [currentPageNo],
   )
   /** 片段 ID -> 片段索引的映射（用于点击来源时跳转） */
+  const threadMessages = useMemo(
+    () => messages.map((msg) => ({
+      ...msg,
+      sources: msg.role === 'assistant' ? sourcesByMessageId[msg.id] || msg.sources : msg.sources,
+      error: msg.role === 'assistant' ? errorByMessageId[msg.id] || msg.error : msg.error,
+    })),
+    [errorByMessageId, messages, sourcesByMessageId],
+  )
   const chunkIndexById = useMemo(() => buildChunkIndexById(chunks || []), [chunks])
 
   // === 副作用 ===
@@ -364,15 +330,7 @@ export function ReaderAsk({
 
       {/* ---- 对话消息流（复用 ChatThread 组件） ---- */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        <ChatThread
-          messages={messages.map((msg) => ({
-            ...msg,
-            // 将状态中的来源和错误合并到消息对象中
-            sources: msg.role === 'assistant' ? sourcesByMessageId[msg.id] || msg.sources : msg.sources,
-            error: msg.role === 'assistant' ? errorByMessageId[msg.id] || msg.error : msg.error,
-          }))}
-          onOpenSource={openSource}
-        />
+        <ChatThread messages={threadMessages} onOpenSource={openSource} />
       </div>
 
       {/* ---- 推荐问题（仅在无对话记录时显示） ---- */}

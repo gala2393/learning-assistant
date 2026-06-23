@@ -55,6 +55,7 @@ public record MaterialUploadSessionResponse(
     String processingMessage,
     Integer indexedChunkCount,
     Integer textPageCount,
+    Integer pageCount,
     String createdAt,
     String updatedAt
 ) {

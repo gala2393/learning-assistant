@@ -12,27 +12,13 @@ import { ImagePreviewDialog, type PreviewImage } from './ImagePreviewDialog'
 import { TemporaryMaterialPreviewDialog } from './TemporaryMaterialPreviewDialog'
 
 /**
- * ChatThread -- 聊天消息列表组件
+ * 聊天消息流组件，复用于主聊天页和阅读器右侧“边读边问”面板。
  *
- * 【用途】
- * 展示用户和 AI 之间的完整对话消息流。
- * 在 ChatPage（聊天主页）和 ReaderAsk（阅读器问答面板）中复用。
- *
- * 【主要功能】
- * 1. 用户消息：右侧对齐，显示用户头像，支持图片缩略图
- * 2. AI 回答：左侧对齐，支持富文本渲染（标题、列表、表格、代码块、段落）
- * 3. "思考中"动画：三个跳动的青色圆点
- * 4. 错误状态：红色边框 + 错误图标
- * 5. 图片消息：用户上传的图片以缩略图网格展示，点击可放大
- * 6. 来源引用卡片（RetrievalTrace）：展示 RAG 检索到的资料片段
- * 7. 自动滚动到底部：新消息到达时自动滚动
- *
- * 【AI 回答渲染流程】
- * 文本 -> sanitizeAiText 清理 -> parseAssistantBlocks 解析为结构化块 -> AssistantContent 渲染
- * 支持的 Markdown 子集：# 标题、有序/无序列表、表格、代码块（```）、分隔线（---）、段落
+ * 这里负责三件事：
+ * 1. 渲染用户消息、AI 富文本回答、临时资料和图片预览；
+ * 2. 展示 RAG 来源与检索诊断；
+ * 3. 管理流式输出期间的自动滚动，避免用户上滑查看历史时被新 token 拉回底部。
  */
-
-// ========== 类型定义 ==========
 
 /**
  * 单条聊天消息的数据结构
@@ -62,19 +48,13 @@ export interface ChatMessage {
   continuationHint?: string | null
 }
 
-/** ChatThread 组件属性 */
 interface ChatThreadProps {
-  messages: ChatMessage[]                 // 消息列表
-  onOpenSource?: (source: RagSource) => void  // 点击来源卡片的回调（跳转到阅读器对应片段）
-  onContinueGeneration?: () => void        // 点击继续生成按钮的回调
+  messages: ChatMessage[]
+  onOpenSource?: (source: RagSource) => void
+  onContinueGeneration?: () => void
 }
 
-// ========== 思考中动画 ==========
-
-/**
- * ThinkingDots -- 思考中动画组件
- * 三个跳动的青色圆点，依次延迟 0.2s，循环播放
- */
+/** AI 正在生成时的轻量加载动画。 */
 function ThinkingDots() {
   return (
     <div className="flex items-center gap-1 py-1">
@@ -87,12 +67,7 @@ function ThinkingDots() {
   )
 }
 
-// ========== 内联文本格式化 ==========
-
-/**
- * InlineFormattedText -- 将 **加粗** 标记转为 <strong> 标签
- * 用正则按 **...** 分割文本，加粗部分用 <strong> 包裹
- */
+/** 支持 AI 回答里的简单加粗语法，不引入完整 Markdown 渲染器。 */
 function InlineFormattedText({ text }: { text: string }) {
   const parts = text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean)
   return <>{parts.map((part, i) =>
@@ -102,12 +77,7 @@ function InlineFormattedText({ text }: { text: string }) {
   )}</>
 }
 
-// ========== AI 回答的富文本解析 ==========
-
-/**
- * AI 回答内容块类型
- * 将原始文本解析为以下结构化块之一：
- */
+/** AI 回答被解析后的最小展示块。 */
 type AssistantBlock =
   | { type: 'hr' }                                               // 分隔线（---、***、___）
   | { type: 'heading'; level: number; content: string }         // 标题（#/##/###）
@@ -475,12 +445,16 @@ export function ChatThread({ messages, onOpenSource, onContinueGeneration }: Cha
   const bottomRef = useRef<HTMLDivElement>(null)
   /** 记录用户是否仍在底部附近；离开底部后，流式内容继续生成但不再打断阅读。 */
   const shouldAutoScrollRef = useRef(true)
+  const userScrollLockedRef = useRef(false)
+  const touchStartYRef = useRef<number | null>(null)
   /** 控制“回到底部”按钮显隐；高频 token 更新时不依赖它判断是否滚动，避免状态滞后。 */
   const [showJumpToBottom, setShowJumpToBottom] = useState(false)
   /** 图片预览弹窗状态 */
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null)
   /** 临时资料预览弹窗状态 */
   const [previewMaterial, setPreviewMaterial] = useState<TemporaryMaterial | null>(null)
+  /** 记录已经播放过入场动画的消息，避免流式 token 更新时旧消息反复闪烁。 */
+  const animatedMessageIdsRef = useRef<Set<string>>(new Set())
 
   /**
    * 判断视口是否接近底部。
@@ -500,13 +474,47 @@ export function ChatThread({ messages, onOpenSource, onContinueGeneration }: Cha
 
     const syncAutoScrollState = () => {
       const nearBottom = isNearBottom(viewport)
-      shouldAutoScrollRef.current = nearBottom
+      if (nearBottom) {
+        userScrollLockedRef.current = false
+      }
+      shouldAutoScrollRef.current = nearBottom && !userScrollLockedRef.current
       setShowJumpToBottom(!nearBottom)
+    }
+
+    const lockAutoScrollOnUserScrollUp = (event: WheelEvent) => {
+      if (event.deltaY < 0) {
+        userScrollLockedRef.current = true
+        shouldAutoScrollRef.current = false
+        setShowJumpToBottom(true)
+      }
+    }
+
+    const rememberTouchStart = (event: TouchEvent) => {
+      touchStartYRef.current = event.touches[0]?.clientY ?? null
+    }
+
+    const lockAutoScrollOnTouchMove = (event: TouchEvent) => {
+      const startY = touchStartYRef.current
+      const currentY = event.touches[0]?.clientY
+      if (startY == null || currentY == null) return
+      if (currentY > startY + 8) {
+        userScrollLockedRef.current = true
+        shouldAutoScrollRef.current = false
+        setShowJumpToBottom(true)
+      }
     }
 
     syncAutoScrollState()
     viewport.addEventListener('scroll', syncAutoScrollState, { passive: true })
-    return () => viewport.removeEventListener('scroll', syncAutoScrollState)
+    viewport.addEventListener('wheel', lockAutoScrollOnUserScrollUp, { passive: true })
+    viewport.addEventListener('touchstart', rememberTouchStart, { passive: true })
+    viewport.addEventListener('touchmove', lockAutoScrollOnTouchMove, { passive: true })
+    return () => {
+      viewport.removeEventListener('scroll', syncAutoScrollState)
+      viewport.removeEventListener('wheel', lockAutoScrollOnUserScrollUp)
+      viewport.removeEventListener('touchstart', rememberTouchStart)
+      viewport.removeEventListener('touchmove', lockAutoScrollOnTouchMove)
+    }
   }, [])
 
   /**
@@ -515,13 +523,24 @@ export function ChatThread({ messages, onOpenSource, onContinueGeneration }: Cha
    */
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return
+    const viewport = viewportRef.current
+    if (viewport) {
+      viewport.scrollTo({ top: viewport.scrollHeight })
+      return
+    }
     bottomRef.current?.scrollIntoView({ block: 'end' })
   }, [messages])
 
   /** 用户主动点击后恢复自动跟随，并立即定位到最新回答。 */
   const jumpToBottom = () => {
+    userScrollLockedRef.current = false
     shouldAutoScrollRef.current = true
     setShowJumpToBottom(false)
+    const viewport = viewportRef.current
+    if (viewport) {
+      viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
+      return
+    }
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }
 
@@ -535,6 +554,8 @@ export function ChatThread({ messages, onOpenSource, onContinueGeneration }: Cha
         <div className="mx-auto max-w-5xl space-y-5 py-3 md:space-y-7 md:py-6">
           {/* 遍历所有消息 */}
           {messages.map((msg, index) => {
+            const shouldPlayEnterAnimation = !animatedMessageIdsRef.current.has(msg.id)
+            animatedMessageIdsRef.current.add(msg.id)
             const canContinueGeneration = msg.role === 'assistant'
               && index === messages.length - 1
               && !msg.thinking
@@ -542,7 +563,11 @@ export function ChatThread({ messages, onOpenSource, onContinueGeneration }: Cha
               && Boolean(onContinueGeneration)
               && Boolean(msg.continuable || hasContinuationNotice(msg.text))
             return (
-            <motion.div key={msg.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}
+            <motion.div
+              key={msg.id}
+              initial={shouldPlayEnterAnimation ? { opacity: 0, y: 8 } : false}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
               className={cn('flex gap-2 md:gap-3', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
               <div className={cn('min-w-0', msg.role === 'user' ? 'max-w-[88%] md:max-w-[75%]' : 'w-full max-w-[940px]')}>
                 {msg.role === 'user' ? (

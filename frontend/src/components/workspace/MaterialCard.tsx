@@ -101,11 +101,23 @@ export function MaterialCard({
     material.processingProgressPercent ?? material.parseProgressPercent ?? (isProcessing ? 0 : 100)
   )))
   const fullTextBackfill = getFullTextBackfillStatus(material)
-  const stageText = fullTextBackfill?.title || material.processingStage || material.parseStage || '后台处理中'
+  const fallbackStageText = material.parseStatus === 'SUCCESS' || material.parseStatus === 'PARSED'
+    ? '处理完成'
+    : '后台处理中'
+  const stageText = fullTextBackfill?.title || material.processingStage || material.parseStage || fallbackStageText
   const messageText = fullTextBackfill?.message || material.processingMessage || material.parseMessage
   const ocrInProgress = ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.ocrStatus || '').toUpperCase())
   const displayPercent = fullTextBackfill?.percent ?? parsePercent
-  const pipelineVisible = isProcessing
+  const hasPipelineStatus = Boolean(
+    material.uploadStatus
+      || material.textStatus
+      || material.indexStatus
+      || material.ocrStatus
+      || material.indexedChunkCount != null
+      || material.textPageCount != null,
+  )
+  const pipelineVisible = hasPipelineStatus
+    || isProcessing
     || parsePercent < 100
     || !!fullTextBackfill
     || ['PENDING', 'RUNNING', 'PARTIAL'].includes(String(material.textStatus || ''))
@@ -117,8 +129,8 @@ export function MaterialCard({
     : material.pageCount && material.textPageCount != null
     ? (ocrInProgress ? `页面 ${material.pageCount} 页` : `已处理 ${material.textPageCount}/${material.pageCount} 页`)
     : null
-  const indexedText = material.indexedChunkCount != null ? `${material.indexedChunkCount} 片段` : null
-  const detailText = [messageText, pageProgressLabel, indexedText ? `已索引 ${indexedText}` : null]
+  const indexedText = material.indexedChunkCount != null ? `${material.indexedChunkCount} 个片段` : null
+  const detailText = [messageText, pageProgressLabel, indexedText ? `索引处理 ${indexedText}` : null]
     .filter(Boolean)
     .join(' / ')
 
@@ -174,9 +186,9 @@ export function MaterialCard({
             </div>
             <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
               <PipelineBadge label="上传" status={material.uploadStatus} />
-              <PipelineBadge label="文本" status={material.textStatus} />
-              <PipelineBadge label="OCR" status={material.ocrStatus} />
-              <PipelineBadge label="索引" status={material.indexStatus} />
+              <PipelineBadge label="文本处理" status={material.textStatus} />
+              <PipelineBadge label="OCR处理" status={material.ocrStatus} />
+              <PipelineBadge label="索引处理" status={material.indexStatus} />
             </div>
             {detailText && (
               <p className="mt-1.5 line-clamp-1 text-[11px] text-slate-500 dark:text-slate-400">

@@ -524,6 +524,7 @@ public class UploadSessionService {
             material == null ? null : material.getProcessingMessage(),
             material == null ? null : material.getIndexedChunkCount(),
             material == null ? null : material.getTextPageCount(),
+            material == null ? null : material.getPageCount(),
             session.getCreatedAt() == null ? null : session.getCreatedAt().format(DATETIME_FORMATTER),
             session.getUpdatedAt() == null ? null : session.getUpdatedAt().format(DATETIME_FORMATTER)
         );

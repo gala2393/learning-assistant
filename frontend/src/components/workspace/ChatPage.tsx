@@ -451,6 +451,11 @@ export function ChatPage() {
             totalChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
             stage: session.processingStage || session.parseStage || '资料已可用',
             message: session.processingMessage || session.parseMessage || '资料已可用于阅读和问答，后台增强任务可能仍在继续',
+            uploadStatus: session.uploadStatus,
+            textStatus: session.textStatus,
+            indexStatus: session.indexStatus,
+            ocrStatus: session.ocrStatus,
+            indexedChunkCount: session.indexedChunkCount,
           }, 'success'))
           return session
         }).catch((error) => {
@@ -1364,6 +1369,11 @@ function createUploadProgressItems(files: File[]): UploadProgressItem[] {
     uploadedChunks: 0,
     totalChunks: Math.max(1, Math.ceil(file.size / LARGE_UPLOAD_CHUNK_SIZE)),
     message: '等待上传',
+    uploadStatus: 'UPLOADING',
+    textStatus: 'PENDING',
+    indexStatus: 'PENDING',
+    ocrStatus: 'PENDING',
+    indexedChunkCount: 0,
   }))
 }
 

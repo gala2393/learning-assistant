@@ -56,6 +56,7 @@ export interface UploadSession {
   processingMessage?: string | null
   indexedChunkCount?: number | null
   textPageCount?: number | null
+  pageCount?: number | null
   createdAt: string
   updatedAt: string
 }
@@ -69,6 +70,11 @@ export interface UploadProgress {
   uploadedChunkIndexes?: number[] | null
   stage?: string | null               // 解析阶段描述
   message?: string | null             // 附加信息
+  uploadStatus?: string | null
+  textStatus?: string | null
+  indexStatus?: string | null
+  ocrStatus?: string | null
+  indexedChunkCount?: number | null
 }
 
 export interface UploadProgressItem extends UploadProgress {
@@ -266,6 +272,11 @@ export async function uploadMaterialInChunks(
     uploadedChunkIndexes: Array.from(uploadedIndexes),
     stage: session.status === 'SUCCESS' ? session.processingStage || session.parseStage || '处理完成' : undefined,
     message: session.status === 'SUCCESS' ? session.processingMessage || session.parseMessage || '资料已经可以使用' : undefined,
+    uploadStatus: session.uploadStatus,
+    textStatus: session.textStatus,
+    indexStatus: session.indexStatus,
+    ocrStatus: session.ocrStatus,
+    indexedChunkCount: session.indexedChunkCount,
   })
   await runWithConcurrency(pendingIndexes, CHUNK_UPLOAD_CONCURRENCY, async (index) => {
     const start = index * chunkSize
@@ -282,6 +293,7 @@ export async function uploadMaterialInChunks(
       uploadedChunks: completedChunks,
       totalChunks,
       uploadedChunkIndexes: Array.from(uploadedIndexes),
+      uploadStatus: 'UPLOADING',
     })
   })
   const completedSession = await getUploadSession(sessionId)
@@ -326,6 +338,11 @@ async function waitForUploadProcessing(sessionId: string, totalChunks: number, o
         totalChunks,
         stage: session.processingStage || session.parseStage || '资料已可用',
         message: session.processingMessage || session.parseMessage || '资料已可用于阅读和问答，后台增强任务可能仍在继续',
+        uploadStatus: session.uploadStatus,
+        textStatus: session.textStatus,
+        indexStatus: session.indexStatus,
+        ocrStatus: session.ocrStatus,
+        indexedChunkCount: session.indexedChunkCount,
       })
       return session
     }
@@ -337,6 +354,11 @@ async function waitForUploadProcessing(sessionId: string, totalChunks: number, o
       totalChunks,
       stage: session.processingStage || session.parseStage || '后台处理中',
       message: session.processingMessage || session.parseMessage,
+      uploadStatus: session.uploadStatus,
+      textStatus: session.textStatus,
+      indexStatus: session.indexStatus,
+      ocrStatus: session.ocrStatus,
+      indexedChunkCount: session.indexedChunkCount,
     })
     await sleep(PROCESSING_POLL_INTERVAL_MS)
   }
